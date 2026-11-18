@@ -174,6 +174,9 @@ pub fn set(item: &mut Item, t: &str, v: Option<&Value>) -> Result<()> {
     Ok(())
 }
 
+/// Where a BOM row puts its child: (parent, child key, find number).
+type Place = (Id, String, Option<String>);
+
 /// What a run decided, to report.
 #[derive(Default)]
 struct Tally {
@@ -186,8 +189,9 @@ struct Tally {
     lines_added: Vec<Value>,
     lines_changed: Vec<Value>,
     lines_unchanged: usize,
-    /// The lines this run placed: (parent, child key, find).
-    placed: BTreeSet<(Id, String, Option<String>)>,
+    /// The lines this run placed, (parent, child key, find), with the
+    /// quantity and designators of the row that placed each.
+    placed: BTreeMap<Place, (String, Option<String>)>,
 }
 
 /// What the three-way rule (Decision 7) makes of one value: `Take` sets
@@ -316,6 +320,15 @@ pub fn plan(
             prov.insert(id.clone(), p);
         }
     }
+    // The items this import hasn't touched, by current number in ID order:
+    // what a new key may adopt (Decision 9), looked up once per row rather
+    // than by a scan of the catalogue.
+    let mut untouched: BTreeMap<&str, Vec<&Id>> = BTreeMap::new();
+    for (id, item) in &cat.items {
+        if !item.source.contains_key(name) {
+            untouched.entry(item.number.as_str()).or_default().push(id);
+        }
+    }
     let mut work: BTreeMap<Id, Item> = BTreeMap::new();
     let mut t = Tally::default();
     let mut seen: BTreeSet<String> = BTreeSet::new();
@@ -362,13 +375,10 @@ pub fn plan(
         // its number (Decision 9), or make one.
         let number = r.values.get("number").and_then(Value::as_str);
         let adopt = match (&m.numbers, number) {
-            (Numbers::Keep, Some(n)) => cat
-                .items
-                .iter()
-                .find(|(i, it)| {
-                    it.number == n && !it.source.contains_key(name) && !work.contains_key(*i)
-                })
-                .map(|(i, _)| i.clone()),
+            (Numbers::Keep, Some(n)) => untouched
+                .get(n)
+                .and_then(|ids| ids.iter().find(|i| !work.contains_key(**i)))
+                .map(|i| (*i).clone()),
             _ => None,
         };
         let (id, mut item, stored) = match adopt {
@@ -537,7 +547,15 @@ fn lines(
             .clone()
             .expect("a line's quantity is required when read");
         let place = (parent.clone(), r.record.key.clone(), r.record.find.clone());
-        if !t.placed.insert(place) {
+        let placed_as = (quantity.clone(), r.record.refdes.clone());
+        if let Some(before) = t.placed.get(&place) {
+            // An indented BOM lists a subassembly's children again under
+            // each place the subassembly is used: the same line, met again.
+            // A parent/child BOM lists each line once, so there a repeat is
+            // refused, as is a repeat that says something else.
+            if b.level.is_some() && *before == placed_as {
+                continue;
+            }
             refusals.push(super::rows::Refusal::at(
                 r.record.at,
                 None,
@@ -548,6 +566,7 @@ fn lines(
             ));
             continue;
         }
+        t.placed.insert(place, placed_as);
         let mut item = work
             .remove(&parent)
             .unwrap_or_else(|| cat.items[&parent].clone());
@@ -679,7 +698,7 @@ fn missing(
         for l in &p.lines {
             if !t
                 .placed
-                .contains(&(id.clone(), l.child.clone(), l.find.clone()))
+                .contains_key(&(id.clone(), l.child.clone(), l.find.clone()))
             {
                 t.missing.push(
                     Fault::warning(
@@ -1159,5 +1178,126 @@ pub(crate) mod tests {
             )
         });
         assert_eq!(e.err().map(|e| e.code), Some(Code::InvalidDocument));
+    }
+
+    fn indented() -> Mapping {
+        Mapping::from_json("ind", &json!({"format": 1, "kind": "ryuplm.import", "reader": {"type": "csv"}, "key": "PN",
+            "fields": {"number": {"from": "PN"}}, "bom": {"level": "Lvl", "quantity": "Qty", "find": "Find"}})).unwrap()
+    }
+
+    #[test]
+    fn an_indented_bom_may_use_a_subassembly_twice() {
+        // A is used at the top and inside B; each place lists A's child again.
+        let csv = "Lvl,PN,Qty,Find\n0,TOP,,\n1,A,1,10\n2,A1,2,10\n1,B,1,20\n2,A,1,10\n3,A1,2,10\n";
+        let (_, out) = planned(&files(&[]), &indented(), csv, None);
+        let lines = |n: &str| {
+            out.items
+                .values()
+                .find(|i| i.number == n)
+                .unwrap()
+                .bom
+                .len()
+        };
+        assert_eq!((lines("TOP"), lines("A"), lines("B")), (2, 1, 1));
+        assert_eq!(out.report["lines"]["added"]["count"], 4);
+        // The same place with another quantity is still refused.
+        let f = files(&[]);
+        let cat = Catalogue::load(&f).unwrap();
+        let config = Config::read_in(&f, "ryuplm").unwrap();
+        let bad = csv.replace("3,A1,2,10", "3,A1,5,10");
+        let e = plan(
+            &f,
+            &cat,
+            &config,
+            &indented(),
+            &rows(&indented(), &bad),
+            None,
+            100,
+        )
+        .err()
+        .map(|e| e.code);
+        assert_eq!(e, Some(Code::InvalidDocument));
+    }
+
+    #[test]
+    fn items_sharing_a_number_are_adopted_in_id_order() {
+        let a = Item::new("100-0001");
+        let b = Item::new("100-0001");
+        let csv = "ID,PN,Desc,Thread,Kind,Old\n1,100-0001,Screw,,S,\n2,100-0001,Screw,,S,\n3,100-0001,Screw,,S,\n";
+        let (_, out) = planned(
+            &files(&[("0000000000002", b), ("0000000000001", a)]),
+            &master(),
+            csv,
+            None,
+        );
+        let adopted: Vec<&str> = out.report["adopted"]["first"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v["item"].as_str().unwrap())
+            .collect();
+        assert_eq!(adopted, ["0000000000001", "0000000000002"]);
+        assert_eq!(
+            out.report["created"]["count"], 1,
+            "the third has none left to adopt"
+        );
+    }
+
+    #[test]
+    fn an_empty_number_is_refused_by_check_and_run() {
+        let (_d, root) = crate::server::tests::catalogue();
+        std::fs::create_dir_all(root.join("imports")).unwrap();
+        std::fs::write(root.join("imports/erp.json"), master().to_text()).unwrap();
+        for c in ["fastener", "machined"] {
+            crate::server::tests::ask(
+                &root,
+                crate::proto::Request::SettingsEdit {
+                    change: serde_json::from_value(json!({"class": c})).unwrap(),
+                    expected_revision: None,
+                },
+            )
+            .unwrap();
+        }
+        crate::server::tests::ask(
+            &root,
+            crate::proto::Request::SettingsEdit {
+                change: serde_json::from_value(
+                    json!({"property": "thread", "declaration": {"type": "string"}}),
+                )
+                .unwrap(),
+                expected_revision: None,
+            },
+        )
+        .unwrap();
+        let src = root.join("items.csv");
+        std::fs::write(&src, "ID,PN,Desc,Thread,Kind,Old\n1,,Screw,M3,S,a\n").unwrap();
+        let file = src.display().to_string();
+        let e = crate::server::tests::ask(
+            &root,
+            crate::proto::Request::ImportCheck {
+                name: "erp".into(),
+                file: file.clone(),
+                limit: None,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::CheckFailed);
+        assert_eq!(
+            e.details["report"]["refusals"],
+            json!([{"row": 2, "column": "PN", "message": "the part number is empty"}])
+        );
+        let e = crate::server::tests::ask(
+            &root,
+            crate::proto::Request::ImportRun {
+                name: "erp".into(),
+                file,
+                dry_run: false,
+                prefer: None,
+                limit: None,
+                expected_revision: None,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::InvalidDocument, "{e:?}");
     }
 }

@@ -153,6 +153,9 @@ fn sync_filesystem(root: &std::path::Path) {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
+fn sync_filesystem(_: &std::path::Path) {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,6 +183,3 @@ mod tests {
         );
     }
 }
-
-#[cfg(not(target_os = "linux"))]
-fn sync_filesystem(_: &std::path::Path) {}

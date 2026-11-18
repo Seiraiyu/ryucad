@@ -221,54 +221,58 @@ pub fn answer(session: &mut Session, ask: &Ask) -> Result<Value> {
     }
     let others = crate::numbers::others(session.root(), &folders);
     let mut searched = Vec::new();
-    // Each other checkout opened and searched on its own thread (design
-    // 734's bar: ten checkouts of 10,000 items in a second); the answer
-    // keeps the folders' order.
-    let results: Vec<Searched> = std::thread::scope(|s| {
-        let handles: Vec<_> = others
-            .iter()
-            .map(|dir| {
-                let (t, folders, working_only) = (&t, &folders, ask.working);
-                s.spawn(move || {
-                    let shown = dir.display().to_string();
-                    let mut problems = Vec::new();
-                    let mut sess = match Session::open(dir) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            return (
-                                shown.clone(),
-                                Err(json!(e.with("folder", &shown))),
-                                problems,
-                            );
+    // Other checkouts opened and searched on threads, eight at a time so
+    // at most eight catalogues are held at once (design 734's bar: ten
+    // checkouts of 10,000 items in a second); the answer keeps the
+    // folders' order.
+    let mut results: Vec<Searched> = Vec::with_capacity(others.len());
+    for wave in others.chunks(8) {
+        results.extend(std::thread::scope(|s| {
+            let handles: Vec<_> = wave
+                .iter()
+                .map(|dir| {
+                    let (t, folders, working_only) = (&t, &folders, ask.working);
+                    s.spawn(move || {
+                        let shown = dir.display().to_string();
+                        let mut problems = Vec::new();
+                        let mut sess = match Session::open(dir) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                return (
+                                    shown.clone(),
+                                    Err(json!(e.with("folder", &shown))),
+                                    problems,
+                                );
+                            }
+                        };
+                        let c = sess.catalogue().clone();
+                        if c.manifest.project == t.catalogue {
+                            return (shown, Ok((None, Vec::new(), Vec::new())), problems);
                         }
-                    };
-                    let c = sess.catalogue().clone();
-                    if c.manifest.project == t.catalogue {
-                        return (shown, Ok((None, Vec::new(), Vec::new())), problems);
-                    }
-                    let mut r = crate::reps::Disk::new(
-                        crate::reps::Index::scan(&crate::reps::tops(dir, folders)),
-                        dir,
-                    );
-                    let w = rows_in(&c, t, &mut r, &At::Working, &mut problems);
-                    let rel = if working_only {
-                        Vec::new()
-                    } else {
-                        released_rows(&mut sess, t, &mut r, &mut problems, &shown)
-                    };
-                    (
-                        shown,
-                        Ok((Some(c.manifest.project.clone()), w, rel)),
-                        problems,
-                    )
+                        let mut r = crate::reps::Disk::new(
+                            crate::reps::Index::scan(&crate::reps::tops(dir, folders)),
+                            dir,
+                        );
+                        let w = rows_in(&c, t, &mut r, &At::Working, &mut problems);
+                        let rel = if working_only {
+                            Vec::new()
+                        } else {
+                            released_rows(&mut sess, t, &mut r, &mut problems, &shown)
+                        };
+                        (
+                            shown,
+                            Ok((Some(c.manifest.project.clone()), w, rel)),
+                            problems,
+                        )
+                    })
                 })
-            })
-            .collect();
-        handles
-            .into_iter()
-            .map(|h| h.join().expect("a where-used thread doesn't panic"))
-            .collect()
-    });
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("a where-used thread doesn't panic"))
+                .collect::<Vec<Searched>>()
+        }));
+    }
     for (shown, r, mut p) in results {
         problems.append(&mut p);
         match r {

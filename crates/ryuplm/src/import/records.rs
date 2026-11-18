@@ -2,7 +2,7 @@
 //! by target, its class, the cells nothing maps (kept in `extra`), and for
 //! a BOM its parent, quantity and find number.
 
-use super::mapping::{Mapping, Target, target};
+use super::mapping::{Mapping, Numbers, Target, target};
 use super::rows::{Record, Refusal, Table};
 use crate::error::{Code, Error, Result};
 use crate::units::Unit;
@@ -160,6 +160,16 @@ pub fn map(
         }
         if !list.is_empty() {
             values.insert("aml".into(), Value::Array(list));
+        }
+        // `numbers: keep` writes the number as mapped, so a row without one
+        // is refused here, where `import check` sees it too.
+        if ok
+            && m.numbers == Numbers::Keep
+            && !values.contains_key("number")
+            && let Some(f) = m.fields.get("number")
+        {
+            refuse(Some(f.from.as_str()), "the part number is empty".into());
+            ok = false;
         }
         if let Some(r) = m
             .class
@@ -408,5 +418,31 @@ mod tests {
         );
         assert_eq!(depth("1.2.3"), Some(3));
         assert_eq!(depth("1..2"), None);
+    }
+
+    #[test]
+    fn an_empty_number_is_refused_when_numbers_are_kept() {
+        let m = mapping(
+            json!({"format": 1, "kind": "ryuplm.import", "reader": {"type": "csv"}, "key": "ID",
+            "fields": {"number": {"from": "PN", "trim": true}, "description": {"from": "Desc"}}}),
+        );
+        let t = table(&[
+            &["ID", "PN", "Desc"],
+            &["1", "  ", "Screw"],
+            &["2", "A-2", "Plate"],
+        ]);
+        let (rows, refusals) = map(&t, &m, &config(), Unit::Mm).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            refusals,
+            vec![Refusal::at(2, Some("PN"), "the part number is empty")]
+        );
+        // Assigned numbers need no column.
+        let a = mapping(
+            json!({"format": 1, "kind": "ryuplm.import", "reader": {"type": "csv"}, "key": "ID",
+            "fields": {"description": {"from": "Desc"}}, "numbers": "assign"}),
+        );
+        let (rows, refusals) = map(&t, &a, &config(), Unit::Mm).unwrap();
+        assert_eq!((rows.len(), refusals.len()), (2, 0));
     }
 }
