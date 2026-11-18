@@ -33,13 +33,9 @@ pub fn catalogue(seed: &str, n: usize) -> BTreeMap<String, Vec<u8>> {
         "ryupdm.json".to_owned(),
         crate::canonical::to_string(&config).into_bytes(),
     );
-    let mut ids = Vec::new();
+    let mut seeded = crate::ids::Seeded::new(seed);
     for k in 0..n {
-        let id = crate::ids::random_from(Some(seed), |s| {
-            ids.iter().any(|i: &crate::id::Id| i.as_str() == s)
-        })
-        .unwrap();
-        ids.push(id.clone());
+        let id = seeded.next().expect("IDs never run out");
         let class = ["fastener", "machined", "label"][k % 3];
         let number = match k % 7 {
             0 => format!("MECH-{:05}", k),
@@ -208,10 +204,9 @@ pub fn import_source(
         "ryupdm.json".to_owned(),
         crate::canonical::to_string(&config).into_bytes(),
     );
-    let mut ids = std::collections::BTreeSet::new();
+    let mut seeded = crate::ids::Seeded::new(seed);
     for k in (0..n).filter(|k| k % 3 == 1) {
-        let id = crate::ids::random_from(Some(seed), |s| ids.contains(s)).unwrap();
-        ids.insert(id.as_str().to_owned());
+        let id = seeded.next().expect("IDs never run out");
         let mut item = Item::new(&format!("P-{k:05}"));
         item.description = Some(if k % 2 == 0 {
             format!("Hand {k}")

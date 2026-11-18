@@ -79,7 +79,11 @@ fn guarded<T>(
 ) -> Result<T> {
     let session = match slot {
         Some(s) => s,
-        None => slot.insert(Session::open(root)?),
+        None => {
+            let s = slot.insert(Session::open(root)?);
+            s.opened_now();
+            s
+        }
     };
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(session))) {
         Ok(r) => r,

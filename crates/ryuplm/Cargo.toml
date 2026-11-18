@@ -48,6 +48,11 @@ assert_cmd = "2"
 ryuplm = { path = ".", default-features = false, features = ["testing"] }
 tempfile = "3"
 
+# One `syncfs` after a large write (`write::write_all`); already in the
+# build through ryu-session.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
 # musl's allocator is slow under multithreaded allocation, as for ryucad,
 # ryueda and ryudfm.
 [target.'cfg(target_env = "musl")'.dependencies]

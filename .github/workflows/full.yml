@@ -209,6 +209,10 @@ jobs:
       # (#533): its bytes held, counted over a 1,000-part project.
       - run: cargo test -p ryucad --features bench --release --test answer_peak -- --nocapture
       - run: cargo test -p ryueda --release --test bar -- --nocapture
+      # Design 734's bars: 100,000 items loaded, checked, imported and
+      # imported again, and where-used over ten checkouts (ten times looser
+      # without RYUPLM_BARS).
+      - run: cargo test -p ryuplm --release --test bar -- --nocapture
       - run: cargo test -p ryusch --release --test layout_props
       # Plan 2.G: the schematic fuzz case over 400 seeded inputs (#664, #665).
       - run: cargo test -p ryusch --release --test seeded_sweep

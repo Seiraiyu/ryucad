@@ -5239,6 +5239,7 @@ dependencies = [
  "clap",
  "getrandom 0.3.4",
  "gix",
+ "libc",
  "mimalloc",
  "regex-lite",
  "roxmltree 0.21.2",

@@ -699,6 +699,40 @@ fn missing(
     }
 }
 
+/// Each item's path and checked text, in order, on up to eight threads:
+/// checking an item's text parses it again, a second at 100,000 items.
+fn texts(items: &BTreeMap<Id, Item>) -> Result<Vec<(String, Option<String>)>> {
+    let list: Vec<(&Id, &Item)> = items.iter().collect();
+    let one = |(id, it): &(&Id, &Item)| -> Result<(String, Option<String>)> {
+        Ok((
+            crate::ids::item_path(id),
+            Some(crate::items::text_of(id, it)?),
+        ))
+    };
+    if list.len() < 256 {
+        return list.iter().map(one).collect();
+    }
+    let threads = std::thread::available_parallelism()
+        .map_or(4, |n| n.get())
+        .min(8);
+    let per = list.len().div_ceil(threads);
+    let parts: Vec<Result<Vec<_>>> = std::thread::scope(|s| {
+        let handles: Vec<_> = list
+            .chunks(per)
+            .map(|c| s.spawn(move || c.iter().map(one).collect::<Result<Vec<_>>>()))
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("a text thread doesn't panic"))
+            .collect()
+    });
+    let mut out = Vec::with_capacity(list.len());
+    for p in parts {
+        out.extend(p?);
+    }
+    Ok(out)
+}
+
 /// `import.run`.
 #[allow(clippy::too_many_arguments)]
 pub fn run(
@@ -727,17 +761,7 @@ pub fn run(
     let mut report = out.report;
     report["file"] = json!(file);
     report["dry_run"] = json!(dry_run);
-    let writes = crate::write::Writes(
-        out.items
-            .iter()
-            .map(|(id, it)| {
-                Ok((
-                    crate::ids::item_path(id),
-                    Some(crate::items::text_of(id, it)?),
-                ))
-            })
-            .collect::<Result<Vec<_>>>()?,
-    );
+    let writes = crate::write::Writes(texts(&out.items)?);
     report["written"] = json!(if dry_run { 0 } else { writes.0.len() });
     if dry_run {
         let refused = crate::write::would_add(session, &writes)?;
