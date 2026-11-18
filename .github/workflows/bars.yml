@@ -19,13 +19,20 @@ on:
       runs:
         description: How many times to run it
         default: "5"
+      runner:
+        description: The self-hosted runner's label
+        type: choice
+        default: cpp-v3-runner-1
+        options:
+          - cpp-v3-runner-1
+          - arc-runner-x86
 
 permissions:
   contents: read
 
 jobs:
   bars:
-    runs-on: cpp-v3-runner-1
+    runs-on: ${{ inputs.runner }}
     timeout-minutes: 120
     env:
       CRATE: ${{ inputs.crate }}
