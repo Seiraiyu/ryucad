@@ -27,6 +27,7 @@ pub mod numbers;
 pub mod pdm;
 pub mod proto;
 pub mod release;
+pub mod reps;
 pub mod server;
 pub mod session;
 pub mod settings;
