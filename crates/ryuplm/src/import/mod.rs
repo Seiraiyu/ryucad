@@ -202,6 +202,32 @@ pub fn refused(name: &str, file: &Path, refusals: Vec<rows::Refusal>) -> Error {
     .with("refusals", &refusals)
 }
 
+/// `import.list`: each mapping file, its reader and key, and how many
+/// items carry its provenance; a mapping that doesn't read, with why.
+pub fn list(session: &crate::session::Session) -> Result<serde_json::Value> {
+    use serde_json::json;
+    let src = session.snapshot();
+    let mut out = Vec::new();
+    for (file, _) in src.list(IMPORTS)? {
+        let path = format!("{IMPORTS}/{file}");
+        let Some(name) = name_of(&path) else { continue };
+        let items = session
+            .catalogue()
+            .items
+            .values()
+            .filter(|i| i.source.contains_key(name))
+            .count();
+        let v = match load(&src, name) {
+            Ok(m) => {
+                json!({"name": name, "path": path, "reader": m.to_json()["reader"], "key": m.key, "bom": m.bom.is_some(), "items": items})
+            }
+            Err(e) => json!({"name": name, "path": path, "error": e, "items": items}),
+        };
+        out.push(v);
+    }
+    Ok(json!({"imports": out}))
+}
+
 #[cfg(test)]
 mod tests {
     use crate::proto::Request;
@@ -250,5 +276,11 @@ mod tests {
         let r = &e.details["report"];
         assert_eq!(r["faults"][0]["code"], "import_mapping_invalid");
         assert_eq!(r["faults"][0]["details"]["path"], "imports/bad.json");
+    }
+    #[test]
+    fn list_counts_each_mappings_items() {
+        let (_d, root) = catalogue();
+        let v = ask(&root, Request::ImportList {}).unwrap();
+        assert_eq!(v, json!({"imports": []}));
     }
 }

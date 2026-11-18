@@ -88,6 +88,10 @@ enum Command {
     /// its own lines edited (add, edit, remove), and what changed (diff).
     #[command(subcommand)]
     Bom(BomCmd),
+    /// Items from other systems' files (CSV, XLSX), through a committed
+    /// mapping (imports/<name>.json) the user or agent writes.
+    #[command(subcommand)]
+    Import(ImportCmd),
     /// Every item whose own lines or representations' lines use ITEM:
     /// here, in other catalogues' checkouts, and in their releases.
     WhereUsed {
@@ -188,6 +192,50 @@ impl FieldArgs {
             aml,
         })
     }
+}
+
+#[derive(Subcommand)]
+enum ImportCmd {
+    /// Propose a mapping for FILE from its header and first rows.
+    Guess {
+        file: PathBuf,
+        #[arg(long)]
+        sheet: Option<String>,
+        /// One character, or `tab`.
+        #[arg(long)]
+        delimiter: Option<String>,
+        /// utf-8, utf-16le, utf-16be, latin1 or windows-1252.
+        #[arg(long)]
+        encoding: Option<String>,
+        /// Save the proposal as imports/NAME.json.
+        #[arg(long, value_name = "NAME")]
+        save: Option<String>,
+    },
+    /// What mapping NAME reads from FILE, row by row; every refusal at its
+    /// row and column. Writes nothing.
+    Check {
+        name: String,
+        file: PathBuf,
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+    /// Import FILE through mapping NAME: new keys become items, changed
+    /// rows are settled field by field, nothing is ever deleted.
+    Run {
+        name: String,
+        file: PathBuf,
+        #[arg(long)]
+        dry_run: bool,
+        /// Settle conflicts: source or catalogue.
+        #[arg(long)]
+        prefer: Option<String>,
+        #[arg(long)]
+        limit: Option<usize>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// The mapping files, and how many items each has made.
+    List,
 }
 
 #[derive(Subcommand)]
@@ -444,6 +492,12 @@ fn absolute(here: &Path, dirs: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// `file` from `here`, absolute, so a daemon reads the same file.
+fn abs_file(here: &Path, file: &Path) -> String {
+    let p = here.join(file);
+    p.canonicalize().unwrap_or(p).display().to_string()
+}
+
 fn unit(s: &str) -> core::result::Result<Unit, String> {
     Unit::parse(s).ok_or_else(|| format!("unknown unit {s:?}: m, cm, mm, um, in or ft"))
 }
@@ -453,6 +507,49 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
     let exp = |e: &Expect| e.expect.clone();
     Ok(Some(match cmd {
         Command::Info => (root()?, Request::ProjectInfo {}),
+        Command::Import(ImportCmd::Guess {
+            file,
+            sheet,
+            delimiter,
+            encoding,
+            save,
+        }) => (
+            root()?,
+            Request::ImportGuess {
+                file: abs_file(here, file),
+                sheet: sheet.clone(),
+                delimiter: delimiter.clone(),
+                encoding: encoding.clone(),
+                save: save.clone(),
+            },
+        ),
+        Command::Import(ImportCmd::Check { name, file, limit }) => (
+            root()?,
+            Request::ImportCheck {
+                name: name.clone(),
+                file: abs_file(here, file),
+                limit: *limit,
+            },
+        ),
+        Command::Import(ImportCmd::Run {
+            name,
+            file,
+            dry_run,
+            prefer,
+            limit,
+            expect,
+        }) => (
+            root()?,
+            Request::ImportRun {
+                name: name.clone(),
+                file: abs_file(here, file),
+                dry_run: *dry_run,
+                prefer: prefer.clone(),
+                limit: *limit,
+                expected_revision: exp(expect),
+            },
+        ),
+        Command::Import(ImportCmd::List) => (root()?, Request::ImportList {}),
         Command::Item(ItemCmd::Create {
             number,
             next,

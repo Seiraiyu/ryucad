@@ -251,6 +251,21 @@ fn dispatch(
                 working,
             },
         )?,
+        Request::ImportGuess {
+            file,
+            sheet,
+            delimiter,
+            encoding,
+            save,
+        } => crate::import::guess::answer(
+            session,
+            std::path::Path::new(&file),
+            sheet,
+            delimiter,
+            encoding,
+            save,
+        )?,
+        Request::ImportList {} => crate::import::list(session)?,
         Request::ImportCheck { name, file, limit } => {
             crate::import::preview::check(session, &name, std::path::Path::new(&file), limit)?
         }
