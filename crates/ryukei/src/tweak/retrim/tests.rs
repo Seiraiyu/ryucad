@@ -1786,3 +1786,118 @@ fn stc_10s_coplanar_plane_is_given_room() {
         include_str!("../../../tests/data/nist_stc_10_room.txt"),
     );
 }
+
+/// A census VII cut (plan 22.B): a working face, the pin a narrowed build
+/// met it at `Uncertain`, and the faces round them (`body`); and the
+/// census's reading (`text`): `rung`, `box` (the rung's), `working`,
+/// `pin`, `changed` (the changed faces the working face touches) and
+/// `near` (its near box before any adjustment), floats as bits.
+struct PinCut {
+    body: Body,
+    rung: usize,
+    x: crate::geom::Box3,
+    working: FaceId,
+    pin: FaceId,
+    changed: std::collections::BTreeSet<FaceId>,
+    near: crate::geom::Box3,
+}
+
+fn pin_cut(bytes: &[u8], text: &str) -> PinCut {
+    use crate::geom::{Box3, Point3};
+    use std::collections::BTreeSet;
+    let body = crate::codec::decode_body(bytes).unwrap();
+    let face =
+        |hex: &str| match body.by_name(Name::from_u128(u128::from_str_radix(hex, 16).unwrap())) {
+            Some(EntityId::Face(f)) => f,
+            _ => panic!("no face {hex}"),
+        };
+    let float = |hex: &str| f64::from_bits(u64::from_str_radix(hex, 16).unwrap());
+    let boxed =
+        |v: Vec<f64>| Box3::new(Point3::new(v[0], v[1], v[2]), Point3::new(v[3], v[4], v[5]));
+    let (mut rung, mut x, mut working, mut pin, mut near) = (None, None, None, None, None);
+    let mut changed = BTreeSet::new();
+    for line in text.lines() {
+        let mut w = line.split_whitespace();
+        match w.next() {
+            Some("rung") => rung = Some(w.next().unwrap().parse().unwrap()),
+            Some("box") => x = Some(boxed(w.map(float).collect())),
+            Some("working") => working = Some(face(w.next().unwrap())),
+            Some("pin") => pin = Some(face(w.next().unwrap())),
+            Some("changed") => changed.extend(w.map(face)),
+            Some("near") => near = Some(boxed(w.map(float).collect())),
+            _ => {}
+        }
+    }
+    PinCut {
+        body,
+        rung: rung.expect("a rung"),
+        x: x.expect("the rung's box"),
+        working: working.expect("a working face"),
+        pin: pin.expect("a pin"),
+        changed,
+        near: near.expect("its near box"),
+    }
+}
+
+/// The box of face `f`'s sheet carried over near box `n`, as
+/// `attempt_adjusted` carries a face left as it is, and the tolerance
+/// `WorkBody::pairs` grows it by.
+fn sheet_over(body: &Body, f: FaceId, n: &crate::geom::Box3) -> (crate::geom::Box3, f64) {
+    let w = super::working::working(body, f, None, body.faces[f].sense, true, n).unwrap();
+    let (sheet, _) = crate::sheet::from_surface(K, &w.surface, w.rect).unwrap();
+    let sf = sheet.faces().next().unwrap();
+    (
+        crate::intersect::face_box(&sheet, sf),
+        crate::intersect::max_tolerance((&sheet, sf)),
+    )
+}
+
+/// A pin cut under main's rule: the cut gives the near box the census
+/// read, the pair shares a vertex but no edge (FTC 07 rd's, census VII),
+/// and the working face carried over
+/// its near box reaches the pin's box, so the table meets them. Returns
+/// the cut, its region and changes, for Task 8's cut.
+fn reaches_its_pin(bytes: &[u8], text: &str) -> (PinCut, super::region::Region, Changes) {
+    let c = pin_cut(bytes, text);
+    let region = super::region::Region {
+        changed: c.changed.clone(),
+        faces: c.body.faces().collect(),
+        frontier: Default::default(),
+    };
+    let changes = Changes {
+        deleted: c.changed.clone(),
+        ..Changes::default()
+    };
+    let n = super::near::near_box(&c.body, &changes, &region, c.working, &c.x, c.rung);
+    assert_eq!(n, c.near, "the cut misses a face the near box needs");
+    // Census VII's reading: the pair shares a vertex, never an edge, so
+    // no narrowed build asks it kept off (plan 22.B's Decision 5).
+    assert!(
+        !super::region::face_vertices(&c.body, c.working)
+            .is_disjoint(&super::region::face_vertices(&c.body, c.pin)),
+        "the pair shares no vertex"
+    );
+    assert!(
+        !super::shares_edge(&c.body, c.working, c.pin),
+        "the pair shares an edge"
+    );
+    let pin = crate::intersect::face_box(&c.body, c.pin);
+    let tp = crate::intersect::max_tolerance((&c.body, c.pin));
+    let (sheet, tw) = sheet_over(&c.body, c.working, &n);
+    assert!(
+        sheet.grow(tw).intersects(&pin.grow(tp)),
+        "{sheet:?} apart from {pin:?}"
+    );
+    (c, region, changes)
+}
+
+/// FTC 07 rd (#652, census VII): working NURBS `33b57350`, touching
+/// change `374dbdc2`, carried over its near box into pin `f19ffa9e`
+/// (0.15 mm tall), which it shares a vertex with and no edge.
+#[test]
+fn ftc_07s_nurbs_reaches_its_pin() {
+    reaches_its_pin(
+        include_bytes!("../../../tests/data/nist_ftc_07_pin.body"),
+        include_str!("../../../tests/data/nist_ftc_07_pin.txt"),
+    );
+}
