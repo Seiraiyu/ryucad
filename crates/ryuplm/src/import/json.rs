@@ -13,6 +13,63 @@ use std::collections::BTreeSet;
 /// recursion too.
 pub const MAX_DEPTH: usize = 128;
 
+/// What a JSON reader reads (a mapping's reader): the records' pointer
+/// (unused with `lines`), the children's pointer relative to a record,
+/// and whether the file is JSON Lines.
+#[derive(Clone, Copy, Debug)]
+pub struct Shape<'a> {
+    pub records: &'a str,
+    pub children: Option<&'a str>,
+    pub lines: bool,
+}
+
+/// The records `bytes` hold, each its place and its leaves, children
+/// after their parent with `#level` when `shape.children` is set.
+pub fn read(bytes: &[u8], shape: Shape<'_>) -> Result<Vec<Leaves>, Refusal> {
+    let text = utf8(bytes)?;
+    let mut out = Vec::new();
+    if shape.lines {
+        for (i, line) in text.split('\n').enumerate() {
+            let line = line.strip_suffix('\r').unwrap_or(line);
+            if line.trim().is_empty() {
+                continue;
+            }
+            let n = i as u64 + 1;
+            let mut p = Parser::new(line, n, shape.children);
+            p.base = format!("line {n} ");
+            p.ws();
+            p.record(&mut out, "", 0)?;
+            p.end()?;
+        }
+        if out.is_empty() {
+            return Err(Refusal::file("no records: every line is blank"));
+        }
+    } else {
+        let segs = tokens(shape.records).ok_or_else(|| {
+            Refusal::file(format!("records {:?} isn't a JSON Pointer", shape.records))
+        })?;
+        let mut p = Parser::new(text, 1, shape.children);
+        p.ws();
+        if !p.walk(&segs, &mut String::new(), &mut out)? {
+            return Err(Refusal::file(format!("no value at {:?}", shape.records)));
+        }
+        p.end()?;
+        if out.is_empty() {
+            return Err(Refusal::file(format!("no records at {:?}", shape.records)));
+        }
+    }
+    Ok(out)
+}
+
+/// `bytes` as text: JSON is UTF-8 (RFC 8259), a byte-order mark skipped.
+fn utf8(bytes: &[u8]) -> Result<&str, Refusal> {
+    let b = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
+    std::str::from_utf8(b).map_err(|e| {
+        let line = 1 + b[..e.valid_up_to()].iter().filter(|c| **c == b'\n').count();
+        Refusal::file(format!("line {line} isn't UTF-8; JSON is UTF-8"))
+    })
+}
+
 struct Parser<'a> {
     s: &'a [u8],
     text: &'a str,
@@ -326,6 +383,138 @@ impl<'a> Parser<'a> {
             _ => self.scalar().map(|_| ()),
         }
     }
+
+    /// Walks from the value here down `segs`; at their end, each element
+    /// of the array there is a record. False when a step finds nothing.
+    fn walk(
+        &mut self,
+        segs: &[String],
+        ptr: &mut String,
+        out: &mut Vec<Leaves>,
+    ) -> Result<bool, Refusal> {
+        let Some((first, rest)) = segs.split_first() else {
+            if self.peek() != Some(b'[') {
+                let what = if ptr.is_empty() {
+                    "the document".to_owned()
+                } else {
+                    ptr.clone()
+                };
+                return Err(self.err(format!("{what} isn't an array of records")));
+            }
+            let base = ptr.clone();
+            self.array(&mut |p, i| p.record(out, &format!("{base}/{i}"), 0))?;
+            return Ok(true);
+        };
+        let mut found = false;
+        let len = ptr.len();
+        match self.peek() {
+            Some(b'{') => self.object(&mut |p, k| {
+                if k != *first {
+                    return p.skip();
+                }
+                ptr.push('/');
+                ptr.push_str(&escape(&k));
+                found = p.walk(rest, ptr, out)?;
+                ptr.truncate(len);
+                Ok(())
+            })?,
+            Some(b'[') => {
+                let want = first.parse::<usize>().ok();
+                self.array(&mut |p, i| {
+                    if want != Some(i) {
+                        return p.skip();
+                    }
+                    ptr.push('/');
+                    ptr.push_str(&i.to_string());
+                    found = p.walk(rest, ptr, out)?;
+                    ptr.truncate(len);
+                    Ok(())
+                })?;
+            }
+            _ => self.skip()?,
+        }
+        Ok(found)
+    }
+
+    /// The record here, at pointer `ptr`: pushed before its children, so
+    /// rows come in document order. An error inside it that names no row
+    /// is refused at this record.
+    fn record(&mut self, out: &mut Vec<Leaves>, ptr: &str, level: usize) -> Result<(), Refusal> {
+        let p = out.len();
+        let at = p as u64 + 1;
+        let place = format!("{}{ptr}", self.base).trim_end().to_owned();
+        out.push(Leaves {
+            place: place.clone(),
+            cells: Vec::new(),
+        });
+        let mut cells = Vec::new();
+        if self.children.is_some() {
+            cells.push(("#level".to_owned(), level.to_string()));
+        }
+        let r = if self.peek() == Some(b'{') {
+            self.flatten(&mut String::new(), &mut cells, out, ptr, level)
+        } else {
+            Err(self.err("a record is an object"))
+        };
+        r.map_err(|e| {
+            if e.row == 0 {
+                Refusal { row: at, ..e }.placed(Some(place.as_str()))
+            } else {
+                e
+            }
+        })?;
+        out[p].cells = cells;
+        Ok(())
+    }
+
+    /// The value here, at `path` within the record at `ptr`: its leaves
+    /// into `cells`, or, at the children's pointer, the child records.
+    fn flatten(
+        &mut self,
+        path: &mut String,
+        cells: &mut Vec<(String, String)>,
+        out: &mut Vec<Leaves>,
+        ptr: &str,
+        level: usize,
+    ) -> Result<(), Refusal> {
+        if !path.is_empty() && self.children.as_deref() == Some(path.as_str()) {
+            return self.kids(out, &format!("{ptr}{path}"), level + 1);
+        }
+        let len = path.len();
+        match self.peek() {
+            Some(b'{') => self.object(&mut |p, k| {
+                path.push('/');
+                path.push_str(&escape(&k));
+                let r = p.flatten(path, cells, out, ptr, level);
+                path.truncate(len);
+                r
+            }),
+            Some(b'[') => self.array(&mut |p, i| {
+                path.push('/');
+                path.push_str(&i.to_string());
+                let r = p.flatten(path, cells, out, ptr, level);
+                path.truncate(len);
+                r
+            }),
+            _ => {
+                let v = self.scalar()?.unwrap_or_default();
+                cells.push((path.clone(), v));
+                Ok(())
+            }
+        }
+    }
+
+    /// The children at `ptr`: an array of records, or `null` for none.
+    fn kids(&mut self, out: &mut Vec<Leaves>, ptr: &str, level: usize) -> Result<(), Refusal> {
+        match self.peek() {
+            Some(b'[') => {
+                let base = ptr.to_owned();
+                self.array(&mut |p, i| p.record(out, &format!("{base}/{i}"), level))
+            }
+            Some(b'n') => self.scalar().map(|_| ()),
+            _ => Err(self.err(format!("the children at {ptr} aren't an array"))),
+        }
+    }
 }
 
 /// A JSON Pointer's reference tokens, unescaped: `""` has none, and a
@@ -427,5 +616,144 @@ mod tests {
         let e = skip("{\n  \"a\": tru\n}").unwrap_err();
         assert_eq!(e.row, 0);
         assert!(e.message.starts_with("line 2, column 8"), "{}", e.message);
+    }
+
+    fn read_str(
+        text: &str,
+        records: &str,
+        children: Option<&str>,
+        lines: bool,
+    ) -> Result<Vec<Leaves>, Refusal> {
+        read(
+            text.as_bytes(),
+            Shape {
+                records,
+                children,
+                lines,
+            },
+        )
+    }
+
+    fn cells(l: &Leaves) -> Vec<(&str, &str)> {
+        l.cells
+            .iter()
+            .map(|(a, b)| (a.as_str(), b.as_str()))
+            .collect()
+    }
+
+    #[test]
+    fn pointers_parse_and_escape() {
+        assert_eq!(tokens("/a~1b/~0c"), Some(vec!["a/b".to_owned(), "~c".to_owned()]));
+        assert_eq!(tokens(""), Some(vec![]));
+        assert_eq!(tokens("a"), None);
+        assert_eq!(escape("a/b~c"), "a~1b~0c");
+    }
+
+    #[test]
+    fn records_flatten_to_their_pointers() {
+        let r = read_str(
+            r#"{"meta": {"n": 2}, "data": {"items": [
+                {"pn": "100-2", "w": 1.10, "mfr": {"name": "Acme"}, "alts": [{"mpn": "X1"}, {"mpn": "X2"}],
+                 "tags": [], "note": null, "a/b": true},
+                {"pn": "100-3"}]}}"#,
+            "/data/items",
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(r.len(), 2);
+        assert_eq!(r[0].place, "/data/items/0");
+        assert_eq!(
+            cells(&r[0]),
+            [
+                ("/pn", "100-2"),
+                ("/w", "1.10"),
+                ("/mfr/name", "Acme"),
+                ("/alts/0/mpn", "X1"),
+                ("/alts/1/mpn", "X2"),
+                ("/note", ""),
+                ("/a~1b", "true")
+            ]
+        );
+        assert_eq!(cells(&r[1]), [("/pn", "100-3")]);
+    }
+
+    #[test]
+    fn a_document_array_and_a_byte_order_mark() {
+        let mut b = vec![0xEF, 0xBB, 0xBF];
+        b.extend_from_slice(br#"[{"pn": "A"}]"#);
+        let r = read(
+            &b,
+            Shape {
+                records: "",
+                children: None,
+                lines: false,
+            },
+        )
+        .unwrap();
+        assert_eq!((r[0].place.as_str(), cells(&r[0])), ("/0", vec![("/pn", "A")]));
+    }
+
+    #[test]
+    fn children_follow_their_parent_with_a_level() {
+        let r = read_str(
+            r#"{"bom": [{"pn": "A", "parts": [{"pn": "B", "parts": [{"pn": "C"}]}, {"pn": "D", "parts": null}]}, {"pn": "E"}]}"#,
+            "/bom",
+            Some("/parts"),
+            false,
+        )
+        .unwrap();
+        let got: Vec<(&str, Vec<(&str, &str)>)> =
+            r.iter().map(|l| (l.place.as_str(), cells(l))).collect();
+        assert_eq!(
+            got,
+            vec![
+                ("/bom/0", vec![("#level", "0"), ("/pn", "A")]),
+                ("/bom/0/parts/0", vec![("#level", "1"), ("/pn", "B")]),
+                ("/bom/0/parts/0/parts/0", vec![("#level", "2"), ("/pn", "C")]),
+                ("/bom/0/parts/1", vec![("#level", "1"), ("/pn", "D")]),
+                ("/bom/1", vec![("#level", "0"), ("/pn", "E")]),
+            ]
+        );
+    }
+
+    #[test]
+    fn json_lines_are_records_by_line() {
+        let r = read_str(
+            "{\"pn\": \"A\"}\r\n\n{\"pn\": \"B\", \"parts\": [{\"pn\": \"C\"}]}\n",
+            "",
+            Some("/parts"),
+            true,
+        )
+        .unwrap();
+        let places: Vec<&str> = r.iter().map(|l| l.place.as_str()).collect();
+        assert_eq!(places, ["line 1", "line 3", "line 3 /parts/0"]);
+        let e = read_str("{\"pn\": \"A\"}\n[1]\n", "", None, true).unwrap_err();
+        assert_eq!((e.row, e.place.as_deref()), (2, Some("line 2")));
+        assert!(read_str("\n\n", "", None, true).is_err());
+    }
+
+    #[test]
+    fn refusals_say_where() {
+        let msg = |t: &str, r: &str, c: Option<&str>| read_str(t, r, c, false).unwrap_err().message;
+        assert!(msg(r#"{"items": []}"#, "/data", None).contains("no value at"));
+        assert!(msg(r#"{"items": {}}"#, "/items", None).contains("isn't an array"));
+        assert!(msg(r#"{"items": []}"#, "/items", None).contains("no records"));
+        assert!(msg(r#"{"items": [{"pn": "A", "parts": 3}]}"#, "/items", Some("/parts"))
+            .contains("aren't an array"));
+        let e = read_str(r#"{"items": [{"pn": "A"}, {"pn": "B", "pn": "C"}]}"#, "/items", None, false)
+            .unwrap_err();
+        assert_eq!((e.row, e.place.as_deref()), (2, Some("/items/1")));
+        assert!(e.message.contains("twice"));
+        let e = read(
+            b"{\"a\": \"\xFF\"}",
+            Shape {
+                records: "",
+                children: None,
+                lines: false,
+            },
+        )
+        .unwrap_err();
+        assert!(e.message.contains("UTF-8"));
     }
 }
