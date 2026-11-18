@@ -3814,6 +3814,23 @@ fn slit_seeds_section(golden: &mut Golden) {
     }
 }
 
+/// ryukei 22.D's ruled closed form (design 724): the ruled_pin twin
+/// (`ryukei_testkit::ruled_pin`), the pin cut from the bore whose wall it
+/// grazes. The result's body, created names and mesh, or the refusal's
+/// bytes.
+fn ruled_pin_section(golden: &mut Golden) {
+    use ryukei_testkit::ruled_pin::{BITE, bored, cut, pin};
+    let mut s = golden.section("ruled_pin");
+    match cut(&bored(BITE), &pin()) {
+        Ok((o, j)) => hash_body(&mut s, &o, &j),
+        Err(e) => {
+            for byte in format!("{e:?}").bytes() {
+                s.u64(u64::from(byte));
+            }
+        }
+    }
+}
+
 /// The golden file every section's line is in.
 const GOLDEN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/determinism.txt");
 
@@ -3916,6 +3933,7 @@ sections! {
     pinned_faces => pinned_faces_section,
     near_room => near_room_section,
     slit_seeds => slit_seeds_section,
+    ruled_pin => ruled_pin_section,
 }
 
 /// Offsets past their focal surfaces (design 484, plan 17.A): a spline

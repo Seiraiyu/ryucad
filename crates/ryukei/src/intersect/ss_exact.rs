@@ -33,6 +33,11 @@ use crate::tol::{ANGULAR_RESOLUTION, LINEAR_RESOLUTION, in_size_box};
 use core::f64::consts::{FRAC_PI_4, PI, TAU};
 use std::sync::Arc;
 
+mod ruled;
+#[cfg(test)]
+pub(crate) use ruled::TRIED as RULED_TRIED;
+pub(crate) use ruled::ruled;
+
 /// The closed form for this pair, if it has one: its branches and
 /// points.
 pub(crate) fn exact(a: &Surface, b: &Surface, region: &Box3) -> Option<(Vec<Raw>, Vec<Point3>)> {
@@ -1026,6 +1031,7 @@ impl Conic {
 
 #[cfg(test)]
 mod tests {
+    use super::super::Failure;
     use super::super::ss::{Branch, SurfaceHit, surface_surface};
     use super::*;
     use crate::geom::{Cylinder, Plane, Sphere, Torus};
@@ -1458,5 +1464,127 @@ mod tests {
         for b in &branches {
             assert!(b.tolerance <= 1e-7, "{}", b.tolerance);
         }
+    }
+
+    /// Plan 22.D: the ruled form is tried only where a trace's fit fails.
+    /// A pair that traces and fits (crossing cylinders of unequal radii,
+    /// as in `cylinders`) never reaches it, and its result is the trace's.
+    #[test]
+    fn a_pair_that_traces_never_tries_the_ruled_form() {
+        let a = cylinder((0.0, 0.0, 0.0), (0.0, 0.0, 1.0), 1.0);
+        let b = cylinder((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), 0.5);
+        RULED_TRIED.with(|n| n.set(0));
+        let (branches, _) = meet(&a, &b);
+        assert_eq!(kinds(&branches), [("nurbs", false), ("nurbs", false)]);
+        assert_eq!(RULED_TRIED.with(|n| n.get()), 0);
+    }
+
+    /// Plan 22.D: small cylinders grazing a cone, or a cylinder, from
+    /// outside, whose traces certify but whose fits don't (three of the
+    /// seven a seeded search over 3,000 grazes found; none failed its
+    /// trace). Once the fit fails the ruled form answers: one loop, on
+    /// both surfaces within its tolerance (`meet` checks it).
+    #[test]
+    fn a_graze_whose_fit_fails_meets_in_closed_form() {
+        for (half, r, h, gap, dir) in [
+            (
+                0.03997378512510262,
+                0.2083099176328494,
+                0.11155690126174012,
+                0.0,
+                (-0.06688168831964553, 1.0, -0.09095731954698788),
+            ),
+            (
+                0.1494292570451618,
+                0.1205958919920377,
+                0.2918175410011643,
+                -1.4598346116141462e-7,
+                (-0.07226776152543693, 1.0, -0.026671110624478467),
+            ),
+            (
+                0.0,
+                0.029670074142890857,
+                0.18184593127466941,
+                -5.496106689363508e-7,
+                (-0.09825026828096414, 1.0, -0.2542895544595207),
+            ),
+        ] {
+            let other = if half == 0.0 {
+                cylinder((0.0, 0.0, 0.0), (0.0, 0.0, 1.0), 1.0)
+            } else {
+                cone((0.0, 0.0, 0.0), (0.0, 0.0, 1.0), 1.0, half)
+            };
+            let wall = 1.0 + h * math::tan(half);
+            let pin = cylinder((wall + (r + gap), 0.0, h), dir, r);
+            RULED_TRIED.with(|n| n.set(0));
+            let (branches, points) = meet(&pin, &other);
+            assert!(RULED_TRIED.with(|n| n.get()) > 0, "{half} {r}");
+            assert_eq!((branches.len(), points.len()), (1, 0), "{half} {r}");
+            assert!(!branches[0].tangent);
+            // In a re-trim rung's first build the fit's failure stands,
+            // and the form is never tried.
+            RULED_TRIED.with(|n| n.set(0));
+            // unmetered: a unit test.
+            let m = crate::work::Meter::free();
+            let met = m.first_build(|| super::super::ss::meet(&pin, &other, &region(), false, &m));
+            assert!(matches!(met, Err(Failure::Uncertain)), "{half} {r}");
+            assert_eq!(RULED_TRIED.with(|n| n.get()), 0, "never in a first build");
+        }
+    }
+
+    /// Plan 22.D: one of FTC 07 AP242 #13541's other pins against its
+    /// bore, as the delete meets them (census VII; the frames, radii and
+    /// region printed bit for bit): the trace certifies, the fit fails,
+    /// and the ruled form refuses, since one ruling is tangent to the cone
+    /// while every other crosses it (a pinch, question 1153). The pair
+    /// refuses `Uncertain`, as before: the form never drops a meeting.
+    #[test]
+    fn a_pinch_whose_fit_fails_still_refuses() {
+        use crate::geom::UnitVector3;
+        let unit = |x: f64, y: f64, z: f64| UnitVector3::new_unchecked(Vector3::new(x, y, z));
+        let cone = Surface::Cone(
+            Cone::new(
+                Frame::from_axes(
+                    Point3::new(-0.10794999999999999, -0.10413999999999998, -0.08255),
+                    unit(0.0, -1.0, 0.0),
+                    unit(0.0, 0.0, -1.0),
+                )
+                .unwrap(),
+                0.0127,
+                0.0174532925,
+            )
+            .unwrap(),
+        );
+        let pin = Surface::Cylinder(
+            Cylinder::new(
+                Frame::from_axes(
+                    Point3::new(0.11590069239423999, -0.105664, -0.07134763062932),
+                    unit(-1.0, 0.0, 0.0),
+                    unit(0.0, 0.7132504491766165, 0.700909264277021),
+                )
+                .unwrap(),
+                0.001524,
+            )
+            .unwrap(),
+        );
+        let region = Box3::new(
+            Point3::new(
+                -0.12274796307490853,
+                -0.10718800999999999,
+                -0.07287164062931999,
+            ),
+            Point3::new(
+                -0.10746755888640734,
+                -0.10441365820286337,
+                -0.06982362062932,
+            ),
+        );
+        // unmetered: a unit test.
+        let m = crate::work::Meter::free();
+        assert_eq!(ruled(&cone, &pin, &region, &m), Ok(None));
+        RULED_TRIED.with(|n| n.set(0));
+        let met = super::super::ss::meet(&cone, &pin, &region, false, &m);
+        assert!(matches!(met, Err(Failure::Uncertain)), "{met:?}");
+        assert!(RULED_TRIED.with(|n| n.get()) > 0, "tried at the failed fit");
     }
 }

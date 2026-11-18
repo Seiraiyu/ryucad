@@ -105,6 +105,14 @@ const MAX_SIZE: f64 = 2e-3;
 /// two halves alone still fails at every rung. FTC 10 rb stops at
 /// `HealAmbiguous` on ball `d0eb13c5` (#652; moved to ryukei 23,
 /// "coincident working faces across a deleted gap").
+///
+/// Phase 22 ends here (plan 22.D, owner 2026-11-18: "go for SW parity and
+/// call it good"). Plan 22.D's ruled closed form leaves both where they
+/// were (FTC 07 rd at pin `f19ffa9e` in 56 s, FTC 10 rb at ball
+/// `d0eb13c5` in 27 s). FTC 07 rd and FTC 10 rb stay refused, as
+/// SolidWorks 2026 also refuses them as one Delete and Patch; their work
+/// continues in ryukei 23, "SolidWorks parity on blend deletes"
+/// (per-feature partial deletes, fast refusals).
 const KNOWN_REFUSED: &[(&str, u32)] = &[("nist_ftc_07", 652), ("nist_ftc_10", 652)];
 
 /// How a body's delete ended, for [`Tally::count`].
@@ -750,6 +758,19 @@ fn ftc_07s_and_ftc_10s_blends_are_deleted() {
 /// more, every answer and time as on main. No narrowed build in the
 /// corpus refuses at such a pair (census VII); FTC 07 rd's pair shares a
 /// vertex (#652; moved to ryukei 23).
+///
+/// Plan 22.D meets a cylinder against a cone or cylinder in closed form
+/// through its rulings (`ss_exact::ruled`) once a trace's fit has failed,
+/// outside first builds: the same 18 defeature, bit for bit, and none
+/// more, every answer and time as on main and before phase 22. FTC 07
+/// AP242 #13541's cylinder and cone (`79b561f3`/`178d3260`) now meet in
+/// two curves round the pin, and it stops at the pattern's three other
+/// pins instead: each grazes its bore along one ruling (a pinch, which the
+/// form refuses by design, question 1153), so the delete refuses
+/// `Uncertain` at `784aeb19` in 37 s (#658; moved to ryukei 23).
+/// STC 10 and CTC 02 with PMI stay out as 22.A left them (moved to
+/// ryukei 23). SolidWorks 2026 deletes CTC 02 with PMI in one operation,
+/// and refuses STC 10 and FTC 07 AP242.
 const PINNED_DEFEATURED: &[(&str, u64)] = &[
     ("nist_ctc_01_asme1_ap203.stp", 148),
     ("nist_ctc_01_asme1_rd.stp", 13),

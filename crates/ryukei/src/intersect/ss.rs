@@ -1,7 +1,10 @@
 //! Surface–surface intersection: the entry point and its results.
 //!
 //! A coincident pair is reported as such; a pair with a closed form
-//! ([`super::ss_exact`]) gets exact curves; any other analytic pair is
+//! ([`super::ss_exact`]) gets exact curves; a cylinder against a cone or
+//! cylinder whose trace certifies but whose fit fails gets the closed
+//! form through its rulings ([`super::ss_exact::ruled`], plan 22.D); any other
+//! analytic pair is
 //! traced ([`super::ss_trace`]) and fitted ([`super::fit`]), and any other
 //! surface (a pipe, a NURBS, a swept surface) and an analytic one are
 //! traced in the first's parameter plane ([`super::sheet_trace`]), and
@@ -162,7 +165,26 @@ pub(crate) fn meet(
         }
     }
     let mut points = topo.points;
-    let branches = fitted(&chains, order, swapped, &mut points, m)?;
+    let branches = match fitted(&chains, order, swapped, &mut points, m) {
+        Ok(branches) => branches,
+        // A cylinder grazing a cone (#658, FTC 07 AP242's pin through its
+        // bore's wall; plan 22.D, census VII) or a cylinder of another
+        // radius or on a skew axis can trace and still fail its fit: its
+        // rulings settle it in closed form, tried only once the fit has
+        // failed, so every pair that traces and fits keeps its result,
+        // and never in a re-trim rung's first build (the tube contact's
+        // gate). Design 724 placed it after a failed trace; no input
+        // fails the trace (the suites, 3,000 seeded grazes), so it is
+        // tried at the fit's failure, and a failed trace refuses as
+        // before.
+        Err(Failure::Uncertain) if !m.in_first_build() => {
+            return match ss_exact::ruled(a, b, region, m)? {
+                Some((raws, points)) => exact_hit(raws, points, [a, b], m),
+                None => Err(Failure::Uncertain),
+            };
+        }
+        Err(e) => return Err(e),
+    };
     Ok(SurfaceHit::Meet { branches, points })
 }
 
