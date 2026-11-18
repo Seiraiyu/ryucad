@@ -150,9 +150,9 @@ pub(crate) const ADJUSTS: usize = 3;
 /// walk failed `Clipped` at a working face with room to give, or it
 /// refused `Uncertain` at a working face and a pin it shares nothing with
 /// (plan 22.B). The rung is built again by `again` with what each build
-/// asks, at most [`ADJUSTS`] times. The first adjusted build that builds (closes and checks clean)
-/// answers, and so does one after which the meter is stopped (a cancel
-/// or a halt answers at once). Otherwise the first answer stands, so
+/// asks, at most [`ADJUSTS`] times. The first adjusted build that builds
+/// (closes and checks clean) answers, and so does one after which the
+/// meter is stopped (a cancel or a halt answers at once). Otherwise the first answer stands, so
 /// refusals keep their names and a failed walk climbs as before.
 pub(crate) fn adjusting(
     first: (Rung, Option<near::Adjusts>),
