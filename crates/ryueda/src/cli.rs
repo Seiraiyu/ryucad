@@ -4258,57 +4258,76 @@ fn deliver(cmd: &Command, here: &std::path::Path, a: Answer) -> Result<Value> {
 
 /// Writes an export's files into `dir` (made when missing), each
 /// atomically, and drops their `text` from the printed answer. A folder
-/// holding files but no manifest is refused; one an earlier export wrote
-/// has that export's files (its manifest's) removed first, so nothing
-/// stale stays beside the new package.
+/// holding files but no manifest is refused. The manifest is written
+/// last, once every other file is in place, and only then are an
+/// earlier export's files this one didn't write removed. So an export
+/// that fails partway leaves the earlier manifest, and the folder is
+/// taken again (5.C's review: it was refused as `invalid_param` until
+/// someone cleared it by hand).
 fn write_package(dir: &std::path::Path, result: &mut Value) -> Result<()> {
-    let manifest = dir.join(ryueda::board::export::MANIFEST);
+    use ryueda::board::export::MANIFEST;
+    let mut earlier: Vec<String> = Vec::new();
     if dir.exists() {
         let any = std::fs::read_dir(dir)
             .map_err(|e| Error::io(dir, &e))?
             .next()
             .is_some();
         if any {
-            let old: Value = std::fs::read_to_string(&manifest)
+            let old: Value = std::fs::read_to_string(dir.join(MANIFEST))
                 .ok()
                 .and_then(|t| serde_json::from_str(&t).ok())
                 .ok_or_else(|| {
                     Error::new(
                         Code::InvalidParam,
                         format!(
-                            "{} holds files and no {}: give a new or empty folder",
-                            dir.display(),
-                            ryueda::board::export::MANIFEST
+                            "{} holds files and no {MANIFEST}: give a new or empty folder",
+                            dir.display()
                         ),
                     )
                     .with("param", "out")
                 })?;
-            for f in old["files"].as_array().into_iter().flatten() {
-                if let Some(n) = f["name"].as_str()
-                    && !n.contains(['/', '\\'])
-                    && !n.starts_with('.')
-                {
-                    let _ = std::fs::remove_file(dir.join(n));
-                }
-            }
-            let _ = std::fs::remove_file(&manifest);
+            earlier = old["files"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|f| f["name"].as_str())
+                .filter(|n| !n.contains(['/', '\\']) && !n.starts_with('.') && *n != MANIFEST)
+                .map(str::to_owned)
+                .collect();
         }
     }
     std::fs::create_dir_all(dir).map_err(|e| Error::io(dir, &e))?;
+    let mut files: Vec<(String, String)> = result["files"]
+        .as_array_mut()
+        .into_iter()
+        .flatten()
+        .map(|f| {
+            let name = f["name"].as_str().unwrap_or_default().to_owned();
+            let text = f
+                .as_object_mut()
+                .and_then(|o| o.remove("text"))
+                .and_then(|t| t.as_str().map(str::to_owned))
+                .unwrap_or_default();
+            (name, text)
+        })
+        .collect();
+    // The manifest last; a stable sort keeps the others' order.
+    files.sort_by_key(|(name, _)| name == MANIFEST);
     // Every file renamed into place first and synced together after, so
     // the package waits on the file system's journal once, not once a
-    // file (#270); all are synced before the answer is printed.
+    // file (#270). All are synced before the answer is printed, a failed
+    // export's too.
     ryueda::source::defer_syncs();
-    for f in result["files"].as_array_mut().into_iter().flatten() {
-        let name = f["name"].as_str().unwrap_or_default().to_owned();
-        let text = f
-            .as_object_mut()
-            .and_then(|o| o.remove("text"))
-            .and_then(|t| t.as_str().map(str::to_owned))
-            .unwrap_or_default();
-        ryueda::source::write_atomic(&dir.join(&name), text.as_bytes())?;
-    }
+    let written = files.iter().try_for_each(|(name, text)| {
+        ryueda::source::write_atomic(&dir.join(name), text.as_bytes())
+    });
     ryueda::source::flush_syncs();
+    written?;
+    for name in earlier {
+        if !files.iter().any(|(n, _)| *n == name) {
+            let _ = std::fs::remove_file(dir.join(&name));
+        }
+    }
     Ok(())
 }
 

@@ -5223,6 +5223,50 @@ fn a_board_exports_its_fabrication_package() {
     );
 }
 
+/// An export that fails partway (here a file it writes can't be put in
+/// place: a folder holding something stands at its name) keeps the
+/// earlier export's manifest. Once the obstacle goes, the next export
+/// takes the folder again (5.C's review: it was refused as
+/// `invalid_param` until someone cleared it by hand).
+#[test]
+fn an_export_that_fails_partway_leaves_its_folder_reusable() {
+    let p = Pair::breakout();
+    p.ok(&[
+        "board", "create", "Main", "--design", "board", "--rect", "26,20", "--id", "main",
+    ]);
+    for (r, xy, rot) in BREAKOUT_PLACES {
+        p.ok(&["board", "place", "main", r, "--at", xy, "--rotation", rot]);
+    }
+    let export = ["board", "export", "main", "--out", "fab", "--allow-errors"];
+    p.ok(&export);
+    for top in [&p.direct, &p.daemon] {
+        let fab = top.join("board/fab");
+        fs::remove_file(fab.join("main-pos.csv")).unwrap();
+        fs::create_dir_all(fab.join("main-pos.csv")).unwrap();
+        fs::write(fab.join("main-pos.csv/in-the-way"), "x").unwrap();
+        // The message names the folder, which differs between the two
+        // tops, so each is run on its own.
+        let (code, v) = p.run_in(top, "board", &export);
+        assert_ne!(code, 0, "{v}");
+        assert_eq!(v["ok"], false, "{v}");
+        assert!(
+            fab.join("manifest.json").is_file(),
+            "the earlier manifest stays"
+        );
+        fs::remove_dir_all(fab.join("main-pos.csv")).unwrap();
+    }
+    p.ok(&export);
+    for top in [&p.direct, &p.daemon] {
+        let fab = top.join("board/fab");
+        assert!(fab.join("main-pos.csv").is_file());
+        let m: Value =
+            serde_json::from_str(&fs::read_to_string(fab.join("manifest.json")).unwrap()).unwrap();
+        for f in m["files"].as_array().unwrap() {
+            assert!(fab.join(f["name"].as_str().unwrap()).is_file(), "{f}");
+        }
+    }
+}
+
 #[test]
 fn route_writes_are_logged_undone_and_guarded() {
     let p = Pair::breakout();
