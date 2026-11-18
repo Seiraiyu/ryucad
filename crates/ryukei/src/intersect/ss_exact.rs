@@ -1031,6 +1031,7 @@ impl Conic {
 
 #[cfg(test)]
 mod tests {
+    use super::super::Failure;
     use super::super::ss::{Branch, SurfaceHit, surface_surface};
     use super::*;
     use crate::geom::{Cylinder, Plane, Sphere, Torus};
@@ -1520,6 +1521,70 @@ mod tests {
             assert!(RULED_TRIED.with(|n| n.get()) > 0, "{half} {r}");
             assert_eq!((branches.len(), points.len()), (1, 0), "{half} {r}");
             assert!(!branches[0].tangent);
+            // In a re-trim rung's first build the fit's failure stands,
+            // and the form is never tried.
+            RULED_TRIED.with(|n| n.set(0));
+            // unmetered: a unit test.
+            let m = crate::work::Meter::free();
+            let met = m.first_build(|| super::super::ss::meet(&pin, &other, &region(), false, &m));
+            assert!(matches!(met, Err(Failure::Uncertain)), "{half} {r}");
+            assert_eq!(RULED_TRIED.with(|n| n.get()), 0, "never in a first build");
         }
+    }
+
+    /// Plan 22.D: one of FTC 07 AP242 #13541's other pins against its
+    /// bore, as the delete meets them (census VII; the frames, radii and
+    /// region printed bit for bit): the trace certifies, the fit fails,
+    /// and the ruled form refuses, since one ruling is tangent to the cone
+    /// while every other crosses it (a pinch, question 1153). The pair
+    /// refuses `Uncertain`, as before: the form never drops a meeting.
+    #[test]
+    fn a_pinch_whose_fit_fails_still_refuses() {
+        use crate::geom::UnitVector3;
+        let unit = |x: f64, y: f64, z: f64| UnitVector3::new_unchecked(Vector3::new(x, y, z));
+        let cone = Surface::Cone(
+            Cone::new(
+                Frame::from_axes(
+                    Point3::new(-0.10794999999999999, -0.10413999999999998, -0.08255),
+                    unit(0.0, -1.0, 0.0),
+                    unit(0.0, 0.0, -1.0),
+                )
+                .unwrap(),
+                0.0127,
+                0.0174532925,
+            )
+            .unwrap(),
+        );
+        let pin = Surface::Cylinder(
+            Cylinder::new(
+                Frame::from_axes(
+                    Point3::new(0.11590069239423999, -0.105664, -0.07134763062932),
+                    unit(-1.0, 0.0, 0.0),
+                    unit(0.0, 0.7132504491766165, 0.700909264277021),
+                )
+                .unwrap(),
+                0.001524,
+            )
+            .unwrap(),
+        );
+        let region = Box3::new(
+            Point3::new(
+                -0.12274796307490853,
+                -0.10718800999999999,
+                -0.07287164062931999,
+            ),
+            Point3::new(
+                -0.10746755888640734,
+                -0.10441365820286337,
+                -0.06982362062932,
+            ),
+        );
+        // unmetered: a unit test.
+        let m = crate::work::Meter::free();
+        assert_eq!(ruled(&cone, &pin, &region, &m), Ok(None));
+        RULED_TRIED.with(|n| n.set(0));
+        let met = super::super::ss::meet(&cone, &pin, &region, false, &m);
+        assert!(matches!(met, Err(Failure::Uncertain)), "{met:?}");
+        assert!(RULED_TRIED.with(|n| n.get()) > 0, "tried at the failed fit");
     }
 }

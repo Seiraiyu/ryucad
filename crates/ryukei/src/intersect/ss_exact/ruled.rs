@@ -1158,6 +1158,21 @@ mod tests {
             ruled(&big, &through, &region(), &free()),
             ruled(&through, &big, &region(), &free())
         );
+        // And it is the smaller one's rulings that are read: each branch
+        // runs round the small cylinder, its parameter the angle about the
+        // small one's axis (plan 22.D's M12; ruling the big one gives two
+        // loops on it, parametrized about their arcs instead).
+        let (raws, _) = ruled(&big, &through, &region(), &free()).unwrap().unwrap();
+        let f = through.frame().unwrap();
+        for r in &raws {
+            for k in 0..16 {
+                let th = TAU * (f64::from(k) + 0.5) / 16.0;
+                let d = r.curve.point(th) - f.origin();
+                let at = math::atan2(d.dot(f.y().get()), d.dot(f.x().get()));
+                let off = (at - th).rem_euclid(TAU);
+                assert!(off.min(TAU - off) < 1e-9, "{th}: {at}");
+            }
+        }
         // Partly: an axis 0.8 off, the rulings on its far side miss.
         let partly = cylinder((0.0, 0.8, 0.0), (1.0, 0.0, 0.3), 0.4);
         agrees(&partly, &big, 1);
