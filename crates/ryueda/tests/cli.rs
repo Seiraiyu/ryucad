@@ -5250,6 +5250,9 @@ fn a_board_exports_its_fabrication_package() {
         assert!(gtl.contains("%TF.FileFunction,Copper,L1,Top*%"));
         assert!(gtl.contains("%TO.P,R1,1*%"), "{gtl}");
         assert!(!gtl.contains("CreationDate"));
+        // The footprints' reference fields, drawn in the stroke font.
+        let gto = fs::read_to_string(dir.join("main-silk-top.gto")).unwrap();
+        assert!(gto.contains("D01*"), "designators on the silk: {gto}");
         let pos = fs::read_to_string(dir.join("main-pos.csv")).unwrap();
         assert!(pos.starts_with("Designator,Value,Footprint,X,Y,Rotation,Side\n"));
         let left = m["left_out"].as_array().unwrap().len();
