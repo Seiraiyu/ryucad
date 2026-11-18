@@ -326,6 +326,108 @@ fn charts(rl: &Rulings, region: &Box3) -> Option<Charts> {
     })
 }
 
+/// How far each chart's part runs past a seam, in `s`. The overlap's sign
+/// is certified, so it holds no root.
+const SEAM: f64 = 1e-6;
+
+/// The seams' turns tried, in order: the first where `Δ` and `N` have
+/// certified signs, the same in both charts, at both seams is used.
+const TURNS: [f64; 3] = [0.0, FRAC_PI_4, -FRAC_PI_4];
+
+/// The roots' brackets, in `s` over a chart's part.
+const ROOT_WIDTH: f64 = 1e-14;
+
+/// A root of `Δ` or `N`, by its bracket in `θ`. `Rise` and `Fall` are
+/// simple roots where the sign goes from negative to positive and back;
+/// `Unsure` a stretch whose sign can't be certified.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Event {
+    Rise([f64; 2]),
+    Fall([f64; 2]),
+    Unsure([f64; 2]),
+}
+
+impl Event {
+    fn at(&self) -> [f64; 2] {
+        match *self {
+            Self::Rise(b) | Self::Fall(b) | Self::Unsure(b) => b,
+        }
+    }
+}
+
+/// `Δ`'s and `N`'s roots round the cylinder, in order from the seam at
+/// `start` (chart 0 covers `[start, start + π]`, chart 1 the rest), with
+/// the charts to read signs in.
+struct Turn {
+    start: f64,
+    delta: Vec<Event>,
+    near: Vec<Event>,
+    charts: Charts,
+}
+
+impl Turn {
+    /// The certified sign of `p` (`Δ`'s or `N`'s charts) at angle `theta`.
+    fn sign_at(&self, p: &[Bernstein; 2], theta: f64) -> Option<Sign> {
+        let mut th = theta;
+        while th >= self.start + TAU {
+            th -= TAU;
+        }
+        while th < self.start {
+            th += TAU;
+        }
+        let (c, local) = if th < self.start + PI {
+            (0, th)
+        } else {
+            (1, th - PI)
+        };
+        strict(p[c].eval(s_of(local)))
+    }
+}
+
+/// The roots of `Δ` and `N` round the cylinder, read in two charts whose
+/// seams have certified signs. `None` where no turn of the seams does.
+fn turn(charts: Charts, m: &Meter) -> Result<Option<Turn>, Failure> {
+    let near_seam =
+        |p: &Bernstein, s: f64| strict(p.part((s - SEAM).max(0.0), (s + SEAM).min(1.0)).range());
+    // The seam at `start` is chart 0's `lo` and chart 1's `hi`; the one at
+    // `start + π` chart 0's `hi` and chart 1's `lo`.
+    let signed = |p: &[Bernstein; 2], lo: f64, hi: f64| -> Option<()> {
+        let (a0, a1) = (near_seam(&p[0], lo)?, near_seam(&p[1], hi)?);
+        let (b0, b1) = (near_seam(&p[0], hi)?, near_seam(&p[1], lo)?);
+        (a0 == a1 && b0 == b1).then_some(())
+    };
+    for gamma in TURNS {
+        let (lo, hi) = (s_of(-FRAC_PI_2 + gamma), s_of(FRAC_PI_2 + gamma));
+        if signed(&charts.delta, lo, hi).is_none() || signed(&charts.near, lo, hi).is_none() {
+            continue;
+        }
+        let cut = [(lo - SEAM).max(0.0), (hi + SEAM).min(1.0)];
+        let (mut delta, mut near) = (Vec::new(), Vec::new());
+        for c in 0..2 {
+            m.charge(1)?;
+            for (p, out) in [(&charts.delta[c], &mut delta), (&charts.near[c], &mut near)] {
+                for r in p.part(cut[0], cut[1]).roots(ROOT_WIDTH) {
+                    m.charge(1)?;
+                    let [a, b] = r.range();
+                    let th = [a, b].map(|x| theta_of(c, cut[0] + (cut[1] - cut[0]) * x));
+                    out.push(match r {
+                        Root::Simple { rising: true, .. } => Event::Rise(th),
+                        Root::Simple { .. } => Event::Fall(th),
+                        Root::Unresolved { .. } => Event::Unsure(th),
+                    });
+                }
+            }
+        }
+        return Ok(Some(Turn {
+            start: -FRAC_PI_2 + gamma,
+            delta,
+            near,
+            charts,
+        }));
+    }
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,6 +502,48 @@ mod tests {
                 let near = ch.near[c].eval(s);
                 let want_near = want + w * rl.a().abs() * m;
                 assert!(near.lo() - slack <= want_near && want_near <= near.hi() + slack);
+            }
+        }
+    }
+
+    /// A pipe of radius 0.5 along x whose axis lies on the wall of a
+    /// cylinder of radius 1 along z (the pipe's frame x is world y,
+    /// exactly). Its rulings cross where `|1 + cos θ / 2| < 1`, `θ` in
+    /// `(π/2, 3π/2)`, and are tangent at `θ = ±π/2`: the first charts'
+    /// seams. So the seams turn, and `Δ` rises at π/2 and falls at 3π/2,
+    /// read in order from the turned seam.
+    #[test]
+    fn a_root_on_a_chart_seam_turns_the_seams() {
+        let wall = Surface::Cylinder(
+            Cylinder::new(
+                frame((0.0, 0.0, 0.0), (0.0, 0.0, 1.0), (1.0, 0.0, 0.0)),
+                1.0,
+            )
+            .unwrap(),
+        );
+        let rl = Rulings::new(
+            frame((0.0, 1.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)),
+            0.5,
+            Quadric::of(&wall).unwrap(),
+        );
+        let region = Box3::new(
+            Point3::new(-10.0, -10.0, -10.0),
+            Point3::new(10.0, 10.0, 10.0),
+        );
+        let turn = turn(charts(&rl, &region).unwrap(), &Meter::free())
+            .unwrap()
+            .unwrap();
+        assert_ne!(turn.start, -FRAC_PI_2, "the seams turned");
+        assert_eq!(turn.delta.len(), 2, "{:?}", turn.delta);
+        for e in &turn.delta {
+            let [a, b] = e.at();
+            assert!(b >= a && b - a < 1e-9, "{e:?}");
+            let (s, c) = math::sin_cos((a + b) / 2.0);
+            assert!(c.abs() < 1e-9 && (s.abs() - 1.0).abs() < 1e-9, "{e:?}");
+            match e {
+                Event::Rise(_) => assert!(s > 0.0, "the rulings start crossing at π/2"),
+                Event::Fall(_) => assert!(s < 0.0, "and stop at 3π/2"),
+                Event::Unsure(_) => panic!("{e:?}"),
             }
         }
     }
