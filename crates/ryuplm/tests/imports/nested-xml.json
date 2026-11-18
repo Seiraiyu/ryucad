@@ -1,0 +1,26 @@
+{
+  "bom": {
+    "find": "@find",
+    "level": "#level",
+    "quantity": "@qty"
+  },
+  "class": "machined",
+  "fields": {
+    "description": {
+      "from": "Description"
+    },
+    "number": {
+      "from": "@number"
+    }
+  },
+  "format": 2,
+  "key": "@number",
+  "kind": "ryuplm.import",
+  "numbers": "keep",
+  "reader": {
+    "children": "Components/Component",
+    "file": "nested-bom*.xml",
+    "records": "/Export/Item",
+    "type": "xml"
+  }
+}

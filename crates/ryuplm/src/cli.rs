@@ -207,6 +207,11 @@ enum ImportCmd {
         /// utf-8, utf-16le, utf-16be, latin1 or windows-1252.
         #[arg(long)]
         encoding: Option<String>,
+        /// JSON and XML: where the records are (a JSON Pointer such as
+        /// /data/items, or an element path such as /Export/Items/Item),
+        /// instead of the proposed one.
+        #[arg(long)]
+        records: Option<String>,
         /// Save the proposal as imports/NAME.json.
         #[arg(long, value_name = "NAME")]
         save: Option<String>,
@@ -512,6 +517,7 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
             sheet,
             delimiter,
             encoding,
+            records,
             save,
         }) => (
             root()?,
@@ -520,6 +526,7 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
                 sheet: sheet.clone(),
                 delimiter: delimiter.clone(),
                 encoding: encoding.clone(),
+                records: records.clone(),
                 save: save.clone(),
             },
         ),

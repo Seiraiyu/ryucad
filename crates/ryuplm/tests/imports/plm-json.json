@@ -1,0 +1,47 @@
+{
+  "class": "machined",
+  "fields": {
+    "aml.0.manufacturer": {
+      "from": "/sources/0/manufacturer"
+    },
+    "aml.0.mpn": {
+      "from": "/sources/0/mpn"
+    },
+    "aml.0.status": {
+      "from": "/sources/0/status"
+    },
+    "aml.1.manufacturer": {
+      "from": "/sources/1/manufacturer"
+    },
+    "aml.1.mpn": {
+      "from": "/sources/1/mpn"
+    },
+    "aml.1.status": {
+      "from": "/sources/1/status"
+    },
+    "description": {
+      "from": "/description"
+    },
+    "make_buy": {
+      "from": "/makeBuy"
+    },
+    "name": {
+      "from": "/name"
+    },
+    "number": {
+      "from": "/number"
+    },
+    "properties.weight": {
+      "from": "/weight"
+    }
+  },
+  "format": 2,
+  "key": "/id",
+  "kind": "ryuplm.import",
+  "numbers": "keep",
+  "reader": {
+    "file": "plm-items*.json",
+    "records": "/items",
+    "type": "json"
+  }
+}

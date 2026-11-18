@@ -11,12 +11,32 @@ use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const KIND: &str = "ryuplm.import";
-pub const FORMAT: u64 = 1;
+/// The newest mapping format: 2 since design 935's tree readers. A
+/// mapping is written as format 2 only when its reader is json or xml.
+pub const FORMAT: u64 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReaderKind {
     Csv,
     Xlsx,
+    Json,
+    Xml,
+}
+
+impl ReaderKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReaderKind::Csv => "csv",
+            ReaderKind::Xlsx => "xlsx",
+            ReaderKind::Json => "json",
+            ReaderKind::Xml => "xml",
+        }
+    }
+
+    /// A tree reader: its columns are paths in a record.
+    pub fn tree(self) -> bool {
+        matches!(self, ReaderKind::Json | ReaderKind::Xml)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -27,6 +47,13 @@ pub struct Reader {
     pub delimiter: Option<char>,
     pub sheet: Option<String>,
     pub header_row: u64,
+    /// Tree readers: where the records are (a JSON Pointer, or an element
+    /// path from the root), and where a record's children are, relative
+    /// to it.
+    pub records: Option<String>,
+    pub children: Option<String>,
+    /// JSON Lines: each line is a record.
+    pub lines: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -157,13 +184,19 @@ fn column(v: Value, at: &str) -> Result<String> {
 impl Mapping {
     pub fn from_json(name: &str, v: &Value) -> Result<Mapping> {
         let mut o = header_in(v, KIND, FORMAT, crate::catalogue::NAME)?;
+        let format = v.get("format").and_then(Value::as_u64).unwrap_or(1);
         let r = o.take("reader")?;
         let mut ro = Obj::new(&r, "/reader")?;
         let kind = match text(ro.take("type")?, "/reader/type")?.as_str() {
             "csv" => ReaderKind::Csv,
             "xlsx" => ReaderKind::Xlsx,
-            _ => return Err(invalid("/reader/type", "type is csv or xlsx")),
+            "json" => ReaderKind::Json,
+            "xml" => ReaderKind::Xml,
+            _ => return Err(invalid("/reader/type", "type is csv, xlsx, json or xml")),
         };
+        if kind.tree() && format < 2 {
+            return Err(invalid("/format", "a json or xml reader needs format 2"));
+        }
         let file = ro
             .take_opt("file")
             .map(|f| text(f, "/reader/file"))
@@ -198,22 +231,107 @@ impl Mapping {
             .take_opt("sheet")
             .map(|s| text(s, "/reader/sheet"))
             .transpose()?;
-        let header_row = match ro.take_opt("header_row") {
+        let header = ro.take_opt("header_row");
+        let header_given = header.is_some();
+        let header_row = match header {
             None => 1,
             Some(h) => h
                 .as_u64()
                 .filter(|h| (1..=1_000_000).contains(h))
                 .ok_or_else(|| invalid("/reader/header_row", "a row number from 1"))?,
         };
+        let records = ro
+            .take_opt("records")
+            .map(|x| text(x, "/reader/records"))
+            .transpose()?;
+        let children = ro
+            .take_opt("children")
+            .map(|x| text(x, "/reader/children"))
+            .transpose()?;
+        let lines = match ro.take_opt("lines") {
+            None => false,
+            Some(x) => x
+                .as_bool()
+                .ok_or_else(|| invalid("/reader/lines", "true or false"))?,
+        };
         ro.finish()?;
-        if kind == ReaderKind::Xlsx && (encoding.is_some() || delimiter.is_some()) {
+        let given = [
+            ("encoding", encoding.is_some()),
+            ("delimiter", delimiter.is_some()),
+            ("sheet", sheet.is_some()),
+            ("header_row", header_given),
+            ("records", records.is_some()),
+            ("children", children.is_some()),
+            ("lines", lines),
+        ];
+        let allowed: &[&str] = match kind {
+            ReaderKind::Csv => &["encoding", "delimiter", "header_row"],
+            ReaderKind::Xlsx => &["sheet", "header_row"],
+            ReaderKind::Json => &["records", "children", "lines"],
+            ReaderKind::Xml => &["records", "children"],
+        };
+        if let Some((n, _)) = given.iter().find(|(n, g)| *g && !allowed.contains(n)) {
             return Err(invalid(
                 "/reader",
-                "an xlsx reader takes sheet and header_row, not encoding or delimiter",
+                &format!(
+                    "a {} reader takes {}, not {n}",
+                    kind.as_str(),
+                    allowed.join(", ")
+                ),
             ));
         }
-        if kind == ReaderKind::Csv && sheet.is_some() {
-            return Err(invalid("/reader/sheet", "a csv reader has no sheets"));
+        match kind {
+            ReaderKind::Json => {
+                match (&records, lines) {
+                    (Some(_), true) => {
+                        return Err(invalid(
+                            "/reader/records",
+                            "JSON Lines' records are its lines: give records or lines, not both",
+                        ));
+                    }
+                    (None, false) => {
+                        return Err(invalid(
+                            "/reader/records",
+                            "a json reader needs records, a JSON Pointer to the array of records (\"\" for the document), or lines: true",
+                        ));
+                    }
+                    (Some(r), false) if super::json::tokens(r).is_none() => {
+                        return Err(invalid(
+                            "/reader/records",
+                            "records is a JSON Pointer: empty, or /name/... from the document",
+                        ));
+                    }
+                    _ => {}
+                }
+                if let Some(c) = &children
+                    && (c.is_empty() || super::json::tokens(c).is_none())
+                {
+                    return Err(invalid(
+                        "/reader/children",
+                        "children is a JSON Pointer from a record: /name/...",
+                    ));
+                }
+            }
+            ReaderKind::Xml => {
+                if !records
+                    .as_deref()
+                    .is_some_and(|r| super::xml::path_ok(r, true))
+                {
+                    return Err(invalid(
+                        "/reader/records",
+                        "an xml reader needs records, the elements' path from the root by local name: /Export/Items/Item",
+                    ));
+                }
+                if let Some(c) = &children
+                    && !super::xml::path_ok(c, false)
+                {
+                    return Err(invalid(
+                        "/reader/children",
+                        "children is an element path from a record by local name: Components/Component",
+                    ));
+                }
+            }
+            ReaderKind::Csv | ReaderKind::Xlsx => {}
         }
         let reader = Reader {
             kind,
@@ -222,6 +340,9 @@ impl Mapping {
             delimiter,
             sheet,
             header_row,
+            records,
+            children,
+            lines,
         };
         let key = column(o.take("key")?, "/key")?;
         let mut fields = BTreeMap::new();
@@ -396,8 +517,7 @@ impl Mapping {
 
     pub fn to_json(&self) -> Value {
         let r = &self.reader;
-        let mut reader =
-            json!({"type": match r.kind { ReaderKind::Csv => "csv", ReaderKind::Xlsx => "xlsx" }});
+        let mut reader = json!({"type": r.kind.as_str()});
         if let Some(f) = &r.file {
             reader["file"] = json!(f);
         }
@@ -413,7 +533,17 @@ impl Mapping {
         if r.header_row != 1 {
             reader["header_row"] = json!(r.header_row);
         }
-        let mut v = json!({"format": FORMAT, "kind": KIND, "reader": reader, "key": self.key});
+        if let Some(x) = &r.records {
+            reader["records"] = json!(x);
+        }
+        if let Some(x) = &r.children {
+            reader["children"] = json!(x);
+        }
+        if r.lines {
+            reader["lines"] = json!(true);
+        }
+        let format = if r.kind.tree() { FORMAT } else { 1 };
+        let mut v = json!({"format": format, "kind": KIND, "reader": reader, "key": self.key});
         if !self.fields.is_empty() {
             let f: Map<String, Value> = self
                 .fields
@@ -663,6 +793,46 @@ pub(crate) mod tests {
                 json!({"format": 1, "kind": "ryuplm.import", "reader": {"type": "csv"}, "key": "k", "fields": {"number": {"from": "n"}}, "extra": 1}),
                 "/extra",
             ),
+            (
+                json!({"format": 1, "kind": "ryuplm.import", "reader": {"type": "json", "records": "/items"}, "key": "k", "fields": {"number": {"from": "n"}}}),
+                "/format",
+            ),
+            (
+                json!({"format": 2, "kind": "ryuplm.import", "reader": {"type": "csv", "records": "/items"}, "key": "k", "fields": {"number": {"from": "n"}}}),
+                "/reader",
+            ),
+            (
+                json!({"format": 2, "kind": "ryuplm.import", "reader": {"type": "xml", "records": "/A/B", "lines": true}, "key": "k", "fields": {"number": {"from": "n"}}}),
+                "/reader",
+            ),
+            (
+                json!({"format": 2, "kind": "ryuplm.import", "reader": {"type": "json"}, "key": "k", "fields": {"number": {"from": "n"}}}),
+                "/reader/records",
+            ),
+            (
+                json!({"format": 2, "kind": "ryuplm.import", "reader": {"type": "json", "records": "/items", "lines": true}, "key": "k", "fields": {"number": {"from": "n"}}}),
+                "/reader/records",
+            ),
+            (
+                json!({"format": 2, "kind": "ryuplm.import", "reader": {"type": "json", "records": "items"}, "key": "k", "fields": {"number": {"from": "n"}}}),
+                "/reader/records",
+            ),
+            (
+                json!({"format": 2, "kind": "ryuplm.import", "reader": {"type": "json", "records": "/items", "children": ""}, "key": "k", "fields": {"number": {"from": "n"}}}),
+                "/reader/children",
+            ),
+            (
+                json!({"format": 2, "kind": "ryuplm.import", "reader": {"type": "xml", "records": "Export/Item"}, "key": "k", "fields": {"number": {"from": "n"}}}),
+                "/reader/records",
+            ),
+            (
+                json!({"format": 2, "kind": "ryuplm.import", "reader": {"type": "xml", "records": "/Export/Item", "children": "/Components"}, "key": "k", "fields": {"number": {"from": "n"}}}),
+                "/reader/children",
+            ),
+            (
+                json!({"format": 2, "kind": "ryuplm.import", "reader": {"type": "xml", "records": "/e:Export/Item"}, "key": "k", "fields": {"number": {"from": "n"}}}),
+                "/reader/records",
+            ),
         ];
         for (v, at) in cases {
             let e = Mapping::read("m", crate::canonical::to_string(&v).as_bytes()).unwrap_err();
@@ -676,6 +846,33 @@ pub(crate) mod tests {
         assert_eq!(
             Mapping::read("Bad Name", b"{}").unwrap_err().code,
             Code::ImportMappingInvalid
+        );
+    }
+
+    #[test]
+    fn tree_mappings_are_format_2_and_csv_ones_stay_1() {
+        let j = json!({"format": 2, "kind": "ryuplm.import",
+            "reader": {"type": "json", "file": "*.json", "records": "/data/items", "children": "/parts"},
+            "key": "/id", "fields": {"number": {"from": "/pn"}},
+            "bom": {"level": "#level", "quantity": "/qty"}, "numbers": "keep"});
+        let m = Mapping::from_json("t", &j).unwrap();
+        assert_eq!(m.reader.kind, ReaderKind::Json);
+        assert_eq!(m.reader.records.as_deref(), Some("/data/items"));
+        assert_eq!(m.to_json(), j);
+        assert_eq!(Mapping::read("t", m.to_text().as_bytes()).unwrap(), m);
+        let l = json!({"format": 2, "kind": "ryuplm.import", "reader": {"type": "json", "lines": true},
+            "key": "/id", "fields": {"number": {"from": "/pn"}}, "numbers": "keep"});
+        assert_eq!(Mapping::from_json("l", &l).unwrap().to_json(), l);
+        let x = json!({"format": 2, "kind": "ryuplm.import",
+            "reader": {"type": "xml", "records": "/Export/Item", "children": "Components/Component"},
+            "key": "@number", "fields": {"number": {"from": "@number"}}, "numbers": "keep"});
+        assert_eq!(Mapping::from_json("x", &x).unwrap().to_json(), x);
+        let mut c = erp();
+        c["format"] = json!(2);
+        assert_eq!(
+            Mapping::from_json("erp", &c).unwrap().to_json(),
+            erp(),
+            "csv stays format 1"
         );
     }
 

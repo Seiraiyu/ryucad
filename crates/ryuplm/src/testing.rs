@@ -287,6 +287,107 @@ pub fn import_source(
     (f, mapping, first, second)
 }
 
+/// A CSV's rows (comma-delimited, header first) as the same records in
+/// JSON (`{"records": [{column: cell}]}`) and in XML
+/// (`<Export><Record><column>cell</column></Record></Export>`), for the
+/// tree readers' tests and bars (design 935). Every cell is written, empty
+/// or not, so a JSON table has every column the CSV has; an XML element
+/// with no text gives no column, as the reader decides. The columns must
+/// be XML names.
+pub fn csv_as_trees(csv: &str) -> (String, String) {
+    let raw = crate::import::csv::parse(csv, ',').expect("the CSV reads");
+    let mut rows = raw.into_iter().map(|(_, c)| c);
+    let header = rows.next().expect("a header row");
+    let empty = String::new();
+    let esc = |s: &str| {
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+    };
+    let mut json = String::from("{\"records\": [");
+    let mut xml = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Export>\n");
+    let mut first = true;
+    for r in rows {
+        if r.iter().all(|c| c.trim().is_empty()) {
+            continue;
+        }
+        if !first {
+            json.push(',');
+        }
+        first = false;
+        json.push_str("\n {");
+        xml.push_str(" <Record>");
+        for (j, (h, c)) in header
+            .iter()
+            .zip(r.iter().chain(std::iter::repeat(&empty)))
+            .enumerate()
+        {
+            if j > 0 {
+                json.push_str(", ");
+            }
+            json.push_str(&serde_json::to_string(h).expect("a string"));
+            json.push_str(": ");
+            json.push_str(&serde_json::to_string(c).expect("a string"));
+            xml.push_str(&format!("<{h}>{}</{h}>", esc(c)));
+        }
+        json.push('}');
+        xml.push_str("</Record>\n");
+    }
+    json.push_str("\n]}\n");
+    xml.push_str("</Export>\n");
+    (json, xml)
+}
+
+/// Mapping `m`, written for a CSV, for the trees [`csv_as_trees`] makes:
+/// a JSON reader at `/records` naming each column `/<column>`, or an XML
+/// reader at `/Export/Record` naming each column by its element.
+pub fn tree_mapping(
+    m: &crate::import::mapping::Mapping,
+    kind: crate::import::mapping::ReaderKind,
+) -> crate::import::mapping::Mapping {
+    use crate::import::mapping::{Reader, ReaderKind};
+    let name = |c: &str| match kind {
+        ReaderKind::Json => format!("/{}", crate::import::json::escape(c)),
+        _ => c.to_owned(),
+    };
+    let mut t = m.clone();
+    t.reader = Reader {
+        kind,
+        file: None,
+        encoding: None,
+        delimiter: None,
+        sheet: None,
+        header_row: 1,
+        records: Some(
+            if kind == ReaderKind::Json {
+                "/records"
+            } else {
+                "/Export/Record"
+            }
+            .to_owned(),
+        ),
+        children: None,
+        lines: false,
+    };
+    t.key = name(&m.key);
+    for f in t.fields.values_mut() {
+        f.from = name(&f.from);
+    }
+    for r in &mut t.class {
+        r.when = r.when.iter().map(|(k, v)| (name(k), v.clone())).collect();
+    }
+    if let Some(b) = &mut t.bom {
+        b.quantity = name(&b.quantity);
+        for c in [&mut b.parent, &mut b.level, &mut b.find, &mut b.refdes]
+            .into_iter()
+            .flatten()
+        {
+            *c = name(c);
+        }
+    }
+    t
+}
+
 /// A cell for [`xlsx`]: a shared string, an inline string, a number as
 /// written, a boolean, or no cell at all (the next one keeps its column).
 #[derive(Clone, Copy, Debug)]

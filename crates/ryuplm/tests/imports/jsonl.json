@@ -1,0 +1,20 @@
+{
+  "class": "machined",
+  "fields": {
+    "name": {
+      "from": "/title"
+    },
+    "number": {
+      "from": "/sku"
+    }
+  },
+  "format": 2,
+  "key": "/sku",
+  "kind": "ryuplm.import",
+  "numbers": "keep",
+  "reader": {
+    "file": "dump*.jsonl",
+    "lines": true,
+    "type": "json"
+  }
+}
