@@ -104,7 +104,7 @@ pub fn decode(bytes: &[u8], enc: Encoding) -> Result<String, Refusal> {
             if b.len() % 2 == 1 {
                 return Err(Refusal::file("UTF-16 text has an odd number of bytes"));
             }
-            let units = b.chunks_exact(2).map(|p| {
+            let units = b.as_chunks::<2>().0.iter().map(|p| {
                 if enc == Encoding::Utf16Le {
                     u16::from_le_bytes([p[0], p[1]])
                 } else {

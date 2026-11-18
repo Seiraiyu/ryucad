@@ -99,7 +99,7 @@ fn role(column: &str, config: &Config, exact: bool) -> Option<(String, usize)> {
     let n = norm(column);
     let digits = n.len() - n.trim_end_matches(|c: char| c.is_ascii_digit()).len();
     let (base, group) = match n[n.len() - digits..].parse::<usize>() {
-        Ok(g) if digits > 0 && g >= 1 && g <= 10 => (&n[..n.len() - digits], g - 1),
+        Ok(g) if digits > 0 && (1..=10).contains(&g) => (&n[..n.len() - digits], g - 1),
         _ => (n.as_str(), 0),
     };
     for (r, list) in SPELLINGS {

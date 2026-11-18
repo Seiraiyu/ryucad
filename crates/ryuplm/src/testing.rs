@@ -231,7 +231,7 @@ pub fn import_source(
     )
     .expect("the seeded mapping reads");
     fn desc(k: usize) -> String {
-        if k % 3 == 0 {
+        if k.is_multiple_of(3) {
             format!("Screw M{} x {}", 3 + k % 5, 4 + k % 9)
         } else {
             format!("Part {k}")
@@ -239,12 +239,12 @@ pub fn import_source(
     }
     let row = |k: usize, second: bool| -> String {
         let mut d = desc(k);
-        if second && k % 5 == 0 {
+        if second && k.is_multiple_of(5) {
             d += " rev B";
         }
-        let parent = (k > 10 && k % 6 == 0).then(|| k / 10 + 1);
+        let parent = (k > 10 && k.is_multiple_of(6)).then(|| k / 10 + 1);
         let mut qty = 1 + k % 3;
-        if second && k % 7 == 0 {
+        if second && k.is_multiple_of(7) {
             qty += 1;
         }
         let (mfr, mpn) = if k % 4 == 1 {
@@ -255,13 +255,13 @@ pub fn import_source(
         format!(
             "{},P-{k:05},{d},{},{},{mfr},{mpn},{},{},{},n{}\n",
             k + 1,
-            if k % 2 == 0 { "P" } else { "M" },
-            if k % 4 == 0 {
+            if k.is_multiple_of(2) { "P" } else { "M" },
+            if k.is_multiple_of(4) {
                 String::new()
             } else {
                 (k % 50).to_string()
             },
-            if k % 3 == 0 { "S" } else { "" },
+            if k.is_multiple_of(3) { "S" } else { "" },
             parent.map(|p| p.to_string()).unwrap_or_default(),
             if parent.is_some() {
                 qty.to_string()

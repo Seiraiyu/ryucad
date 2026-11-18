@@ -177,6 +177,15 @@ pub struct Ask<'a> {
     pub working: bool,
 }
 
+/// One other checkout searched: its folder as shown, its project and rows
+/// (working, released; `None` when it is this catalogue), or the error
+/// opening it, and its problems.
+type Searched = (
+    String,
+    std::result::Result<(Option<ProjectId>, Vec<Value>, Vec<Value>), Value>,
+    Vec<Value>,
+);
+
 /// `bom.where_used`: `{schema, item, number, catalogue, working,
 /// released, problems, searched}`, rows from this catalogue then each
 /// other catalogue found, each row with its `catalogue` and `folder`.
@@ -215,11 +224,7 @@ pub fn answer(session: &mut Session, ask: &Ask) -> Result<Value> {
     // Each other checkout opened and searched on its own thread (design
     // 734's bar: ten checkouts of 10,000 items in a second); the answer
     // keeps the folders' order.
-    let results: Vec<(
-        String,
-        std::result::Result<(Option<ProjectId>, Vec<Value>, Vec<Value>), Value>,
-        Vec<Value>,
-    )> = std::thread::scope(|s| {
+    let results: Vec<Searched> = std::thread::scope(|s| {
         let handles: Vec<_> = others
             .iter()
             .map(|dir| {

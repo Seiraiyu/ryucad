@@ -49,8 +49,7 @@ impl Catalogue {
         // then parsed on threads, then gathered in path order again: the
         // same items and faults as one by one, in a fraction of the time
         // at 100,000 items (design 734's bar).
-        let mut read: Vec<(String, Option<(Id, std::sync::Arc<[u8]>)>)> =
-            Vec::with_capacity(paths.len());
+        let mut read: Vec<Read> = Vec::with_capacity(paths.len());
         for path in paths {
             let got = match item_of(&path) {
                 Some(id) => src.read_shared(&path)?.map(|b| (id, b)),
@@ -124,6 +123,35 @@ impl Catalogue {
             .with("item", s)
         })
     }
+}
+
+/// An item file's path, and its ID and bytes when it is one that reads.
+type Read = (String, Option<(Id, std::sync::Arc<[u8]>)>);
+
+/// Items parsed at or above this many go out on threads.
+const PARALLEL_FROM: usize = 256;
+
+/// Each read file parsed as its item, in order, on up to eight threads
+/// once there are many.
+fn parse_all(read: &[Read]) -> Vec<Option<Result<Item>>> {
+    let one = |(_, got): &Read| got.as_ref().map(|(id, b)| Item::read(id, b));
+    if read.len() < PARALLEL_FROM {
+        return read.iter().map(one).collect();
+    }
+    let threads = std::thread::available_parallelism()
+        .map_or(4, |n| n.get())
+        .min(8);
+    let per = read.len().div_ceil(threads);
+    std::thread::scope(|s| {
+        let handles: Vec<_> = read
+            .chunks(per)
+            .map(|chunk| s.spawn(move || chunk.iter().map(one).collect::<Vec<_>>()))
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().expect("a parsing thread doesn't panic"))
+            .collect()
+    })
 }
 
 #[cfg(test)]
@@ -217,32 +245,4 @@ pub(crate) mod tests {
         assert_eq!(c.find("B-1").unwrap(), id);
         assert_eq!(c.find("Z-9").unwrap_err().code, Code::ItemNotFound);
     }
-}
-
-/// Items parsed at or above this many go out on threads.
-const PARALLEL_FROM: usize = 256;
-
-/// Each read file parsed as its item, in order, on up to eight threads
-/// once there are many.
-fn parse_all(read: &[(String, Option<(Id, std::sync::Arc<[u8]>)>)]) -> Vec<Option<Result<Item>>> {
-    let one = |(_, got): &(String, Option<(Id, std::sync::Arc<[u8]>)>)| {
-        got.as_ref().map(|(id, b)| Item::read(id, b))
-    };
-    if read.len() < PARALLEL_FROM {
-        return read.iter().map(one).collect();
-    }
-    let threads = std::thread::available_parallelism()
-        .map_or(4, |n| n.get())
-        .min(8);
-    let per = read.len().div_ceil(threads);
-    std::thread::scope(|s| {
-        let handles: Vec<_> = read
-            .chunks(per)
-            .map(|chunk| s.spawn(move || chunk.iter().map(one).collect::<Vec<_>>()))
-            .collect();
-        handles
-            .into_iter()
-            .flat_map(|h| h.join().expect("a parsing thread doesn't panic"))
-            .collect()
-    })
 }
