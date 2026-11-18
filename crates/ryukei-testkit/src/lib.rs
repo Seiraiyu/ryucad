@@ -219,6 +219,7 @@ pub mod rings;
 pub mod sheet_bytes;
 pub mod sheet_metal;
 pub mod sheet_metal_bytes;
+pub mod slit_seeds;
 pub mod sweep_bytes;
 pub mod tolerant_bytes;
 pub mod tweak_bytes;
