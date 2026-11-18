@@ -26,6 +26,16 @@ pub enum Fault {
     Overlap(usize),
     /// Connection `n`'s first via left a nanometre short of its ring.
     ShrunkVia(usize),
+    /// Connection `n`'s first via (by the bottom) ends at `in1`: a blind
+    /// via, and the bottom leg cut off (ryueda 7.A).
+    ViaToIn1(usize),
+    /// Part `n` turned over to the bottom where it is, its routes left as
+    /// they were (ryueda 7.A).
+    Flip(usize),
+    /// Connection `n`'s first via (by the bottom) made 400 µm across, and a
+    /// stub of another net on `in1` 170 µm from its hole's wall and 120 µm
+    /// from its ring (ryueda 7.A).
+    HoleGap(usize),
 }
 
 #[derive(Clone, Debug)]
@@ -40,6 +50,12 @@ pub struct Spec {
     pub via: (i64, i64),
     pub pieces: usize,
     pub fault: Option<Fault>,
+    /// Copper layers: 2, or an even stackup of more, whose `in1` carries
+    /// every third connection within a row (ryueda 7.A).
+    pub layers: usize,
+    /// Every n-th part on the bottom, its connections there too; 0 for
+    /// none (ryueda 7.A).
+    pub bottom_every: usize,
 }
 
 impl Spec {
@@ -55,6 +71,8 @@ impl Spec {
             via: (300 * UM, 600 * UM),
             pieces: 2,
             fault: None,
+            layers: 2,
+            bottom_every: 0,
         }
     }
 
@@ -81,7 +99,19 @@ impl Spec {
         if self.fault == Some(Fault::Overlap(n)) {
             at.1 += self.pitch.1 - MM + 100 * UM;
         }
-        (at, if row % 2 == 0 { 0 } else { 180_000 })
+        let rot = if row % 2 == 0 { 0 } else { 180_000 };
+        (at, rot)
+    }
+
+    /// Part `n`'s placement file: a bottom part is mirrored, and turned a
+    /// further half turn so its pads stay where the top part's were.
+    fn placement(&self, n: usize) -> Value {
+        let (at, rot) = self.place(n);
+        if self.bottom(n) || self.fault == Some(Fault::Flip(n)) {
+            json!({"at": [at.0, at.1], "rotation_mdeg": (rot + 180_000) % 360_000, "side": "bottom"})
+        } else {
+            json!({"at": [at.0, at.1], "rotation_mdeg": rot})
+        }
     }
 
     /// Part `n`'s pad (1 or 2) centre.
@@ -100,6 +130,27 @@ impl Spec {
         self.via_every > 0 && self.same_row(n) && n.is_multiple_of(self.via_every)
     }
 
+    /// Whether part `n` sits on the bottom: every `bottom_every`-th, where
+    /// both its connections run within a row on the outer layers.
+    pub fn bottom(&self, n: usize) -> bool {
+        self.bottom_every > 0
+            && n % self.bottom_every == self.bottom_every - 1
+            && n > 0
+            && n + 1 < self.count()
+            && [n - 1, n]
+                .iter()
+                .all(|&c| self.same_row(c) && !self.by_vias(c))
+    }
+
+    fn plain_inner(&self, n: usize) -> bool {
+        self.layers > 2 && self.same_row(n) && !self.by_vias(n) && n % 3 == 1
+    }
+
+    /// Whether connection `n` runs on `in1`, through a via at each end.
+    pub fn inner(&self, n: usize) -> bool {
+        self.plain_inner(n) && !self.bottom(n) && !self.bottom(n + 1)
+    }
+
     /// The board's size.
     fn size(&self) -> (i64, i64) {
         (
@@ -110,8 +161,8 @@ impl Spec {
 }
 
 fn put(dir: &Path, rel: &str, kind: &str, mut v: Value) {
+    v["format"] = json!(ryueda::conn::format_of(kind, &v));
     v["kind"] = json!(kind);
-    v["format"] = json!(1);
     let path = dir.join(rel);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(path, ryueda::canonical::to_string(&v)).unwrap();
@@ -137,24 +188,23 @@ pub fn write(dir: &Path, s: &Spec) {
         .collect();
     let occ = |n: usize| format!("c{}/r{}", n / s.parts, n % s.parts);
     let (w, h) = s.size();
-    put(
-        dir,
-        "boards/main/board.json",
-        "ryueda.board",
-        json!({
-            "name": "Generated", "design": "d", "preset": "jlc-2l",
-            "outline": {"start": [0, 0], "edges": [
-                {"type": "line", "to": [w, 0]}, {"type": "line", "to": [w, h]},
-                {"type": "line", "to": [0, h]}, {"type": "line", "to": [0, 0]}]},
-        }),
-    );
+    let mut board = json!({
+        "name": "Generated", "design": "d", "preset": "jlc-2l",
+        "outline": {"start": [0, 0], "edges": [
+            {"type": "line", "to": [w, 0]}, {"type": "line", "to": [w, h]},
+            {"type": "line", "to": [0, h]}, {"type": "line", "to": [0, 0]}]},
+    });
+    if s.layers > 2 {
+        let st = ryueda::board::stackup::even(&ryueda::board::preset::JLC_2L, s.layers).unwrap();
+        board["stackup"] = serde_json::to_value(st).unwrap();
+    }
+    put(dir, "boards/main/board.json", "ryueda.board", board);
     for n in 0..s.count() {
-        let (at, rot) = s.place(n);
         put(
             dir,
             &format!("boards/main/placements/{}.json", occ(n).replace('/', ".")),
             "ryueda.placement",
-            json!({"at": [at.0, at.1], "rotation_mdeg": rot}),
+            s.placement(n),
         );
     }
     let preset = ryueda::board::preset::JLC_2L;
@@ -174,12 +224,25 @@ pub fn write(dir: &Path, s: &Spec) {
         } else {
             s.pad(n + 1, 1)
         };
-        let mut legs = vec![("top", a, b)];
-        if s.by_vias(n) {
+        let side = |p: usize| if s.bottom(p) { "bottom" } else { "top" };
+        let (sa, sb) = (side(n), side(n + 1));
+        let mut legs = vec![(sa, a, b)];
+        if sa != sb {
+            // A top part to a bottom one: down a via half way.
+            let m = ((a.0 + b.0) / 2, a.1);
+            legs = vec![(sa, a, m), (sb, m, b)];
+            put(
+                dir,
+                &format!("boards/main/vias/v{n}_m.json"),
+                "ryueda.via",
+                json!({"net": net, "at": [m.0, m.1], "drill_nm": s.via.0, "diameter_nm": s.via.1}),
+            );
+        } else if s.by_vias(n) || s.inner(n) {
             let dir_x = if b.0 > a.0 { 1 } else { -1 };
             let va = (a.0 + dir_x * VIA_OFFSET, a.1);
             let vb = (s.pad(n + 1, 1).0 - dir_x * VIA_OFFSET, a.1);
-            legs = vec![("top", a, va), ("bottom", va, vb), ("top", vb, b)];
+            let middle = if s.inner(n) { "in1" } else { "bottom" };
+            legs = vec![("top", a, va), (middle, va, vb), ("top", vb, b)];
             for (k, at) in [("a", va), ("b", vb)] {
                 let (mut drill, mut dia) = s.via;
                 if k == "a" && s.fault == Some(Fault::ShrunkVia(n)) {
@@ -187,11 +250,31 @@ pub fn write(dir: &Path, s: &Spec) {
                     drill = drill.max(preset.via_diameter_min_nm - 2 * ring + 2);
                     dia = drill + 2 * ring - 2;
                 }
+                let mut via =
+                    json!({"net": net, "at": [at.0, at.1], "drill_nm": drill, "diameter_nm": dia});
+                if k == "a" && s.fault == Some(Fault::ViaToIn1(n)) {
+                    via["to"] = json!("in1");
+                }
+                if k == "a" && s.fault == Some(Fault::HoleGap(n)) {
+                    via["diameter_nm"] = json!(400 * UM);
+                    // Another net's stub on in1, its edge 320 µm from the
+                    // via's centre: 120 µm from the 200 µm ring, 170 µm
+                    // from the 150 µm wall.
+                    let other = nets[&occ(n + 1)]["2"].clone();
+                    let y = at.1 + 320 * UM + s.width / 2;
+                    track(
+                        format!("stub{n}"),
+                        &other,
+                        "in1",
+                        (at.0 - 500 * UM, y),
+                        (at.0 + 500 * UM, y),
+                    );
+                }
                 put(
                     dir,
                     &format!("boards/main/vias/v{n}_{k}.json"),
                     "ryueda.via",
-                    json!({"net": net, "at": [at.0, at.1], "drill_nm": drill, "diameter_nm": dia}),
+                    via,
                 );
             }
         }
@@ -236,5 +319,18 @@ pub fn seeded(seed: u64) -> Spec {
         via: (preset.default_via_drill_nm, preset.default_via_diameter_nm),
         pieces: 1 + (next(&mut s) % 2) as usize,
         fault: None,
+        layers: 2,
+        bottom_every: 0,
+    }
+}
+
+/// [`seeded`] on 2, 4 or 6 copper layers, every third part on the bottom
+/// or none (ryueda 7.A); its first draws are `seeded`'s.
+pub fn seeded_multilayer(seed: u64) -> Spec {
+    let mut s = seed ^ 0x6c61_7965_7273;
+    Spec {
+        layers: [2, 4, 6][(next(&mut s) % 3) as usize],
+        bottom_every: [0, 3][(next(&mut s) % 2) as usize],
+        ..seeded(seed)
     }
 }
