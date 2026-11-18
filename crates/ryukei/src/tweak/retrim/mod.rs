@@ -573,8 +573,9 @@ fn attempt_adjusted(
         // Slits and seeds (design 683, plan 21.C, question 983): every
         // seed set failed. The first set whose seeds alone over-use an
         // edge walks once more without the shortcut's seeds there that
-        // don't hold their old face; its answer stands only if it closes
-        // (or halts), else the first try's failure is reported.
+        // are slit pieces (design 724, plan 22.C) or don't hold their old
+        // face; its answer stands only if it closes (or halts), else the
+        // first try's failure is reported.
         if !shortcut.is_empty()
             && matches!(
                 kept,
