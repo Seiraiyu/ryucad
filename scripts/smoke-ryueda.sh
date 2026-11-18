@@ -5,7 +5,9 @@
 # net of its own), its netlist, ERC and check, a library component
 # released (PDM) in a repository of its own, undo and redo through the
 # daemon, the activity log, a board placed, routed, checked, rendered and
-# exported, the daemon's status and stop, and a run in process.
+# exported, made four layers with a track on in1 and exported again, a
+# part turned over to the bottom and back, the daemon's status and stop,
+# and a run in process.
 #
 #   scripts/smoke-ryueda.sh path/to/ryueda [path/to/kicad] [path/to/ryueda-app]
 #
@@ -137,6 +139,34 @@ n=$(find fab -type f | wc -l | tr -d ' ')
 # Nine Gerber layers, two BOMs, two pick and place files, the manifest;
 # no drill file, since nothing is drilled.
 [ "$n" = 14 ] || { echo "FAIL the package has $n files, not 14: $(find fab -type f)" && exit 1; }
+# Four copper layers (ryueda 7.A): OUT down two vias to in1 and back,
+# exported again with two more copper files and the vias' drill file.
+run board edit main --layers 4
+has '"stackup"' "the board has a stackup"
+run board via add main --net out --at 4.2,3 --id v1
+run board via add main --net out --at 4.8,3 --id v2
+run board track add main --net out --layer in1 --path 4.2,3 4.8,3 --id t4
+has '"layer":"in1"' "a track on in1"
+run board drc main
+has '"findings":[]' "four layers, DRC finds nothing"
+run board export main --out fab4
+n=$(find fab4 -type f | wc -l | tr -d ' ')
+# Eleven Gerber layers, the plated drills, two BOMs, two pick and place
+# files, the manifest.
+[ "$n" = 17 ] || { echo "FAIL the four-layer package has $n files, not 17: $(find fab4 -type f)" && exit 1; }
+[ -s fab4/main-copper-in1.g2 ] || { echo "FAIL no in1 copper file" && exit 1; }
+# R3 turned over to the bottom: its tracks end on the top, so its two nets
+# open; its pick and place row says bottom.
+run board place main R3 --at 4.5,6 --side bottom
+has '"side":"bottom"' "R3 is on the bottom"
+run board status main
+has '"open":2' "R3's two nets are open"
+run board export main --out fabb --allow-errors
+grep -q '^R3,.*,bottom$' fabb/main-pos.csv || { echo "FAIL R3's row isn't bottom: $(cat fabb/main-pos.csv)" && exit 1; }
+# And back on top, where its tracks meet it.
+run board place main R3 --at 4.5,6
+run board status main
+has '"open":0' "R3 on top again, every net is routed"
 if [ -n "$app" ]; then
     out=$("$app" --smoke "$work/project") || true
     case "$out" in
