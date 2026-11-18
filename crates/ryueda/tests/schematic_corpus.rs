@@ -1765,6 +1765,9 @@ fn edits_to_the_corpus_change_only_what_they_name() {
                 format!("{rename}_X"),
             ],
             vec![],
+            // A rename keeps the net drawn as it was (#859), but a longer
+            // name may move its labels and their stubs (the RP2040's
+            // XOUT_X shortens one stub by 1.5 grid steps).
             vec![net_key(rename)],
         ));
         edits.push((
@@ -3084,6 +3087,63 @@ fn corpus_branches(
     commit("ours");
     let _ = gitrepo::git_try(&top, &[], &["merge", "--no-commit", "-q", "theirs"]);
     (board, top, before)
+}
+
+/// #859's round: ours renames VSNS to FB, theirs draws VSNS as a wire; the
+/// merger takes theirs' layout whole and lays it out again over the merged
+/// connectivity. R9 stays joined to the net by a wire, not a label.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release only")]
+fn a_relayout_after_a_rename_keeps_the_nets_wires() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = |x: &str| x.to_owned();
+    let (board, _top, _) = corpus_branches(
+        dir.path(),
+        "buck",
+        "buck",
+        "c_0_1uf",
+        &[vec![s("net"), s("rename"), s("buck/VSNS"), s("FB")]],
+        &[vec![s("place"), s("buck"), s("net VSNS wire")]],
+    );
+    let status = ryueda(&board, 1, &["merge", "status"]);
+    let ids: Vec<String> = status["conflicts"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .map(|c| c["id"].as_str().unwrap().to_owned())
+        .collect();
+    if ids.iter().any(|i| i == "buck#layout") {
+        ryueda(&board, 1, &["merge", "resolve", "buck#layout", "--theirs"]);
+    }
+    let again = ryueda(&board, 1, &["merge", "status"]);
+    for c in again["conflicts"].as_array().cloned().unwrap_or_default() {
+        if c["kind"] == "layout_stale" {
+            ryueda(
+                &board,
+                1,
+                &[
+                    "merge",
+                    "resolve",
+                    c["id"].as_str().unwrap(),
+                    "--repair",
+                    "relayout",
+                ],
+            );
+        }
+    }
+    let l = layout_of(&board, "buck");
+    let labels = l["labels"]["vsns"].as_array().cloned().unwrap_or_default();
+    let labelled: Vec<&str> = labels.iter().map(|x| x["on"].as_str().unwrap()).collect();
+    // Theirs labels R8 and U1 and wires R9 to R8's junction.
+    assert!(
+        !labelled.iter().any(|on| on.starts_with("r9/")),
+        "R9 takes a label: {labelled:?}"
+    );
+    assert!(
+        !labels.is_empty() && labels.iter().all(|x| x["text"] == "FB"),
+        "{labels:?}"
+    );
 }
 
 /// Settles every item of the merge by its first repair (a block's areas

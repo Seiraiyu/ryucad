@@ -4843,7 +4843,8 @@ fn place_labels(
     routes: &mut BTreeMap<usize, Vec<Vec<Point>>>,
 ) -> Vec<usize> {
     // Labels that keep their place first, so nothing new takes it: those
-    // saying what they said, then renamed ones, then new ones; within
+    // saying what they said, then renamed ones, then new ones (a wire kept
+    // with its net's labels goes with them, #859); within
     // each, net labels (which lie along their pins) before ports (which
     // turn off them, and so reach past their neighbours' labels).
     let mut order: Vec<(u8, bool, Nm, std::cmp::Reverse<usize>, usize)> = Vec::new();
@@ -4863,10 +4864,33 @@ fn place_labels(
                 .into_iter()
                 .flatten()
                 .any(|r| r[0] == end || r[r.len() - 1] == end);
+        // A label still saying what it said: its pin's text now (a rename
+        // or a new layer changes it).
+        let says_still = |l: &Label| {
+            l.on.split_once('/')
+                .and_then(|(key, number)| {
+                    let q = block.part(key)?;
+                    let j = block.parts[q]
+                        .pins
+                        .iter()
+                        .position(|x| x.number == number)?;
+                    Some(l.text == block.label_text(q, j))
+                })
+                .unwrap_or(false)
+        };
         let rank = match had {
-            Some(l) if l.text == block.label_text(p, k) && l.kind == kind => 0,
+            Some(l) if says_still(&l) && l.kind == kind => 0,
             Some(_) => 1,
-            None if wired_before => 0,
+            // A wire kept with its net's labels goes with them: after them
+            // when they were renamed, so the labels it joins stand first
+            // (#859: R9's wire to R8's renamed label was lost).
+            None if wired_before => {
+                if prev_labels(n).iter().all(|l| says_still(l)) {
+                    0
+                } else {
+                    1
+                }
+            }
             None => 2,
         };
         // Ground drops below its pin and a supply rises above it: from
@@ -6728,6 +6752,32 @@ mod tests {
         assert_ne!(l.placed["r2"].at[1], r2_was[1], "R2 moves onto R1's row");
         let why = crate::instr::judge(&block, l, &align).unwrap_err();
         assert!(why.starts_with("R3 is on sheet Second"), "{why}");
+    }
+
+    /// #859: a net renamed and laid out again keeps its wires and gains
+    /// no labels.
+    #[test]
+    fn a_renamed_net_keeps_its_wires() {
+        let b = seeded(4, 6);
+        let base = lay(&b).layout;
+        let key = base
+            .routes
+            .keys()
+            .find(|k| !k.starts_with("rail:") && base.labels.get(*k).is_some_and(|l| !l.is_empty()))
+            .or_else(|| base.routes.keys().find(|k| !k.starts_with("rail:")))
+            .expect("a wired signal net")
+            .clone();
+        let mut e = b.clone();
+        let n = e.net(&key).unwrap();
+        e.nets[n].name = "FB".into();
+        e.previous = Some(base.clone());
+        let out = lay(&e).layout;
+        assert_eq!(out.routes.get(&key), base.routes.get(&key), "wires kept");
+        assert_eq!(
+            out.labels.get(&key).map(Vec::len),
+            base.labels.get(&key).map(Vec::len),
+            "no label added"
+        );
     }
 
     /// A PHY, its connector and a termination resistor on the TD pair.
