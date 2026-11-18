@@ -77,6 +77,7 @@ fn board_faults(b: &Board, path: &str) -> Vec<Fault> {
     super::outline::judge(b)
         .into_iter()
         .chain(preset)
+        .chain(b.stackup.iter().flat_map(super::stackup::judge))
         .map(|f| f.with("path", path))
         .collect()
 }
@@ -104,7 +105,7 @@ fn load_one(
                 piece(&mut h, name.as_bytes());
                 piece(&mut h, &bytes);
                 board = Some(
-                    match doc::read::<Board>(&bytes, &path, BOARD_KIND, FORMAT) {
+                    match doc::read::<Board>(&bytes, &path, BOARD_KIND, NEWEST) {
                         Ok(b) => Loaded {
                             faults: board_faults(&b, &path),
                             item: Ok(b),
@@ -409,6 +410,21 @@ mod tests {
         let (boards, _) = load(&files(&[("boards/b/board.json", &other)])).unwrap();
         let b = &boards[&Id::parse("b", "board").unwrap()];
         assert_eq!(b.faults()[0].error.details["pointer"], "/preset");
+    }
+
+    #[test]
+    fn a_bad_stackup_is_a_fault_and_a_good_one_reads() {
+        let good = BOARD.replace(r#""format":1"#, r#""format":2"#).replace(
+            r#""preset":"jlc-2l""#,
+            r#""preset":"jlc-2l","stackup":{"layers":[{"kind":"copper","thickness_nm":35000},{"kind":"dielectric","thickness_nm":1530000},{"kind":"copper","thickness_nm":35000}]}"#,
+        );
+        let (boards, _) = load(&files(&[("boards/b/board.json", &good)])).unwrap();
+        let b = &boards[&Id::parse("b", "board").unwrap()];
+        assert!(b.faults().is_empty(), "{:?}", b.faults());
+        let bad = good.replace(r#"{"kind":"dielectric","thickness_nm":1530000},"#, "");
+        let (boards, _) = load(&files(&[("boards/b/board.json", &bad)])).unwrap();
+        let f = boards[&Id::parse("b", "board").unwrap()].faults();
+        assert_eq!(f[0].error.code, Code::BoardStackupInvalid);
     }
 
     const TRACK: &str = r#"{"format":1,"kind":"ryueda.track","layer":"top","net":"sda","points":[[0,0],[10,0]],"width_nm":5}"#;

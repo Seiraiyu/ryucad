@@ -68,6 +68,13 @@ pub struct Preset {
     pub edge_clearance_nm: i64,
     /// The least distance from a track to another island's mask opening.
     pub mask_trace_clearance_nm: i64,
+    /// The least distance from copper to a via's hole wall, a through
+    /// pad's and an unplated hole's, where the hole doesn't join it.
+    pub via_hole_clearance_nm: i64,
+    pub pth_hole_clearance_nm: i64,
+    pub npth_hole_clearance_nm: i64,
+    /// Whether the process makes blind and buried vias.
+    pub blind_vias: bool,
     /// The assembly service's file form, if the fabricator has one.
     pub assembly: Option<AssemblyForm>,
 }
@@ -96,6 +103,29 @@ impl Preset {
             "default_via_drill_nm": self.default_via_drill_nm,
             "default_via_diameter_nm": self.default_via_diameter_nm,
         })
+    }
+}
+
+impl Preset {
+    /// The stackup a board has when it gives none: two copper layers
+    /// round one FR-4 core filling the board's thickness.
+    pub fn stackup(&self) -> super::stackup::Stackup {
+        use super::stackup::{StackLayer, Stackup};
+        let cu = StackLayer::Copper {
+            thickness_nm: self.copper_thickness_nm,
+        };
+        Stackup {
+            layers: vec![
+                cu.clone(),
+                StackLayer::Dielectric {
+                    thickness_nm: self.board_thickness_nm - 2 * self.copper_thickness_nm,
+                    material: Some("FR-4".into()),
+                    er_ppm: None,
+                    loss_ppm: None,
+                },
+                cu,
+            ],
+        }
     }
 }
 
@@ -154,6 +184,14 @@ pub const JLC_ASSEMBLY: AssemblyForm = AssemblyForm {
 ///   1.6 mm ±10%; outer copper 1 oz. The page gives no µm figure for 1 oz:
 ///   35 µm is 1 oz/ft² converted (about 34.8 µm), not the page's.
 ///
+/// The hole clearances were read by the coxswain from the same page on
+/// 2026-11-18 (ryueda 7.A): "Via hole to Track": "0.2mm"; "PTH to
+/// Track": "0.35mm is recommended, minimum 0.28mm" (the preset takes the
+/// minimum); "NPTH to Track": "0.2mm". Blind and buried vias are HDI
+/// only: https://jlcpcb.com/pcb-fabrication/hdi-pcb gives HDI's layer
+/// count as "4–24 layers", and the capabilities page lists blind (laser)
+/// and buried vias under HDI, so this 1-2 layer process makes none.
+///
 /// ryueda's defaults (a 0.25 mm track, a 0.30 mm drill in a 0.60 mm via)
 /// are its own choices and meet every rule above.
 pub const JLC_2L: Preset = Preset {
@@ -177,6 +215,10 @@ pub const JLC_2L: Preset = Preset {
     via_hole_spacing_nm: 200_000,
     edge_clearance_nm: 200_000,
     mask_trace_clearance_nm: 90_000,
+    via_hole_clearance_nm: 200_000,
+    pth_hole_clearance_nm: 280_000,
+    npth_hole_clearance_nm: 200_000,
+    blind_vias: false,
     assembly: Some(JLC_ASSEMBLY),
 };
 

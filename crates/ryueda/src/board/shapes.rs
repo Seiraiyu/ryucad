@@ -556,6 +556,7 @@ pub(crate) mod tests {
             preset: "jlc-2l".into(),
             outline: super::super::file::Contour::rect(50_000_000, 50_000_000),
             cutouts: vec![],
+            stackup: None,
         };
         files.insert(
             "boards/b/board.json".into(),

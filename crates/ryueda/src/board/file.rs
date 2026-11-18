@@ -15,6 +15,10 @@ pub const PLACEMENTS: &str = "placements";
 pub const BOARD_KIND: &str = "ryueda.board";
 pub const PLACEMENT_KIND: &str = "ryueda.placement";
 pub const FORMAT: u64 = 1;
+/// The newest format read; a file is written at 2 only when it holds
+/// what format 1 can't (a stackup, a bottom placement, an inner track, a
+/// via's span).
+pub const NEWEST: u64 = 2;
 pub const TRACKS: &str = "tracks";
 pub const VIAS: &str = "vias";
 pub const HOLES: &str = "holes";
@@ -96,6 +100,8 @@ pub struct Board {
     pub outline: Contour,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cutouts: Vec<Contour>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stackup: Option<super::stackup::Stackup>,
 }
 
 /// One closed contour: from `start`, each edge to its `to`; closed when

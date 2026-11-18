@@ -153,6 +153,7 @@ pub fn create(
         preset: super::preset::DEFAULT.name.into(),
         outline,
         cutouts: Vec::new(),
+        stackup: None,
     };
     let mut w = Writes::default();
     w.put(board_path(&id), &board, BOARD_KIND);
