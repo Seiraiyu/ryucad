@@ -6,6 +6,8 @@
 //! ([`resolve`]) is `check`'s.
 
 use crate::error::{Code, Error};
+use crate::fault::{Fault, Severity};
+use crate::reps::{self, Index};
 use crate::id::{Id, ProjectId};
 use crate::load::Catalogue;
 use std::collections::BTreeMap;
@@ -76,6 +78,75 @@ pub fn judge(cat: &Catalogue) -> Vec<Error> {
     out
 }
 
+/// Links followed on disk, all warnings: `item_link_unresolved` for a
+/// project no folder searched holds or a part it hasn't, and
+/// `item_number_mismatch` for a representation whose `number` property
+/// isn't its item's. A link that can't be followed never fails anything
+/// (design 734): a catalogue cloned without its CAD repos still checks.
+pub fn resolve(cat: &Catalogue, index: &Index) -> Vec<Fault> {
+    let mut out = Vec::new();
+    for (id, item) in &cat.items {
+        for (i, l) in item.links.iter().enumerate() {
+            let at = format!("/links/{i}");
+            let warn = |e: Error| {
+                Fault::of(
+                    Severity::Warning,
+                    e.with("item", id)
+                        .with("pointer", &at)
+                        .with("product", &l.product)
+                        .with("project", &l.project)
+                        .with("part", &l.part),
+                )
+            };
+            let Some(dir) = index.dir(&l.product, &l.project) else {
+                out.push(warn(
+                    Error::new(
+                        Code::ItemLinkUnresolved,
+                        format!(
+                            "item {id}: no folder searched holds {} project {}",
+                            l.product, l.project
+                        ),
+                    )
+                    .with("searched", &index.searched),
+                ));
+                continue;
+            };
+            let src = crate::source::Folder(dir);
+            if !reps::part_exists(&src, &l.product, &l.part) {
+                out.push(warn(
+                    Error::new(
+                        Code::ItemLinkUnresolved,
+                        format!(
+                            "item {id}: {} project {} in {} has no part {}",
+                            l.product,
+                            l.project,
+                            dir.display(),
+                            l.part
+                        ),
+                    )
+                    .with("folder", dir.display().to_string()),
+                ));
+                continue;
+            }
+            if let Some(n) = reps::number_of(&src, &l.product, &l.part)
+                && n != item.number
+            {
+                out.push(warn(
+                    Error::new(
+                        Code::ItemNumberMismatch,
+                        format!(
+                            "item {id} is {:?}, but its {} representation {} says {n:?}",
+                            item.number, l.product, l.part
+                        ),
+                    )
+                    .with("number", &n),
+                ));
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use crate::catalogue::tests::pid;
@@ -111,6 +182,57 @@ mod tests {
             [
                 ("item_link_duplicate".into(), "error", "0000000000002".into()),
                 ("item_link_duplicate".into(), "error", "0000000000003".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn links_are_followed_on_disk_and_never_fail() {
+        use crate::reps::tests::cad_project;
+        let d = tempfile::tempdir().unwrap();
+        let top = d.path().canonicalize().unwrap();
+        cad_project(&top.join("mech"), &pid(3), &["frame", "bolt"], &[]);
+        std::fs::write(
+            top.join("mech/parts/frame/properties.json"),
+            r#"{"format":1,"kind":"ryupdm.properties","number":"OLD-1"}"#,
+        )
+        .unwrap();
+        let mut a = Item::new("A-1");
+        a.links = vec![link("ryucad", 3, "frame")]; // number differs
+        let mut b = Item::new("A-2");
+        b.links = vec![link("ryucad", 3, "nut")]; // no such part
+        let mut c = Item::new("A-3");
+        c.links = vec![link("ryueda", 9, "main")]; // no such project
+        let mut e = Item::new("A-4");
+        e.links = vec![link("ryucad", 3, "bolt")]; // fine: no number set
+        let f = files(
+            &[],
+            None,
+            &[
+                ("0000000000001", a),
+                ("0000000000002", b),
+                ("0000000000003", c),
+                ("0000000000004", e),
+            ],
+        );
+        let cat = crate::load::Catalogue::load(&f).unwrap();
+        let ix = crate::reps::Index::scan(&[top.clone()]);
+        let got: Vec<(String, bool, String)> = super::resolve(&cat, &ix)
+            .iter()
+            .map(|x| {
+                (
+                    serde_json::to_value(x.error.code).unwrap().as_str().unwrap().to_owned(),
+                    x.is_error(),
+                    x.error.details["item"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("item_number_mismatch".into(), false, "0000000000001".into()),
+                ("item_link_unresolved".into(), false, "0000000000002".into()),
+                ("item_link_unresolved".into(), false, "0000000000003".into()),
             ]
         );
     }
