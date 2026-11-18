@@ -772,6 +772,96 @@ fn released_builds_have_their_own_budget() {
     assert!(matches!(&r, Rung::Done(d) if matches!(**d, Err(crate::Error::Cancelled))));
 }
 
+/// Design 919, plan 23.A (Decision 1): a failure lies at the failing
+/// piece's own face where that is pinned; else at every pinned face one
+/// of its arcs bounds or lies in; else at none.
+#[test]
+fn a_failure_lies_at_its_pieces_pin_or_the_pins_its_arcs_lie_on() {
+    use super::pins_at;
+    use crate::topo::Id;
+    use std::collections::BTreeSet;
+    let f = |i: usize| <FaceId as Id>::from_index(i);
+    let pinned = BTreeSet::from([f(1), f(2)]);
+    assert_eq!(pins_at(&pinned, f(1), [f(2), f(3)]), BTreeSet::from([f(1)]));
+    assert_eq!(
+        pins_at(&pinned, f(3), [f(3), f(2), f(4), f(2)]),
+        BTreeSet::from([f(2)])
+    );
+    assert_eq!(
+        pins_at(&pinned, f(3), [f(2), f(1)]),
+        BTreeSet::from([f(1), f(2)])
+    );
+    assert!(pins_at(&pinned, f(3), [f(4), f(3)]).is_empty());
+    assert!(pins_at(&BTreeSet::new(), f(1), [f(1)]).is_empty());
+}
+
+/// Design 919, plan 23.A: only a narrowed build whose walk failed `Open`,
+/// `Ambiguous` or `Clipped` at a pin asks its release, by its input face,
+/// keeping what the build had; a first build, a halt, or no pin asks
+/// nothing.
+#[test]
+fn only_a_narrowed_walk_failing_at_a_pin_asks_its_release() {
+    use super::walk::WalkError;
+    use super::{Build, ask_release, near};
+    use std::collections::BTreeSet;
+    let b = block();
+    let changes = raised(&b, 0.2);
+    let changed = changes.motion.keys().copied().collect();
+    let whole = super::region::region(&b, &changed).grown(&b);
+    let bx = super::body::region_box(&b, &whole, super::reach(&b, &changes));
+    let bottom = face_of(&b, FaceRole::MinusZ);
+    let pins = BTreeSet::from([bottom]);
+    let rest = whole.without(&b, &pins);
+    let ws: BTreeMap<FaceId, super::working::Working> = rest
+        .faces
+        .iter()
+        .map(|&f| {
+            let w = super::working::working(
+                &b,
+                f,
+                changes.surface.get(&f),
+                b.faces[f].sense,
+                true,
+                &bx,
+            );
+            (f, w.unwrap())
+        })
+        .collect();
+    // unmetered: a unit test.
+    let w = super::body::work_body(K, &b, &rest, &ws, &crate::work::Meter::free())
+        .unwrap()
+        .pinning(&pins);
+    let pin = *w.pinned.iter().next().expect("the bottom, pinned");
+    assert_eq!(w.origin[&pin], bottom);
+    let at = BTreeSet::from([pin]);
+    let had = near::Adjusts::from([(face_of(&b, FaceRole::PlusX), near::Adjust::Room(2))]);
+    let mut want = had.clone();
+    want.insert(bottom, near::Adjust::Released);
+    for e in [
+        WalkError::Open { piece: 0 },
+        WalkError::Ambiguous { piece: 0 },
+        WalkError::Clipped { piece: 0 },
+    ] {
+        for which in [Build::Retry, Build::Only] {
+            assert_eq!(
+                ask_release(&w, e, &at, which, &had),
+                Some(want.clone()),
+                "{e:?} {which:?}"
+            );
+        }
+        assert_eq!(ask_release(&w, e, &at, Build::First, &had), None, "{e:?}");
+        assert_eq!(
+            ask_release(&w, e, &BTreeSet::new(), Build::Only, &had),
+            None,
+            "{e:?}"
+        );
+    }
+    assert_eq!(
+        ask_release(&w, WalkError::Halted { piece: 0 }, &at, Build::Only, &had),
+        None
+    );
+}
+
 /// Design 724: only a narrowed build's clip asks room, for the input faces
 /// of the face clipped and of the faces whose clipped sides it reached,
 /// those working and not fixed.

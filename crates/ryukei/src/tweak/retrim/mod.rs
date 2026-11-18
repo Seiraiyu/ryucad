@@ -957,6 +957,44 @@ fn ask_room(
     room(&clipped)
 }
 
+/// The pins a walk's failure lies at (design 919, plan 23.A), as
+/// working-body faces: the failing piece's own face `own` where it is
+/// pinned; else every pinned face among `lies_in`, the faces the piece's
+/// arcs bound or lie in (each table edge's pcurves). The walk names a
+/// piece, not the arc it couldn't partner, so every arc is read.
+fn pins_at(
+    pinned: &std::collections::BTreeSet<FaceId>,
+    own: FaceId,
+    lies_in: impl IntoIterator<Item = FaceId>,
+) -> std::collections::BTreeSet<FaceId> {
+    if pinned.contains(&own) {
+        return std::collections::BTreeSet::from([own]);
+    }
+    lies_in.into_iter().filter(|f| pinned.contains(f)).collect()
+}
+
+/// What a build whose walk failed with `e` at the pins `at` (working-body
+/// faces, [`pins_at`]) asks when room asks nothing (design 919, plan
+/// 23.A): where the build is narrowed and `e` is `Open`, `Ambiguous` or
+/// `Clipped`, `adjusts` with each of their input faces released. A first
+/// build, a halt, or no pin asks nothing.
+fn ask_release(
+    w: &WorkBody,
+    e: WalkError,
+    at: &std::collections::BTreeSet<FaceId>,
+    which: Build,
+    adjusts: &near::Adjusts,
+) -> Option<near::Adjusts> {
+    if !which.narrowed() || matches!(e, WalkError::Halted { .. }) || at.is_empty() {
+        return None;
+    }
+    let mut out = adjusts.clone();
+    for p in at {
+        out.insert(w.origin[p], near::Adjust::Released);
+    }
+    Some(out)
+}
+
 /// What a narrowed build that refused `Uncertain` at table pair `a`, `b`
 /// (working-body faces) asks (design 724, plan 22.B): `off(working,
 /// pinned)` where one is a working face and the other is pinned, and
