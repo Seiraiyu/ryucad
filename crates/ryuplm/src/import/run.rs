@@ -186,6 +186,8 @@ struct Tally {
     lines_added: Vec<Value>,
     lines_changed: Vec<Value>,
     lines_unchanged: usize,
+    /// The lines this run placed: (parent, child key, find).
+    placed: BTreeSet<(Id, String, Option<String>)>,
 }
 
 /// What the three-way rule (Decision 7) makes of one value: `Take` sets
@@ -308,7 +310,9 @@ pub fn plan(
     let mut prov: BTreeMap<Id, Provenance> = BTreeMap::new();
     for (id, item) in &cat.items {
         if let Some(p) = Provenance::of(id, item, name)? {
-            by_key.insert(p.key.clone(), id.clone());
+            if !p.key.is_empty() {
+                by_key.insert(p.key.clone(), id.clone());
+            }
             prov.insert(id.clone(), p);
         }
     }
@@ -472,18 +476,170 @@ fn set_extra(item: &mut Item, name: &str, extra: &BTreeMap<String, String>) {
     }
 }
 
-/// BOM rows as own lines (Task 15).
+/// BOM rows as own lines of their parents (Decision 8), matched by
+/// (parent key, child key, find number) through the parent's provenance;
+/// the quantity by the three-way rule, refdes replaced.
 #[allow(clippy::too_many_arguments)]
 fn lines(
-    _cat: &Catalogue,
-    _m: &Mapping,
-    _rows: &[Mapped],
-    _by_key: &BTreeMap<String, Id>,
-    _prov: &mut BTreeMap<Id, Provenance>,
-    _work: &mut BTreeMap<Id, Item>,
-    _prefer: Option<Prefer>,
-    _t: &mut Tally,
+    cat: &Catalogue,
+    m: &Mapping,
+    rows: &[Mapped],
+    by_key: &BTreeMap<String, Id>,
+    prov: &mut BTreeMap<Id, Provenance>,
+    work: &mut BTreeMap<Id, Item>,
+    prefer: Option<Prefer>,
+    t: &mut Tally,
 ) -> Result<()> {
+    let Some(b) = &m.bom else { return Ok(()) };
+    let name = m.name.as_str();
+    let mut refusals = Vec::new();
+    let root: Option<Id> = match &b.root {
+        Some(r) => Some(
+            by_key
+                .get(r)
+                .cloned()
+                .map_or_else(|| cat.find(r), Ok)
+                .map_err(|e| {
+                    Error::new(
+                        Code::InvalidParam,
+                        format!(
+                            "bom.root {r:?} is no item of the catalogue or key of this import: {}",
+                            e.message
+                        ),
+                    )
+                    .with("import", name)
+                })?,
+        ),
+        None => None,
+    };
+    for r in rows {
+        let parent = match &r.record.parent {
+            Some(pk) => match by_key.get(pk) {
+                Some(id) => id.clone(),
+                None => {
+                    refusals.push(super::rows::Refusal::at(
+                        r.record.at,
+                        b.parent.as_deref(),
+                        format!("parent {pk:?} is no row of this import"),
+                    ));
+                    continue;
+                }
+            },
+            None => match &root {
+                Some(id) => id.clone(),
+                None => continue, // a top row: an item only
+            },
+        };
+        let child = by_key[&r.record.key].clone();
+        let quantity = r
+            .record
+            .quantity
+            .clone()
+            .expect("a line's quantity is required when read");
+        let place = (parent.clone(), r.record.key.clone(), r.record.find.clone());
+        if !t.placed.insert(place) {
+            refusals.push(super::rows::Refusal::at(
+                r.record.at,
+                None,
+                format!(
+                    "{:?} is placed under {} with find number {:?} twice",
+                    r.record.key, parent, r.record.find
+                ),
+            ));
+            continue;
+        }
+        let mut item = work
+            .remove(&parent)
+            .unwrap_or_else(|| cat.items[&parent].clone());
+        let p = prov.entry(parent.clone()).or_insert_with(|| Provenance {
+            key: String::new(),
+            ..Default::default()
+        });
+        let at = p
+            .lines
+            .iter()
+            .position(|l| l.child == r.record.key && l.find == r.record.find);
+        let shown = json!({"item": parent, "child": r.record.key, "row": r.record.at});
+        match at {
+            None => {
+                let line = crate::ids::random(|s| item.bom.iter().any(|l| l.line.as_str() == s))?;
+                item.bom.push(crate::item::Line {
+                    line: line.clone(),
+                    item: crate::item::ItemRef {
+                        catalogue: None,
+                        item: child,
+                    },
+                    quantity: quantity.clone(),
+                    unit: None,
+                    find: r.record.find.clone(),
+                    refdes: r.record.refdes.clone(),
+                    notes: None,
+                });
+                p.lines.push(ProvLine {
+                    child: r.record.key.clone(),
+                    find: r.record.find.clone(),
+                    line,
+                    quantity,
+                });
+                t.lines_added.push(shown);
+            }
+            Some(i) => {
+                let pl = p.lines[i].clone();
+                let cur = item.bom.iter().position(|l| l.line == pl.line);
+                let before = cur.map(|k| item.bom[k].clone());
+                let c = cur.map(|k| json!(item.bom[k].quantity));
+                let (b, n) = (json!(pl.quantity), json!(quantity));
+                match settle(Some(&b), c.as_ref(), Some(&n), prefer) {
+                    Settled::Take => {
+                        if let Some(k) = cur {
+                            item.bom[k].quantity = quantity.clone();
+                        }
+                        p.lines[i].quantity = quantity.clone();
+                    }
+                    Settled::Keep => p.lines[i].quantity = quantity.clone(),
+                    Settled::Conflict => {
+                        let mut v = conflict(
+                            &parent,
+                            &r.record.key,
+                            r.record.at,
+                            "quantity",
+                            Some(&b),
+                            c.as_ref(),
+                            Some(&n),
+                        );
+                        v["details"]["line"] = json!(pl.line);
+                        v["details"]["child"] = json!(r.record.key);
+                        t.conflicts.push(v);
+                    }
+                }
+                // refdes is the source's own data: replaced, never settled.
+                if let Some(k) = cur
+                    && r.record.refdes.is_some()
+                {
+                    item.bom[k].refdes = r.record.refdes.clone();
+                }
+                if cur.map(|k| &item.bom[k]) != before.as_ref() {
+                    t.lines_changed.push(shown);
+                } else {
+                    t.lines_unchanged += 1;
+                }
+            }
+        }
+        item.source.insert(name.to_owned(), p.to_json());
+        work.insert(parent, item);
+    }
+    if !refusals.is_empty() {
+        let first = refusals[0].message.clone();
+        return Err(Error::new(
+            Code::InvalidDocument,
+            format!(
+                "{} BOM row(s) of {name} don't place: {first}",
+                refusals.len()
+            ),
+        )
+        .with("import", name)
+        .with("refusals", &refusals));
+    }
     Ok(())
 }
 
@@ -515,6 +671,31 @@ fn missing(
             .with("key", key)
             .to_json(),
         );
+    }
+    for (id, item) in &cat.items {
+        let Ok(Some(p)) = Provenance::of(id, item, name) else {
+            continue;
+        };
+        for l in &p.lines {
+            if !t
+                .placed
+                .contains(&(id.clone(), l.child.clone(), l.find.clone()))
+            {
+                t.missing.push(
+                    Fault::warning(
+                        Code::ImportMissing,
+                        format!(
+                            "item {id}: the line placing {:?} is no longer in the source; it stays",
+                            l.child
+                        ),
+                    )
+                    .with("item", id)
+                    .with("line", &l.line)
+                    .with("child", &l.child)
+                    .to_json(),
+                );
+            }
+        }
     }
 }
 
@@ -850,5 +1031,109 @@ pub(crate) mod tests {
             1,
             "the missing plate isn't touched, let alone deleted"
         );
+    }
+
+    fn pcba() -> Mapping {
+        Mapping::from_json(
+            "bom",
+            &json!({"format": 1, "kind": "ryuplm.import", "reader": {"type": "csv"}, "key": "MPN",
+            "fields": {"description": {"from": "Desc"}}, "numbers": "assign", "scheme": "mech",
+            "bom": {"root": "PCBA-100", "quantity": "Qty", "refdes": "Ref"}}),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_flat_bom_becomes_the_root_items_own_lines() {
+        let mut f = files(&[("0000000000001", Item::new("PCBA-100"))]);
+        let csv = "MPN,Desc,Qty,Ref\nR-10K,Resistor,3,\"R1,R2,R3\"\nC-1U,Cap,2,\"C1,C2\"\n";
+        let (_, out) = planned(&f, &pcba(), csv, None);
+        let root = &out.items[&Id::parse("0000000000001", "item").unwrap()];
+        assert_eq!(root.bom.len(), 2);
+        assert_eq!(
+            (root.bom[0].quantity.as_str(), root.bom[0].refdes.as_deref()),
+            ("3", Some("R1,R2,R3"))
+        );
+        assert_eq!(root.source["bom"]["lines"].as_array().unwrap().len(), 2);
+        assert_eq!(out.report["lines"]["added"]["count"], 2);
+        apply(&mut f, &out);
+        // The catalogue edits one line, the source the other: both kept.
+        let cat = Catalogue::load(&f).unwrap();
+        let rid = Id::parse("0000000000001", "item").unwrap();
+        let mut r = cat.items[&rid].clone();
+        r.bom[1].quantity = "4".into();
+        f.insert(crate::ids::item_path(&rid), r.to_text().into_bytes());
+        let csv2 = "MPN,Desc,Qty,Ref\nR-10K,Resistor,5,\"R1,R2,R3,R4,R5\"\n";
+        let (_, out) = planned(&f, &pcba(), csv2, None);
+        let r2 = &out.items[&rid];
+        assert_eq!(r2.bom[0].quantity, "5");
+        assert_eq!(r2.bom[0].refdes.as_deref(), Some("R1,R2,R3,R4,R5"));
+        assert_eq!(r2.bom[1].quantity, "4", "the line the source dropped stays");
+        let missing: Vec<&str> = out.report["missing"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["details"]["child"].as_str().unwrap_or("item"))
+            .collect();
+        assert_eq!(
+            missing,
+            ["item", "C-1U"],
+            "the capacitor's item and its line"
+        );
+    }
+
+    #[test]
+    fn a_parent_child_bom_and_a_line_conflict() {
+        let m = Mapping::from_json("pc", &json!({"format": 1, "kind": "ryuplm.import", "reader": {"type": "csv"}, "key": "PN",
+            "fields": {"number": {"from": "PN"}}, "bom": {"parent": "Parent", "quantity": "Qty", "find": "Find"}})).unwrap();
+        let csv =
+            "Parent,PN,Qty,Find\n,KIT-1,,\nKIT-1,BOX-1,1,10\nKIT-1,LBL-1,2,20\nKIT-1,LBL-1,1,30\n";
+        let mut f = files(&[]);
+        let (_, out) = planned(&f, &m, csv, None);
+        let kit = out.items.values().find(|i| i.number == "KIT-1").unwrap();
+        let finds: Vec<(Option<&str>, &str)> = kit
+            .bom
+            .iter()
+            .map(|l| (l.find.as_deref(), l.quantity.as_str()))
+            .collect();
+        assert_eq!(
+            finds,
+            [(Some("10"), "1"), (Some("20"), "2"), (Some("30"), "1")]
+        );
+        apply(&mut f, &out);
+        let cat = Catalogue::load(&f).unwrap();
+        let (kid, k) = cat.items.iter().find(|(_, i)| i.number == "KIT-1").unwrap();
+        let mut k = k.clone();
+        k.bom[0].quantity = "3".into();
+        f.insert(crate::ids::item_path(kid), k.to_text().into_bytes());
+        let (_, out) = planned(&f, &m, &csv.replace("BOX-1,1,10", "BOX-1,2,10"), None);
+        let c = &out.report["conflicts"][0]["details"];
+        assert_eq!(
+            (
+                c["field"].as_str(),
+                c["base"].as_str(),
+                c["catalogue"].as_str(),
+                c["source"].as_str()
+            ),
+            (Some("quantity"), Some("1"), Some("3"), Some("2"))
+        );
+        assert!(out.items.get(kid).is_none_or(|i| i.bom[0].quantity == "3"));
+        // The same (parent, child, find) twice is refused.
+        let e = Catalogue::load(&f).and_then(|cat| {
+            let config = Config::read_in(&f, "ryuplm").unwrap();
+            plan(
+                &f,
+                &cat,
+                &config,
+                &m,
+                &rows(
+                    &m,
+                    "Parent,PN,Qty,Find\n,KIT-1,,\nKIT-1,BOX-1,1,10\nKIT-1,BOX-1,1,10\n",
+                ),
+                None,
+                100,
+            )
+        });
+        assert_eq!(e.err().map(|e| e.code), Some(Code::InvalidDocument));
     }
 }
