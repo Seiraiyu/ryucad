@@ -233,6 +233,7 @@ impl BoardShapes {
             occurrence: occ.into(),
             shape: rect(Point::new(at.0, at.1), size.0, size.1),
             open,
+            bottom: false,
         });
         self
     }

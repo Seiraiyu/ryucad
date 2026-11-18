@@ -5640,3 +5640,73 @@ fn a_four_layer_board_exports_layer_by_layer() {
     assert!(s["board"].get("stackup").is_none(), "{s}");
     assert_eq!(s["board"]["format"], 1, "{s}");
 }
+
+/// A part moved to the bottom from the CLI (ryueda 7.A): its answer and
+/// `board show` say so, its pads are bottom copper, and its pick and
+/// place row says `bottom`; a top part reads as stage 5 wrote it.
+#[test]
+fn parts_on_the_bottom_from_the_cli() {
+    let p = Pair::breakout();
+    for args in breakout_board::script() {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        p.ok(&args);
+    }
+    let id = breakout_board::BOARD;
+    let shown = p.ok(&["board", "show", id]);
+    let first = shown["occurrences"][0].clone();
+    let r = first["refdes"].as_str().unwrap().to_owned();
+    assert!(
+        first["placement"].get("side").is_none(),
+        "a top part shows as before: {first}"
+    );
+    let at = &first["placement"]["at"];
+    let mm = |v: &Value| {
+        let n = v.as_i64().unwrap();
+        format!("{}.{:06}", n / 1_000_000, n % 1_000_000)
+    };
+    let xy = format!("{},{}", mm(&at[0]), mm(&at[1]));
+    let placed = p.ok(&["board", "place", id, &r, "--at", &xy, "--side", "bottom"]);
+    assert_eq!(placed["placed"][0]["side"], "bottom", "{placed}");
+    // Its pads left the top: whatever was routed to them is open now.
+    assert!(
+        placed["drc"]["added"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["code"] == "net_open"),
+        "{placed}"
+    );
+    let shown = p.ok(&["board", "show", id, "--pads"]);
+    let o = shown["occurrences"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["refdes"] == r.as_str())
+        .unwrap();
+    assert_eq!(o["placement"]["side"], "bottom", "{o}");
+    let pad = shown["pads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["reference"].as_str().unwrap().contains(&format!(":{r}/")))
+        .unwrap();
+    assert!(
+        pad["layers"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("copper.bottom")),
+        "{pad}"
+    );
+    p.ok(&["board", "export", id, "--out", "fabb", "--allow-errors"]);
+    let text = fs::read_to_string(p.direct.join(format!("board/fabb/{id}-pos.csv"))).unwrap();
+    let line = text
+        .lines()
+        .find(|l| l.starts_with(&format!("{r},")))
+        .unwrap_or_else(|| panic!("no row for {r}: {text}"));
+    assert!(line.ends_with(",bottom"), "{line}");
+    p.fails(
+        &["board", "place", id, &r, "--at", &xy, "--side", "left"],
+        "invalid_param",
+        1,
+    );
+}

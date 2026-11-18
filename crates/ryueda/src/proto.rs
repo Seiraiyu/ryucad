@@ -642,7 +642,10 @@ pub enum Request {
         /// Degrees counterclockwise.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rotation: Option<String>,
-        /// `[{ref, at: [x, y], rotation?}]`.
+        /// `top` (the default) or `bottom`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        side: Option<String>,
+        /// `[{ref, at: [x, y], rotation?, side?}]`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ops: Option<Value>,
         /// The board's revision.

@@ -1587,11 +1587,11 @@ enum BoardCmd {
         #[command(flatten)]
         expect: Expect,
     },
-    /// Place parts: REF --at X,Y [--rotation A], or --ops for several (all or nothing).
+    /// Place parts: REF --at X,Y [--rotation A] [--side bottom], or --ops for several (all or nothing).
     ///
     /// The board's frame is the outline's: x right, y up (a --rect board's
     /// lower left corner at 0,0). A placement puts the footprint's origin at
-    /// X,Y and turns it counterclockwise about it.
+    /// X,Y and turns it counterclockwise about it, as seen from the top.
     Place {
         board: String,
         /// An occurrence reference (s1/u1) or a designator.
@@ -1608,9 +1608,14 @@ enum BoardCmd {
         /// Degrees counterclockwise.
         #[arg(long, allow_hyphen_values = true)]
         rotation: Option<String>,
-        /// JSON: [{ref, at: [x, y], rotation?}]; integers are nanometres (a
+        /// The side: top (the default) or bottom. A bottom part is its
+        /// footprint mirrored about its own y axis, then turned by --rotation
+        /// counterclockwise as seen from the top.
+        #[arg(long)]
+        side: Option<String>,
+        /// JSON: [{ref, at: [x, y], rotation?, side?}]; integers are nanometres (a
         /// rotation millidegrees), strings lengths (a rotation degrees): "90", not 90.
-        #[arg(long, value_name = "OPS", conflicts_with_all = ["ref", "at", "rotation"])]
+        #[arg(long, value_name = "OPS", conflicts_with_all = ["ref", "at", "rotation", "side"])]
         ops: Option<String>,
         #[command(flatten)]
         expect: Expect,
@@ -1687,7 +1692,9 @@ enum BoardCmd {
     /// --allow-errors, which the manifest records.
     ///
     /// Pick and place rotations are the placements' own: no fabricator's
-    /// per-package offsets are applied, so confirm them in its preview.
+    /// per-package offsets are applied, so confirm them in its preview. A
+    /// bottom part's row says bottom; X and Y are as seen from the top and
+    /// its rotation is the placement's.
     Export {
         board: String,
         /// A new or empty folder, or one an earlier export wrote (its
@@ -3840,6 +3847,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             r#ref,
             at,
             rotation,
+            side,
             ops,
             expect,
         }) => Request::BoardPlace {
@@ -3847,6 +3855,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             r#ref: r#ref.clone(),
             at: at.as_deref().map(|a| pair_arg("--at", a)).transpose()?,
             rotation: rotation.clone(),
+            side: side.clone(),
             ops: ops.as_deref().map(|o| json_arg("--ops", o)).transpose()?,
             expected_revision: expect.expect.clone(),
         },

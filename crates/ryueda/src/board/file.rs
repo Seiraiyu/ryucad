@@ -209,6 +209,31 @@ pub struct Placement {
     pub at: Point,
     #[serde(default)]
     pub rotation_mdeg: i64,
+    /// The side the part sits on; written only for the bottom.
+    #[serde(default, skip_serializing_if = "PlacementSide::is_top")]
+    pub side: PlacementSide,
+}
+
+/// The side of the board a part sits on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlacementSide {
+    #[default]
+    Top,
+    Bottom,
+}
+
+impl PlacementSide {
+    pub fn is_top(&self) -> bool {
+        *self == PlacementSide::Top
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            PlacementSide::Top => "top",
+            PlacementSide::Bottom => "bottom",
+        }
+    }
 }
 
 impl Contour {
@@ -364,8 +389,38 @@ mod tests {
     }
 
     #[test]
+    fn a_placements_side_is_written_only_on_the_bottom() {
+        let top = Placement {
+            at: [1, 2],
+            rotation_mdeg: 0,
+            side: PlacementSide::Top,
+        };
+        assert_eq!(
+            value(&top, PLACEMENT_KIND),
+            json!({"kind": PLACEMENT_KIND, "format": 1, "at": [1, 2], "rotation_mdeg": 0})
+        );
+        let bottom = Placement {
+            side: PlacementSide::Bottom,
+            ..top.clone()
+        };
+        let v = value(&bottom, PLACEMENT_KIND);
+        assert_eq!(v["side"], "bottom");
+        assert_eq!(v["format"], 2);
+        let back: Placement = doc::from_value(v, "p.json", PLACEMENT_KIND, NEWEST).unwrap();
+        assert_eq!(back, bottom);
+        let old: Placement = doc::from_value(
+            json!({"kind": PLACEMENT_KIND, "format": 1, "at": [0, 0]}),
+            "p.json",
+            PLACEMENT_KIND,
+            NEWEST,
+        )
+        .unwrap();
+        assert_eq!(old.side, PlacementSide::Top);
+    }
+
+    #[test]
     fn unknown_fields_are_refused() {
-        let v = json!({"kind": PLACEMENT_KIND, "format": 1, "at": [0, 0], "side": "top"});
+        let v = json!({"kind": PLACEMENT_KIND, "format": 1, "at": [0, 0], "flip": true});
         let e = doc::from_value::<Placement>(v, "p.json", PLACEMENT_KIND, FORMAT).unwrap_err();
         assert_eq!(e.code, crate::error::Code::InvalidDocument);
     }

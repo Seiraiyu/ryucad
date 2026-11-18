@@ -962,6 +962,10 @@ pub fn courtyards(s: &BoardShapes, board: &str) -> Vec<Finding> {
         .pairs(0, 0)
         .into_par_iter()
         .filter_map(|p| {
+            // Courtyards only meet on one side.
+            if s.courtyards[p.a].bottom != s.courtyards[p.b].bottom {
+                return None;
+            }
             let v = measure::touches(&bodies[p.a], &bodies[p.b]);
             if v == Verdict::No {
                 return None;
@@ -1232,6 +1236,18 @@ mod tests {
         let f = mask_clearance(&conn, &s, &preset::JLC_2L);
         assert_eq!(f.len(), 1, "{f:?}");
         assert_eq!(f[0].details["layer"], "copper.bottom");
+    }
+
+    #[test]
+    fn courtyards_on_opposite_sides_dont_overlap() {
+        let mut s = board(20 * MM, 10 * MM);
+        s.courtyard("u1", (5 * MM, 5 * MM), (4 * MM, 4 * MM), false)
+            .courtyard("u2", (6 * MM, 5 * MM), (4 * MM, 4 * MM), false);
+        assert_eq!(courtyards(&s, "b").len(), 1);
+        s.courtyards[1].bottom = true;
+        assert!(courtyards(&s, "b").is_empty());
+        s.courtyards[0].bottom = true;
+        assert_eq!(courtyards(&s, "b").len(), 1);
     }
 
     #[test]

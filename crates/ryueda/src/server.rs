@@ -1257,13 +1257,14 @@ fn dispatch(
             r#ref,
             at,
             rotation,
+            side,
             ops,
             expected_revision,
         } => crate::board::cmd::place(
             session,
             &board,
             match (&r#ref, &at) {
-                (Some(r), Some(a)) => Some((r.as_str(), a, rotation.as_deref())),
+                (Some(r), Some(a)) => Some((r.as_str(), a, rotation.as_deref(), side.as_deref())),
                 _ => None,
             },
             ops.as_ref(),

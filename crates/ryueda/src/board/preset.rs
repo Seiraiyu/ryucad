@@ -22,9 +22,10 @@ pub struct AssemblyForm {
     /// the rotation.
     pub pos: [&'static str; 5],
     /// What follows a length in the pick and place file (`mm`), and the
-    /// top side's name there.
+    /// top and bottom sides' names there.
     pub length_suffix: &'static str,
     pub top: &'static str,
+    pub bottom: &'static str,
 }
 
 /// A preset's numbers, in nanometres.
@@ -140,7 +141,12 @@ impl Preset {
 /// - CPL, https://jlcpcb.com/help/article/pick-place-file-for-pcb-assembly:
 ///   "Designator", "Mid X", "Mid Y" ("Required units: Metric(mm)", written
 ///   `12.5mm` as JLC's sample does), "Layer" ("Top / Bottom") and
-///   "Rotation" ("Positive values are counter clockwise").
+///   "Rotation" ("Positive values are counter clockwise"). The coxswain
+///   read the page again on 2026-11-18 (ryueda 7.A): Layer is "the board
+///   side where the component should be placed", so a bottom part's is
+///   `Bottom`. No JLC page says whether a bottom part's rotation is
+///   mirrored; ryueda writes the placement's, as seen from the top
+///   (unconfirmed: see `docs/claude/ryueda-board.md`).
 pub const JLC_ASSEMBLY: AssemblyForm = AssemblyForm {
     name: "jlc",
     supplier: "LCSC",
@@ -148,6 +154,7 @@ pub const JLC_ASSEMBLY: AssemblyForm = AssemblyForm {
     pos: ["Designator", "Mid X", "Mid Y", "Layer", "Rotation"],
     length_suffix: "mm",
     top: "Top",
+    bottom: "Bottom",
 };
 
 /// Read from https://jlcpcb.com/capabilities/pcb-capabilities on

@@ -71,6 +71,8 @@ pub struct CourtyardInfo {
     pub shape: Shape,
     /// Its graphics didn't close: this is their box.
     pub open: bool,
+    /// The part is on the bottom.
+    pub bottom: bool,
 }
 
 /// A track as drawn.
@@ -198,9 +200,17 @@ fn outline(b: &Board) -> (Shape, Shape) {
     (Shape::regions(Polarity::Positive, [region]), edges)
 }
 
-/// A sided layer name for a footprint layer on a top-side placement.
-fn layer_of(l: &str) -> String {
-    l.to_owned()
+/// A footprint's sided layer on the board: as it is for a top part,
+/// swapped (`silk.top` to `silk.bottom`, and back) for a bottom one.
+fn sided(l: &str, flipped: bool) -> String {
+    if !flipped {
+        return l.to_owned();
+    }
+    match l.rsplit_once('.') {
+        Some((kind, "top")) => format!("{kind}.bottom"),
+        Some((kind, "bottom")) => format!("{kind}.top"),
+        _ => l.to_owned(),
+    }
 }
 
 /// Pad references within one footprint: the number when it is unique,
@@ -256,6 +266,8 @@ fn one(
         out.notices.push(unsupported(o, "draws on the edge layer"));
         return out;
     }
+    // A part is mirrored exactly when it is on the bottom.
+    let flipped = place.mirror;
     let owner = format!("{board}:{}", o.label());
     let names = pad_names(f);
     let put = |out: &mut One, layer: &str, s: Shape| {
@@ -275,7 +287,8 @@ fn one(
             ));
             continue;
         };
-        let (top, bottom, inner) = pad::copper_sides(p);
+        let (t, b, inner) = pad::copper_sides(p);
+        let (top, bottom) = if flipped { (b, t) } else { (t, b) };
         for (l, name) in super::stackup::names(n).iter().enumerate() {
             let on = if l == 0 {
                 top
@@ -290,16 +303,18 @@ fn one(
         }
         let mut mask: [Option<Shape>; 2] = [None, None];
         for (i, side) in ["top", "bottom"].into_iter().enumerate() {
+            // `i` is the footprint's side; the mask's index the board's.
+            let on_board = if flipped { 1 - i } else { i };
             if p.layers.iter().any(|l| l == &format!("mask.{side}"))
                 && let Ok(m) = opening::mask(f, p, preset)
             {
-                mask[i] = Some(m.placed(&place, Polarity::Positive));
-                put(&mut out, &format!("mask.{side}"), m);
+                mask[on_board] = Some(m.placed(&place, Polarity::Positive));
+                put(&mut out, &sided(&format!("mask.{side}"), flipped), m);
             }
             if p.layers.iter().any(|l| l == &format!("paste.{side}"))
                 && let Ok(m) = opening::paste(f, p, preset)
             {
-                put(&mut out, &format!("paste.{side}"), m);
+                put(&mut out, &sided(&format!("paste.{side}"), flipped), m);
             }
         }
         if let Some((h, plated)) = pad::hole(p) {
@@ -332,7 +347,14 @@ fn one(
             number: p.number.clone(),
             pad: names[&id.to_string()].clone(),
             at,
-            rotation_mdeg: i64::from(Mdeg::new(p.rotation_mdeg + i64::from(place.rot.get())).get()),
+            rotation_mdeg: i64::from(
+                Mdeg::new(if flipped {
+                    i64::from(place.rot.get()) - p.rotation_mdeg
+                } else {
+                    p.rotation_mdeg + i64::from(place.rot.get())
+                })
+                .get(),
+            ),
             size: p.size,
             top,
             bottom,
@@ -371,7 +393,7 @@ fn one(
             other => graphic::drawn(other),
         };
         note_missing(&mut out.notices, o, &s);
-        put(&mut out, &layer_of(&g.layer), s);
+        put(&mut out, &sided(&g.layer, flipped), s);
     }
     for (field, string) in [
         (&f.fields.reference, refdes.as_str()),
@@ -383,7 +405,7 @@ fn one(
         }
         if let Ok(s) = text::centred(string, fl.at, fl.rotation_mdeg, fl.size_nm, fl.thickness_nm) {
             note_missing(&mut out.notices, o, &s);
-            put(&mut out, &layer_of(&fl.layer), s);
+            put(&mut out, &sided(&fl.layer, flipped), s);
         }
     }
     let court: Vec<&crate::footprint::Graphic> = f
@@ -397,6 +419,7 @@ fn one(
             occurrence: o.reference.clone(),
             shape: shape.placed(&place, Polarity::Positive),
             open,
+            bottom: flipped,
         });
     }
     out
@@ -440,7 +463,7 @@ pub fn build(p: &Project, b: &BoardFiles) -> Result<BoardShapes> {
                 Place {
                     at: Point::new(pl.at[0], pl.at[1]),
                     rot: Mdeg::new(pl.rotation_mdeg),
-                    mirror: false,
+                    mirror: pl.side == super::file::PlacementSide::Bottom,
                     scale: None,
                 },
             ))
@@ -634,6 +657,7 @@ pub(crate) mod tests {
             let pl = super::super::file::Placement {
                 at: [5_000_000 * (i as i64 + 1), 10_000_000],
                 rotation_mdeg: 90_000 * i as i64,
+                side: super::super::file::PlacementSide::Top,
             };
             files.insert(
                 format!(
@@ -722,6 +746,80 @@ pub(crate) mod tests {
         let s2 = build(&p2, &p2.boards[&id2]).unwrap();
         assert_eq!(s2.n(), 2);
         assert!(s2.layers.keys().all(|k| !k.starts_with("copper.in")));
+    }
+
+    #[test]
+    fn a_bottom_part_is_its_top_twin_mirrored_with_its_layers_swapped() {
+        let (_d, p_top, id) = placed();
+        let top = build(&p_top, &p_top.boards[&id]).unwrap();
+        let occ = top.pads[0].occurrence.clone();
+        let at = p_top.boards[&id].placements[&occ].item.as_ref().unwrap().at;
+        let path = format!(
+            "boards/b/placements/{}.json",
+            crate::board::file::placement_name(&occ)
+        );
+        let flipped = format!(
+            r#"{{"at":[{},{}],"format":2,"kind":"ryueda.placement","rotation_mdeg":0,"side":"bottom"}}"#,
+            at[0], at[1]
+        );
+        let (_d2, p_bot, id2) = placed_with(&[(path, flipped)]);
+        let bot = build(&p_bot, &p_bot.boards[&id2]).unwrap();
+        let pads = |s: &BoardShapes| -> Vec<PadInfo> {
+            s.pads
+                .iter()
+                .filter(|x| x.occurrence == occ)
+                .cloned()
+                .collect()
+        };
+        let (t, b) = (pads(&top), pads(&bot));
+        assert_eq!(t.len(), b.len());
+        for (x, y) in t.iter().zip(&b) {
+            // Mirrored about the part's own y axis: x reflected about its origin.
+            assert_eq!(y.at.x - at[0], -(x.at.x - at[0]), "{}", x.reference);
+            assert_eq!(y.at.y, x.at.y);
+            assert_eq!((y.top, y.bottom), (x.bottom, x.top));
+            assert_eq!(y.mask[1].is_some(), x.mask[0].is_some());
+            assert_eq!(y.net, x.net);
+        }
+        let owner = &t[0].reference[..t[0].reference.rfind('/').unwrap()];
+        let has = |s: &BoardShapes, l: &str| {
+            s.layers
+                .get(l)
+                .is_some_and(|v| v.iter().any(|(o, _)| o == owner))
+        };
+        for kind in ["copper", "mask", "paste", "silk", "fab", "courtyard"] {
+            if has(&top, &format!("{kind}.top")) {
+                assert!(
+                    has(&bot, &format!("{kind}.bottom")) && !has(&bot, &format!("{kind}.top")),
+                    "{kind}"
+                );
+            }
+        }
+        let c = bot.courtyards.iter().find(|c| c.occurrence == occ).unwrap();
+        assert!(c.bottom);
+        assert!(top.courtyards.iter().all(|c| !c.bottom));
+        // Mirrored regions keep their orientation: counterclockwise outers.
+        for (o, sh) in &bot.layers["copper.bottom"] {
+            if o != owner {
+                continue;
+            }
+            for part in &sh.parts {
+                if let ryu_board::shape::Piece::Region(r) = &part.piece {
+                    assert!(area2(&r.outer) > 0, "{o}");
+                }
+            }
+        }
+    }
+
+    /// Twice a contour's signed area, by its edges' chords.
+    fn area2(c: &ryu_board::geom::Contour) -> i128 {
+        c.edges()
+            .iter()
+            .map(|e| {
+                let (a, b) = (e.start(), e.end());
+                i128::from(a.x) * i128::from(b.y) - i128::from(b.x) * i128::from(a.y)
+            })
+            .sum()
     }
 
     #[test]

@@ -395,7 +395,7 @@ fn rotation(v: Option<&Value>) -> Result<i64> {
 pub fn place(
     session: &mut Session,
     board: &str,
-    one: Option<(&str, &[String; 2], Option<&str>)>,
+    one: Option<(&str, &[String; 2], Option<&str>, Option<&str>)>,
     ops: Option<&Value>,
     expected: Option<&str>,
 ) -> Result<Value> {
@@ -406,7 +406,9 @@ pub fn place(
     let id = b.id.clone();
     let design = board_of(b)?.design.clone();
     let asks: Vec<Value> = match (one, ops) {
-        (Some((r, at, rot)), None) => vec![json!({"ref": r, "at": at, "rotation": rot})],
+        (Some((r, at, rot, side)), None) => {
+            vec![json!({"ref": r, "at": at, "rotation": rot, "side": side})]
+        }
         (None, Some(Value::Array(list))) if !list.is_empty() => list.clone(),
         _ => {
             return Err(Error::new(
@@ -447,18 +449,34 @@ pub fn place(
         let placement = Placement {
             at: coord::point(at, unit)?,
             rotation_mdeg: rotation(a.get("rotation"))?,
+            side: match a.get("side").and_then(Value::as_str) {
+                None | Some("top") => PlacementSide::Top,
+                Some("bottom") => PlacementSide::Bottom,
+                Some(x) => {
+                    return Err(Error::new(
+                        Code::InvalidParam,
+                        format!("--side is top or bottom, not {x}"),
+                    )
+                    .with("param", "side"));
+                }
+            },
         };
         w.put(
             placement_path(&id, &o.reference),
             &placement,
             PLACEMENT_KIND,
         );
-        placed.push(json!({
+        let mut entry = json!({
             "occurrence": o.reference,
             "refdes": o.refdes,
             "at": placement.at,
             "rotation_mdeg": placement.rotation_mdeg,
-        }));
+        });
+        // Stage 5's answers don't move: a top part says no side.
+        if !placement.side.is_top() {
+            entry["side"] = json!(placement.side.name());
+        }
+        placed.push(entry);
     }
     let before = super::drc::now(session, &id);
     commit(session, &format!("board {id} place"), w)?;
@@ -543,7 +561,13 @@ pub fn show(p: &Project, board: &str, pads: bool) -> Result<Value> {
                         "value": o.value,
                         "footprint": o.footprint_ref,
                         "dnp": o.dnp,
-                        "placement": placement.map(|pl| json!({"at": pl.at, "rotation_mdeg": pl.rotation_mdeg})),
+                        "placement": placement.map(|pl| {
+                            let mut v = json!({"at": pl.at, "rotation_mdeg": pl.rotation_mdeg});
+                            if !pl.side.is_top() {
+                                v["side"] = json!(pl.side.name());
+                            }
+                            v
+                        }),
                     })
                 })
                 .collect();
