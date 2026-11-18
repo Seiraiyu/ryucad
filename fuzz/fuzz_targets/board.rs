@@ -143,6 +143,7 @@ fuzz_target!(|data: &[u8]| {
                     let fab = match ryueda::board::export::fabrication(board.id.as_str(), &c.shapes, "fuzz") {
                         Ok(files) => files.into_iter().map(|f| f.name + &f.text).collect::<String>(),
                         Err(e) => {
+                            ryueda::error::details::check(&e);
                             assert_ne!(e.code, ryueda::error::Code::Internal, "{e:?}");
                             format!("{:?}", e.code)
                         }
