@@ -22,9 +22,6 @@ pub enum Key {
     Hole(String),
 }
 
-/// The copper layers' names, by index.
-pub const LAYERS: [&str; 2] = ["copper.top", "copper.bottom"];
-
 /// A board's layout and the names its keys print by.
 #[derive(Clone, Debug)]
 pub struct Built {
@@ -33,6 +30,9 @@ pub struct Built {
     /// Each pad's reference (`<board>:<refdes>/<pad>`) by occurrence and
     /// pad name.
     pub pads: BTreeMap<(String, String), String>,
+    /// The copper layers' names, by index (`copper.top`, `copper.in1`,
+    /// …, `copper.bottom`).
+    pub layers: Vec<String>,
 }
 
 impl Built {
@@ -52,8 +52,8 @@ impl Built {
         }
     }
 
-    pub fn layer_name(&self, l: usize) -> &'static str {
-        LAYERS.get(l).copied().unwrap_or("copper.inner")
+    pub fn layer_name(&self, l: usize) -> &str {
+        self.layers.get(l).map_or("copper", String::as_str)
     }
 }
 
@@ -66,18 +66,23 @@ fn centre(h: &HoleShape) -> Point {
 
 /// The layout of board `board`'s shapes.
 pub fn build(board: &str, s: &BoardShapes) -> Built {
-    let layers = vec![
-        Layer {
-            name: LAYERS[0].into(),
-            side: Side::Top,
+    let n = s.n();
+    let names = super::stackup::names(n);
+    let layers = names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| Layer {
+            name: name.clone(),
+            side: if i == 0 {
+                Side::Top
+            } else if i + 1 == n {
+                Side::Bottom
+            } else {
+                Side::Inner
+            },
             copper: true,
-        },
-        Layer {
-            name: LAYERS[1].into(),
-            side: Side::Bottom,
-            copper: true,
-        },
-    ];
+        })
+        .collect();
     let mut layout = Layout {
         layers,
         ..Layout::default()
@@ -88,8 +93,8 @@ pub fn build(board: &str, s: &BoardShapes) -> Built {
             (pd.occurrence.clone(), pd.pad.clone()),
             pd.reference.clone(),
         );
-        for (layer, on) in [(0u8, pd.top), (1u8, pd.bottom)] {
-            if on {
+        for layer in 0..n as u8 {
+            if pd.on(usize::from(layer), n) {
                 layout.items.insert(
                     Key::Pad {
                         occ: pd.occurrence.clone(),
@@ -106,17 +111,20 @@ pub fn build(board: &str, s: &BoardShapes) -> Built {
         }
     }
     for t in &s.tracks {
+        let Some(layer) = t.layer.index(n) else {
+            continue;
+        };
         layout.items.insert(
             Key::Track(t.id.to_string()),
             Item {
-                layer: t.layer.index(2).unwrap_or(0), // Task 6
+                layer,
                 shape: t.shape.clone(),
                 net: Some(t.net.clone()),
             },
         );
     }
     for v in &s.vias {
-        for layer in [0u8, 1] {
+        for layer in v.from as u8..=v.to.min(n - 1) as u8 {
             layout.items.insert(
                 Key::Via(v.id.to_string(), layer),
                 Item {
@@ -146,7 +154,7 @@ pub fn build(board: &str, s: &BoardShapes) -> Built {
             key,
             Hole {
                 shape: h.shape,
-                span: (0, 1),
+                span: (h.span.0, h.span.1.min(n - 1)),
                 plated: h.plated,
                 backdrilled: Vec::new(),
             },
@@ -177,7 +185,7 @@ pub fn build(board: &str, s: &BoardShapes) -> Built {
                 Key::Pad {
                     occ: pd.occurrence.clone(),
                     pad: pd.pad.clone(),
-                    layer: 1,
+                    layer: (n - 1) as u8,
                 },
                 pd.at,
                 Some(PointSide::Bottom),
@@ -195,6 +203,7 @@ pub fn build(board: &str, s: &BoardShapes) -> Built {
         board: board.to_owned(),
         layout,
         pads,
+        layers: names,
     }
 }
 
@@ -203,6 +212,61 @@ mod tests {
     use super::*;
     use crate::board::file::CopperLayer;
     use crate::board::testing::{MM, UM, board};
+
+    #[test]
+    fn four_layers_blind_vias_and_inner_tracks() {
+        let mut s = board(20 * MM, 10 * MM);
+        s.through(
+            "j1",
+            "1",
+            (10 * MM, 5 * MM),
+            1700 * UM,
+            1000 * UM,
+            Some("a"),
+        )
+        .smd("r1", "1", (2 * MM, 5 * MM), (600 * UM, 600 * UM), Some("a"))
+        .layers(4)
+        .track(
+            "t1",
+            "a",
+            CopperLayer::Inner(1),
+            250 * UM,
+            &[(2 * MM, 5 * MM), (10 * MM, 5 * MM)],
+        )
+        .blind("v1", "a", (2 * MM, 5 * MM), 300 * UM, 600 * UM, (0, 1));
+        let b = build("b", &s);
+        let l = &b.layout;
+        assert_eq!(
+            l.layers.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(),
+            ["copper.top", "copper.in1", "copper.in2", "copper.bottom"]
+        );
+        assert_eq!(l.layers[1].side, Side::Inner);
+        assert_eq!(l.items[&Key::Track("t1".into())].layer, 1);
+        // The through pad on all four, the blind via on its two, the surface pad on top.
+        let count = |f: &dyn Fn(&Key) -> bool| l.items.keys().filter(|k| f(k)).count();
+        assert_eq!(
+            count(&|k| matches!(k, Key::Pad { occ, .. } if occ == "j1")),
+            4
+        );
+        assert_eq!(count(&|k| matches!(k, Key::Via(..))), 2);
+        assert_eq!(
+            count(&|k| matches!(k, Key::Pad { occ, .. } if occ == "r1")),
+            1
+        );
+        assert_eq!(l.holes[&Key::ViaDrill("v1".into())].span, (0, 1));
+        assert_eq!(
+            l.holes[&Key::PadDrill {
+                occ: "j1".into(),
+                pad: "1".into()
+            }]
+                .span,
+            (0, 3)
+        );
+        assert_eq!(b.layer_name(2), "copper.in2");
+        // The blind via and the inner track join the surface pad to the through pad.
+        let c = crate::board::connect::connect("b", &s);
+        assert!(c.report.opens.is_empty(), "{:?}", c.report.opens);
+    }
 
     #[test]
     fn pads_tracks_vias_and_drills_are_keyed_and_pads_are_points() {
