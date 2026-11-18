@@ -73,8 +73,11 @@ def positionals(args):
 
 
 def command(args):
-    """The board write `args` makes, `("undo",)`, `("redo",)`, or None."""
+    """The board write `args` makes, `("undo",)`, `("redo",)`, or None.
+    A call for help (`--help`, `-h`, `help`) writes nothing."""
     words = positionals(args)
+    if "--help" in args or "-h" in args or "help" in words[:4]:
+        return None
     for w in WRITES:
         if tuple(words[: len(w)]) == w:
             return w

@@ -33,7 +33,9 @@ class Command(unittest.TestCase):
     def test_reads_are_not_writes(self):
         for args in (["board", "show", "b", "--pads"], ["board", "drc", "b"],
                      ["board", "render", "b", "--out", "x.png"],
-                     ["board", "export", "b", "--out", "fab"], ["netlist"], ["--help"]):
+                     ["board", "export", "b", "--out", "fab"], ["netlist"], ["--help"],
+                     ["board", "create", "--help"], ["board", "track", "add", "-h"],
+                     ["board", "via", "delete", "help"]):
             self.assertIsNone(fx.command(args), args)
 
     def test_flags_dropped(self):
