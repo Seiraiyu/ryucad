@@ -1,5 +1,5 @@
-//! `check`: every finding of the catalogue's files, numbers elsewhere
-//! included, and ryupdm's release findings.
+//! `check`: every finding of the catalogue's files, numbers elsewhere,
+//! links and BOMs followed on disk, and ryupdm's release findings.
 
 use crate::error::{Code, Error, Result};
 use crate::judge::Context;
@@ -26,7 +26,16 @@ pub fn report(session: &mut Session, within: &[String]) -> Result<Value> {
         elsewhere: elsewhere(within),
         here: Some(session.root().to_path_buf()),
     };
-    let faults = crate::judge::all(&session.snapshot(), session.catalogue(), &cx);
+    let mut faults = crate::judge::all(&session.snapshot(), session.catalogue(), &cx);
+    let mut reps = crate::bom::disk(session, within);
+    let index = reps.index.clone();
+    let others = crate::numbers::others(session.root(), &cx.elsewhere);
+    faults.extend(crate::bom::findings(
+        session.catalogue(),
+        &index,
+        &mut reps,
+        &others,
+    ));
     let release = crate::release::findings(session)?;
     let errors = faults.iter().filter(|f| f.is_error()).count()
         + release.iter().filter(|f| f["severity"] == "error").count();

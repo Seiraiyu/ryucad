@@ -67,13 +67,13 @@ fn apply(item: &mut Item, f: Fields) {
 
 /// The item text, checked as the file reader checks it, so a bad field
 /// is refused with its pointer before anything is judged.
-fn text_of(id: &Id, item: &Item) -> Result<String> {
+pub(crate) fn text_of(id: &Id, item: &Item) -> Result<String> {
     let text = item.to_text();
     Item::read(id, text.as_bytes())?;
     Ok(text)
 }
 
-fn check_expected(what: &str, actual: &str, expected: Option<&str>) -> Result<()> {
+pub(crate) fn check_expected(what: &str, actual: &str, expected: Option<&str>) -> Result<()> {
     match expected {
         Some(e) if e != actual => Err(Error::new(
             Code::Conflict,
@@ -113,7 +113,7 @@ fn number_for(
 }
 
 /// An item as answers show it: its ID, path, revision and file.
-fn shown(session: &Session, id: &Id) -> Value {
+pub(crate) fn shown(session: &Session, id: &Id) -> Value {
     let mut item = session.catalogue().items[id].to_json();
     if let Some(o) = item.as_object_mut() {
         o.remove("format");
@@ -204,7 +204,7 @@ pub fn list(
 }
 
 /// The item `item` names, its revision checked against `expected`.
-fn current(session: &Session, item: &str, expected: Option<&str>) -> Result<(Id, Item)> {
+pub(crate) fn current(session: &Session, item: &str, expected: Option<&str>) -> Result<(Id, Item)> {
     let id = session.catalogue().find(item)?;
     let rev = session.item_revision(&id).unwrap_or_default();
     check_expected(&format!("item {id}"), &rev, expected)?;

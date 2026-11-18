@@ -100,6 +100,84 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
+    #[serde(rename = "item.link")]
+    ItemLink {
+        item: String,
+        product: String,
+        /// A project ID, or the project's folder (absolute, or relative
+        /// to the catalogue).
+        project: String,
+        part: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "item.unlink")]
+    ItemUnlink {
+        item: String,
+        product: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "bom.add")]
+    BomAdd {
+        item: String,
+        #[serde(default, flatten)]
+        fields: crate::bom::LineFields,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "bom.edit")]
+    BomEdit {
+        item: String,
+        line: String,
+        #[serde(default, flatten)]
+        fields: crate::bom::LineFields,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        unset: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "bom.remove")]
+    BomRemove {
+        item: String,
+        line: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "bom.get")]
+    BomGet {
+        item: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        depth: Option<usize>,
+        /// Folders searched for representations besides the work tree
+        /// and `pdm.dependents`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        within: Vec<String>,
+    },
+    #[serde(rename = "bom.diff")]
+    BomDiff {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        item: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        within: Vec<String>,
+    },
+    #[serde(rename = "bom.where_used")]
+    BomWhereUsed {
+        item: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        within: Vec<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        no_dependents: bool,
+        /// Working files only, no releases.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        working: bool,
+    },
     #[serde(rename = "settings.show")]
     SettingsShow {},
     #[serde(rename = "settings.edit")]
@@ -228,6 +306,11 @@ impl Request {
                 | Request::ItemEdit { .. }
                 | Request::ItemRenumber { .. }
                 | Request::ItemDelete { .. }
+                | Request::ItemLink { .. }
+                | Request::ItemUnlink { .. }
+                | Request::BomAdd { .. }
+                | Request::BomEdit { .. }
+                | Request::BomRemove { .. }
                 | Request::SettingsEdit { .. }
                 | Request::ReleasePropose { .. }
                 | Request::ReleaseObsolete { .. }
@@ -294,6 +377,20 @@ mod tests {
                 all: false,
                 dry_run: true,
                 note: None,
+                expected_revision: None,
+            },
+            Request::ItemLink {
+                item: "A-1".into(),
+                product: "ryucad".into(),
+                project: "p".into(),
+                part: "x".into(),
+                expected_revision: None,
+            },
+            Request::BomEdit {
+                item: "A-1".into(),
+                line: "0000000000001".into(),
+                fields: Default::default(),
+                unset: vec!["find".into()],
                 expected_revision: None,
             },
             Request::Undo { entry: None },

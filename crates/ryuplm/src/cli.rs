@@ -84,6 +84,24 @@ enum Command {
     },
     #[command(subcommand)]
     Release(ReleaseCmd),
+    /// An item's BOM: its own lines plus its representations' (show),
+    /// its own lines edited (add, edit, remove), and what changed (diff).
+    #[command(subcommand)]
+    Bom(BomCmd),
+    /// Every item whose own lines or representations' lines use ITEM:
+    /// here, in other catalogues' checkouts, and in their releases.
+    WhereUsed {
+        item: String,
+        /// Search the catalogues under this folder (else pdm.dependents).
+        #[arg(long = "in", value_name = "DIR")]
+        within: Vec<String>,
+        /// Don't search the pdm.dependents folders.
+        #[arg(long)]
+        no_dependents: bool,
+        /// Working files only: no releases.
+        #[arg(long)]
+        working: bool,
+    },
     /// Items added, removed and changed between two revisions.
     Diff {
         from: Option<String>,
@@ -173,6 +191,80 @@ impl FieldArgs {
 }
 
 #[derive(Subcommand)]
+enum BomCmd {
+    /// The item's BOM: own lines, then its representations' lines, each
+    /// child resolved to an item; --depth follows child items deeper.
+    Show {
+        item: String,
+        /// A Git revision of the catalogue: the working files by default.
+        #[arg(long, value_name = "REV")]
+        rev: Option<String>,
+        #[arg(long)]
+        depth: Option<usize>,
+        /// Also look for representations under this folder.
+        #[arg(long = "in", value_name = "DIR")]
+        within: Vec<String>,
+    },
+    /// What changed in BOMs between two revisions: HEAD and the working
+    /// files by default; every item, or ITEM's.
+    Diff {
+        item: Option<String>,
+        #[arg(long, value_name = "REV")]
+        from: Option<String>,
+        #[arg(long, value_name = "REV")]
+        to: Option<String>,
+        #[arg(long = "in", value_name = "DIR")]
+        within: Vec<String>,
+    },
+    /// A new own line: CHILD (an ID, a number, or <catalogue>:<ID>) and
+    /// its QUANTITY in the child's unit.
+    Add {
+        item: String,
+        child: String,
+        quantity: String,
+        #[arg(long)]
+        unit: Option<String>,
+        /// The find number a balloon cites.
+        #[arg(long)]
+        find: Option<String>,
+        #[arg(long)]
+        refdes: Option<String>,
+        #[arg(long)]
+        notes: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Change an own line; --unset clears unit, find, refdes or notes.
+    Edit {
+        item: String,
+        line: String,
+        #[arg(long)]
+        child: Option<String>,
+        #[arg(long)]
+        quantity: Option<String>,
+        #[arg(long)]
+        unit: Option<String>,
+        #[arg(long)]
+        find: Option<String>,
+        #[arg(long)]
+        refdes: Option<String>,
+        #[arg(long)]
+        notes: Option<String>,
+        #[arg(long)]
+        unset: Vec<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Take an own line off the item.
+    Remove {
+        item: String,
+        line: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+}
+
+#[derive(Subcommand)]
 enum ItemCmd {
     /// A new item, with a number or the next of a scheme.
     Create {
@@ -218,6 +310,23 @@ enum ItemCmd {
     },
     Delete {
         item: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Link the item to its ryucad or ryueda representation (one per
+    /// product): PROJECT is a project ID or the project's folder.
+    Link {
+        item: String,
+        product: String,
+        project: String,
+        part: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Remove the item's link of PRODUCT.
+    Unlink {
+        item: String,
+        product: String,
         #[command(flatten)]
         expect: Expect,
     },
@@ -325,6 +434,16 @@ enum DaemonCmd {
     },
 }
 
+/// Folders an agent named, absolute: the daemon runs elsewhere.
+fn absolute(here: &Path, dirs: &[String]) -> Vec<String> {
+    dirs.iter()
+        .map(|d| {
+            let p = here.join(d);
+            p.canonicalize().unwrap_or(p).display().to_string()
+        })
+        .collect()
+}
+
 fn unit(s: &str) -> core::result::Result<Unit, String> {
     Unit::parse(s).ok_or_else(|| format!("unknown unit {s:?}: m, cm, mm, um, in or ft"))
 }
@@ -397,6 +516,140 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
             root()?,
             Request::ItemDelete {
                 item: item.clone(),
+                expected_revision: exp(expect),
+            },
+        ),
+        Command::Item(ItemCmd::Link {
+            item,
+            product,
+            project,
+            part,
+            expect,
+        }) => (
+            root()?,
+            Request::ItemLink {
+                item: item.clone(),
+                product: product.clone(),
+                // A folder is sent absolute: the daemon runs elsewhere.
+                project: match here.join(project) {
+                    d if d.is_dir() => d.canonicalize().unwrap_or(d).display().to_string(),
+                    _ => project.clone(),
+                },
+                part: part.clone(),
+                expected_revision: exp(expect),
+            },
+        ),
+        Command::Item(ItemCmd::Unlink {
+            item,
+            product,
+            expect,
+        }) => (
+            root()?,
+            Request::ItemUnlink {
+                item: item.clone(),
+                product: product.clone(),
+                expected_revision: exp(expect),
+            },
+        ),
+        Command::WhereUsed {
+            item,
+            within,
+            no_dependents,
+            working,
+        } => (
+            root()?,
+            Request::BomWhereUsed {
+                item: item.clone(),
+                within: absolute(here, within),
+                no_dependents: *no_dependents,
+                working: *working,
+            },
+        ),
+        Command::Bom(BomCmd::Show {
+            item,
+            rev,
+            depth,
+            within,
+        }) => (
+            root()?,
+            Request::BomGet {
+                item: item.clone(),
+                rev: rev.clone(),
+                depth: *depth,
+                within: absolute(here, within),
+            },
+        ),
+        Command::Bom(BomCmd::Diff {
+            item,
+            from,
+            to,
+            within,
+        }) => (
+            root()?,
+            Request::BomDiff {
+                item: item.clone(),
+                from: from.clone(),
+                to: to.clone(),
+                within: absolute(here, within),
+            },
+        ),
+        Command::Bom(BomCmd::Add {
+            item,
+            child,
+            quantity,
+            unit,
+            find,
+            refdes,
+            notes,
+            expect,
+        }) => (
+            root()?,
+            Request::BomAdd {
+                item: item.clone(),
+                fields: ryuplm::bom::LineFields {
+                    child: Some(child.clone()),
+                    quantity: Some(quantity.clone()),
+                    unit: unit.clone(),
+                    find: find.clone(),
+                    refdes: refdes.clone(),
+                    notes: notes.clone(),
+                },
+                expected_revision: exp(expect),
+            },
+        ),
+        Command::Bom(BomCmd::Edit {
+            item,
+            line,
+            child,
+            quantity,
+            unit,
+            find,
+            refdes,
+            notes,
+            unset,
+            expect,
+        }) => (
+            root()?,
+            Request::BomEdit {
+                item: item.clone(),
+                line: line.clone(),
+                fields: ryuplm::bom::LineFields {
+                    child: child.clone(),
+                    quantity: quantity.clone(),
+                    unit: unit.clone(),
+                    find: find.clone(),
+                    refdes: refdes.clone(),
+                    notes: notes.clone(),
+                },
+                unset: unset.clone(),
+                expected_revision: exp(expect),
+            },
+        ),
+        Command::Bom(BomCmd::Remove { item, line, expect }) => (
+            root()?,
+            Request::BomRemove {
+                item: item.clone(),
+                line: line.clone(),
                 expected_revision: exp(expect),
             },
         ),
