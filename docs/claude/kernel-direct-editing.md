@@ -541,3 +541,54 @@ Design 724, plan 22.B (#652).
 
 - **Testing.** `near`'s `a_near_box_is_its_own_box_grown_by_its_reach`, `a_near_box_is_cut_short_of_a_pin_on_the_side_losing_least`, `a_cut_takes_the_sheets_overshoot_and_never_what_the_face_keeps`, `a_face_kept_off_a_pin_is_cut_and_a_second_pin_tightens_it` and `a_face_is_adjusted_one_way_only`; `retrim::tests`' `only_a_narrowed_uncertain_at_a_pin_it_shares_nothing_with_asks_a_cut`, `a_pins_cut_is_its_near_box_as_adjusted_cut_short_of_it` (`off_pin` on a real working body: the cut's boxes and gap, nothing left to cut once cut, and the rung building), `a_cut_takes_what_the_result_needs_fails_its_walk`, `ftc_07s_nurbs_reaches_its_pin`, `ftc_07s_nurbs_cannot_be_kept_off_its_pin` (cut `nist_ftc_07_pin.{body,txt}`) and `a_clips_owners_name_the_face_whose_side_was_reached`.
 - **Limits** (unmet, moved to ryukei 23): FTC 07 rd, where working NURBS `33b57350` meets pin `f19ffa9e`, which touches it at a vertex, the pin's box meeting the NURBS' own box on every axis. A near box cut can't part faces that share a vertex. Whatever settles it must keep the NURBS off the pin some other way, for example by trimming its sheet at the shared vertex rather than its box. No body in the corpus takes a kept-off build yet, so the mechanism is covered by its unit tests only. The dropped-face guard may hide wins (above). Refusals at a pin they share nothing with would spend up to `ADJUSTS` kept-off builds a narrowed rung before refusing. Left for 22.C and 22.D: FTC 10 rb's slit ball, FTC 07 AP242's cylinder and cone.
+
+## Slit seeds and test debts (decided in ryukei phase 22.C)
+
+Design 724, plan 22.C (#652, #941, #948).
+
+- **Slit seeds yield.** In the seed retry (21.C), a shortcut seed in conflict also yields where its piece is a slit piece: it uses every edge it uses exactly once each way round (`seeds::is_slit`, read from its arcs alone). Such a piece is its face's whole working sheet, so holding its old face says nothing about it (`yielded`; question 1053). A slit piece is never asked `holds_old`. A slit piece with no conflict, or seeded by rule 3 proper, never yields. `walk_again` and its call site are 21.C's: it runs only after every seed set failed, and its answer stands only if the walk closes or halts. A kept face the one closure doesn't reach is `Deleted`.
+- **Why it holds.** A seed only says where the walk starts. The walk still demands one closure, and the result's check runs as on every re-trim.
+- **Where it fires** (a hook in `yielded`, never committed): across `retrim`, `blends`, `booleans`, `delete_faces`, `edit_props`, `work`, `determinism`, `tweak` and ryustep's `defeature`, a slit seed that holds its old face yields only in the twin (below, where the walk then closes) and in FTC 10 rb (where it doesn't). No other answer moved.
+- **Census VII** (cox-worker-2, 2026-11-18, main `6ea38b48`; #652). FTC 10 rb's two kept balls, `d0eb13c5` and `b627be14`, are shortcut seeds, slit pieces and hold their old faces at every rung (NURBS `a497893e` is rule 3's). With them dropped, the walk still fails at every rung:
+  - rungs 0 and 1 (first builds): `Ambiguous` at pin `25482096`;
+  - rung 2 (narrowed retry, 21.C's cut): past `CHOICES`, and with no cap no closure at all, its first failure `Ambiguous` at pin `4e6572af`;
+  - rung 3: `Clipped` at `51c4bf10`.
+- **What stops FTC 10 rb now** (unmet, moved to ryukei 23): two halves of one plane grow over the same gap. Plane faces `51c4bf10` and `3a1d8efe` (y = 23 mm, the same `Plane`, both `Forward`) lie either side of the blends deleted between the balls, so each grows over the same gap and their working faces' pieces coincide arc for arc (the cut's pieces 598–602 and 645–649). Every arc there has two partners, and the walk can't close. `absorbed` merges only same-surface faces that share an edge, and these share none. Merging same-surface faces bordering one group of deleted faces was tried and not kept: the walk still failed at every rung, partly because working face `006f1f95` runs both ways along the arcs that cut pins `4e6572af` and `1144cdb9` in two (FTC 07 rd's kind of contact). FTC 10 rb refuses `HealAmbiguous` at `d0eb13c5` in 26.5 s, and `KNOWN_REFUSED` still lists it.
+- **The twin** (`ryukei_testkit::slit_seeds`): a block 0.1 × 0.08 × 0.06 m whose corner (−x, −y, +z) is rounded 0.01 m in three fillets meeting in a ball. The fillets along x and y are deleted with `Heal::Grow`, and the one along z and the ball are kept. Main refuses `HealAmbiguous` at the ball. Here the ball's slit seed yields in `attempt_with`'s seed retry, the walk closes, the kept fillet runs out to the corner and the ball is `Deleted`: 7 faces, one shell, the run-out volume. It takes 569,404 units on one thread and eight, and has its own `slit_seeds` golden. With the slit clause taken out it refuses as main does (M1 below). This pays #941 through the public `delete_faces`, so question 1127's fallback (driving `attempt_with` directly) wasn't needed.
+  - Chosen by a search over the 8 corners, 3 kept fillets, 2 blocks and 3 radii. Of the 126 deletes run, 35 refused `HealAmbiguous` on main and 14 answers moved, all refusals to builds. This was the first where main's refusal named the ball and the branch built 7 faces.
+  - The 127th delete (a 0.06 m cube's corner at r 0.002 m, keeping the fillet along x) panics in `region_box` ("a region holds a face"), on main too (#979).
+- **Poles tested** (#948). `split`'s tests build turned sectors with `revolve`, add a lone vertex at the apex or pole to the face's table nodes, and split the face, with nothing stubbed:
+  - `a_lone_apex_goes_to_the_one_cycle_passing_it` (a cone's quarter);
+  - `a_lone_apex_no_cycle_passes_goes_to_the_middle_of_their_span` (a cone's quarter stopping 5e-7 below its apex);
+  - `two_cycles_passing_a_lone_apex_place_it_nowhere` (a surface of revolution's half, cut along a meridian);
+  - `a_lone_pole_the_rest_would_take_goes_to_the_cycle_passing_it` (Step 3b, a ball's octant).
+
+  The two-cycle case can't be built on a cone. At a cone's apex the darts' parameter-plane directions all run along v, so `slots` can't order the face's two boundary rulings and refuses any arc ending there. A surface of revolution (a turned quadratic NURBS meeting the axis) has a pole `split` orders along the pole's line, and no closed genus, so its lone vertex reaches `pole_piece`.
+- **Mutations.** Each of these makes a test fail:
+  - M1 `(is_slit || !holds_old)` → `!holds_old`; M2 `r == 1 && f == 1` → `r == f`; M3 no `!uses.is_empty()`; M4 no shortcut test in `yielded`;
+  - M5 `pole_piece`'s one passing cycle → `None`; M6 its two-or-more arm → fall through; M7 `middle(&own)` → the first span's start;
+  - M9 Step 3b's `owner[*c]` → `k`.
+
+  Two survive and are equivalent on these inputs. M8 (no boundary-dart filter in `pole_piece`) survives because a hole on a face bounded in its free parameter lies inside the boundary's span. M10 (`passing_pole` reads darts' starts) survives because a closed cycle leaves every vertex it arrives at.
+- **The public-body search** (#948) found none. A cone's quarter and half, a ball's octant, and a turned NURBS's quarter and half were each touched at the apex or pole by a block's corner (three placements), a sphere (on and off the axis) and a second cone apex to apex (two turns), and each united, subtracted and intersected: 105 booleans. Unites refuse `NonManifold` at the apex, and subtracts and intersects leave no lone vertex at the pole. Across `booleans`, `blends`, `retrim`, `delete_faces`, `general_props`, `general_booleans`, `tolerant_booleans` and the lib tests, `pole_piece` is reached only for lone vertices that aren't at a pole, and Step 3b never. The hand-built tests stand.
+- **Bars** (cox-worker-2, AMD Ryzen 7 9700X, release, 2026-11-18; branch `e8b6f9f7` against main `6ea38b48`; one thread for the deletes, load 1.0 to 3.4 at their starts):
+
+  | Bar | Result |
+  |---|---|
+  | Blend deletes, committed | 7 defeatured, as on main; FTC 10 rb's cause recorded (above), `HealAmbiguous` at `d0eb13c5` in 26.5 s (main 27.1 s); FTC 07 rd `Uncertain` at pin `f19ffa9e` in 55.9 s (main 60.0 s). Met but for FTC 10 rb (unmet, ryukei 23) |
+  | Blend deletes, pinned | the 18 stay; every answer main's; linkrods #11 past the deadline on both (122.1 s). Met |
+  | No delete slower | no body that builds on main is refused or slower by more than 10%. FTC 06 AP242 #2155 read +18% once (0.38 s against 0.45 s) and 0.200 s on both, three times alternately. Every refusal inside 120 s; pinned corpus 418.9 s against main's 415.0 s. Met |
+  | Goldens | the five determinism suites pass, `slit_seeds` the one new line. Met |
+  | Work figures | `tests/work.rs` main's to the unit, the twin new (569,404 units); `work::` passes on 1, 2 and 8 threads. Met |
+  | Property suites | `edit_props` built 40 of 78 and refused 38, as main, seed for seed; `blend_props`, `boolean_props`, `general_props`, `heal_props`, `tolerant_boolean_props`, `intersect_props`, `retrim`, `blends`, `booleans`, `delete_faces`, `tweak::retrim`, `split` and ryustep's `checks` pass. Met |
+  | Fuzzing | `edit`, `boolean`, `tweak` and `intersect` through `fuzz.yml`, three runs (44246178220, 44246180764 and 44246183691; 26 to 33 minutes a target on GitHub's runners): no crash, timeout or OOM. Met |
+
+- **Testing.**
+  - `seeds`: `a_piece_using_each_of_its_edges_once_each_way_is_a_slit`, `a_slit_shortcut_seed_yields_though_it_holds_its_old_face`, `a_slit_piece_with_no_conflict_or_by_rule_3_proper_never_yields`, `a_slit_piece_is_never_asked_whether_it_holds_its_old_face`, `a_slit_seed_yields_with_the_weak_seeds_of_its_set`, and `ftc_10s_slit_ball_yields`, which replaces 21.C's `ftc_10s_slit_has_no_seed_to_yield`.
+  - `tests/retrim.rs`: `the_slit_seeds_twin_is_a_rounded_corner` and `the_slit_seeds_twins_ball_is_deleted`. `tests/work.rs`: `the_slit_seeds_twin_is_bounded`. The `slit_seeds` golden.
+  - `split`: `turned_sectors_reach_their_apex_and_pole` and the four pole tests above.
+- **Limits** (unmet, moved to ryukei 23):
+  - FTC 10 rb: two halves of one plane grown over the same gap, and a working face along the arcs that cut its pins (above).
+  - Carried from 22.A and 22.B: CTC 02 with PMI #295, STC 10 #3044, FTC 07 rd.
+  - `pole_piece`'s arms and Step 3b are reached by hand-built tables only, and a cone's apex can't hold an arc ending at it.
+  - Left for 22.D: FTC 07 AP242's cylinder and cone.
