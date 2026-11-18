@@ -148,13 +148,11 @@ pub(crate) enum Adjust {
     Room(u32),
     /// Kept off a pin (plan 22.B): the near box cut back to this box, its
     /// corners as bits (low x, y, z, then high), so it compares exactly.
-    #[cfg_attr(not(test), allow(dead_code))] // Task 6 asks it.
     Off([u64; 6]),
 }
 
 impl Adjust {
     /// `Off` for box `b`.
-    #[cfg_attr(not(test), allow(dead_code))] // Task 6 asks it.
     pub(crate) fn off(b: &Box3) -> Adjust {
         let (l, h) = (b.min(), b.max());
         Adjust::Off([l.x, l.y, l.z, h.x, h.y, h.z].map(f64::to_bits))
@@ -235,13 +233,11 @@ pub(crate) fn room(
 }
 
 /// One coordinate of `p`: x, y or z for `k` 0, 1 or 2.
-#[cfg_attr(not(test), allow(dead_code))] // Task 6 asks it.
 fn axis(p: crate::geom::Point3, k: usize) -> f64 {
     [p.x, p.y, p.z][k]
 }
 
 /// `p` with its `k` coordinate set to `v`.
-#[cfg_attr(not(test), allow(dead_code))] // Task 6 asks it.
 fn with_axis(p: crate::geom::Point3, k: usize, v: f64) -> crate::geom::Point3 {
     let mut c = [p.x, p.y, p.z];
     c[k] = v;
@@ -258,7 +254,6 @@ fn with_axis(p: crate::geom::Point3, k: usize, v: f64) -> crate::geom::Point3 {
 /// its own axis; the first on a tie, in the order x low, x high, y low,
 /// y high, z low, z high. `None` where no side is valid: the pin's box
 /// lies within what the face must keep on every axis.
-#[cfg_attr(not(test), allow(dead_code))] // Task 6 asks it.
 pub(crate) fn cut_short(n: &Box3, sheet: &Box3, must: &Box3, pin: &Box3, gap: f64) -> Option<Box3> {
     let mut best: Option<(f64, Box3)> = None;
     let mut take = |loss: f64, b: Box3| {
@@ -289,7 +284,6 @@ pub(crate) fn cut_short(n: &Box3, sheet: &Box3, must: &Box3, pin: &Box3, gap: f6
 /// with `f`'s near box, `now` as adjusted so far, cut back by
 /// [`cut_short`] (`sheet`, `must`, `pin` and `gap` as there). `None`
 /// where no side can be cut. `None` too where `f` was given room.
-#[cfg_attr(not(test), allow(dead_code))] // Task 6 asks it.
 pub(crate) fn kept_off(
     f: FaceId,
     now: &Box3,

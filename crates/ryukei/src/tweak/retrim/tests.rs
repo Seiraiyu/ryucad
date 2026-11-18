@@ -778,6 +778,66 @@ fn only_a_narrowed_clip_at_a_carried_face_asks_room() {
     );
 }
 
+/// Design 724, plan 22.B: only a narrowed build's `Uncertain` at a
+/// working face and a pin whose input faces share no vertex and no edge
+/// asks a cut, for the working face's input face, in either order.
+#[test]
+fn only_a_narrowed_uncertain_at_a_pin_it_shares_nothing_with_asks_a_cut() {
+    use super::{Build, ask_off_pin, near};
+    use std::collections::BTreeSet;
+    let b = block();
+    let changes = raised(&b, 0.2);
+    let changed = changes.motion.keys().copied().collect();
+    let whole = super::region::region(&b, &changed).grown(&b);
+    let bx = super::body::region_box(&b, &whole, super::reach(&b, &changes));
+    let (top, bottom, side) = (
+        face_of(&b, FaceRole::PlusZ),
+        face_of(&b, FaceRole::MinusZ),
+        face_of(&b, FaceRole::PlusX),
+    );
+    let pins = BTreeSet::from([bottom]);
+    let rest = whole.without(&b, &pins);
+    let ws: BTreeMap<FaceId, super::working::Working> = rest
+        .faces
+        .iter()
+        .map(|&f| {
+            let w = super::working::working(
+                &b,
+                f,
+                changes.surface.get(&f),
+                b.faces[f].sense,
+                true,
+                &bx,
+            );
+            (f, w.unwrap())
+        })
+        .collect();
+    // unmetered: a unit test.
+    let w = super::body::work_body(K, &b, &rest, &ws, &crate::work::Meter::free())
+        .unwrap()
+        .pinning(&pins);
+    let back: BTreeMap<FaceId, FaceId> = w.origin.iter().map(|(&wf, &i)| (i, wf)).collect();
+    let (wt, wb, wside) = (back[&top], back[&bottom], back[&side]);
+    assert!(w.working.contains(&wt) && w.working.contains(&wside));
+    assert!(w.pinned.contains(&wb));
+    let mark = |wf: FaceId, pf: FaceId| {
+        assert!(w.working.contains(&wf) && w.pinned.contains(&pf));
+        Some(near::Adjusts::from([(
+            w.origin[&wf],
+            near::Adjust::off(&bx),
+        )]))
+    };
+    let want = Some(near::Adjusts::from([(top, near::Adjust::off(&bx))]));
+    // The raised top shares nothing with the bottom.
+    assert_eq!(ask_off_pin(&b, &w, wt, wb, Build::Only, mark), want);
+    assert_eq!(ask_off_pin(&b, &w, wb, wt, Build::Retry, mark), want);
+    assert_eq!(ask_off_pin(&b, &w, wt, wb, Build::First, mark), None);
+    // The side shares an edge with the bottom.
+    assert_eq!(ask_off_pin(&b, &w, wside, wb, Build::Only, mark), None);
+    // Two working faces.
+    assert_eq!(ask_off_pin(&b, &w, wt, wside, Build::Only, mark), None);
+}
+
 /// FNV-1a of `b`'s `dump_unnamed` (as `ryukei-testkit`'s `fnv`, which the
 /// crate can't depend on).
 fn free_hash(b: &Body) -> u64 {
