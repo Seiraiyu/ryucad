@@ -386,6 +386,20 @@ pub fn compare_with_drc(
                 .or_insert(g.distance.nm);
             *e = (*e).min(g.distance.nm);
         }
+        // KiCad measures to a via's or plated pad's hole on layers where
+        // it has no pad (#946); an unplated hole has no net, and no KiCad
+        // clearance violation.
+        for g in cb.copper.hole_clearance(l, clearance) {
+            let Some(j) = &g.joined else { continue };
+            let (a, b) = sorted_pair(net(j), net(&g.island));
+            if a == b {
+                continue;
+            }
+            let e = ours
+                .entry((cb.layer_name(l).to_ascii_uppercase(), a, b))
+                .or_insert(g.distance.nm);
+            *e = (*e).min(g.distance.nm);
+        }
     }
     if capped {
         let only = ours.keys().filter(|k| !theirs.contains_key(*k)).count();
