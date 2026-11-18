@@ -265,9 +265,9 @@ jobs:
           # Rare runs: their caches would only evict the fast CI's.
           save-if: false
       - name: baseline release
-        run: cargo test -p ryukei -p ryusketch -p ryumate -p ryustep -p ryucad -p ryu-board -p ryu-copper -p ryueda -p ryusch -p ryudfm --release --test determinism
+        run: cargo test -p ryukei -p ryusketch -p ryumate -p ryustep -p ryucad -p ryu-board -p ryu-copper -p ryu-gerber -p ryueda -p ryusch -p ryudfm --release --test determinism
       - name: x86-64-v3
-        run: cargo test -p ryukei -p ryusketch -p ryumate -p ryustep -p ryucad -p ryu-board -p ryu-copper -p ryueda -p ryusch -p ryudfm --release --test determinism
+        run: cargo test -p ryukei -p ryusketch -p ryumate -p ryustep -p ryucad -p ryu-board -p ryu-copper -p ryu-gerber -p ryueda -p ryusch -p ryudfm --release --test determinism
         env:
           RUSTFLAGS: -C target-cpu=x86-64-v3
           CARGO_TARGET_DIR: target/v3
@@ -275,7 +275,7 @@ jobs:
         run: |
           if grep -qw avx512f /proc/cpuinfo; then
             RUSTFLAGS="-C target-cpu=x86-64-v4" CARGO_TARGET_DIR=target/v4 \
-              cargo test -p ryukei -p ryusketch -p ryumate -p ryustep -p ryucad -p ryu-board -p ryu-copper -p ryueda -p ryusch -p ryudfm --release --test determinism
+              cargo test -p ryukei -p ryusketch -p ryumate -p ryustep -p ryucad -p ryu-board -p ryu-copper -p ryu-gerber -p ryueda -p ryusch -p ryudfm --release --test determinism
           else
             echo "::notice::runner has no AVX-512; x86-64-v4 skipped"
           fi
@@ -370,6 +370,20 @@ jobs:
             RAYON_NUM_THREADS=2 RYUDFM_REQUIRE_CORPUS=1 cargo test -p ryudfm --release --test bar -- --nocapture || failed=1
             df -h / && free -m
             exit $failed
+          push: never
+      - name: ryueda's package read by gerbv
+        uses: devcontainers/ci@v0.3
+        with:
+          # gerbv (in the devcontainer only) reads every file `board
+          # export` writes without a warning, and its rasters match
+          # ryu-board's (design 732): a fabricator's reader in CI.
+          runCmd: |
+            set -e
+            export PROPTEST_RNG_SEED=${{ env.PROPTEST_RNG_SEED }}
+            export CARGO_BUILD_JOBS=2
+            export CARGO_PROFILE_DEV_DEBUG=line-tables-only CARGO_INCREMENTAL=0
+            gerbv --version
+            RYUEDA_REQUIRE_GERBV=1 cargo test -p ryueda --release --test gerbv -- --ignored --nocapture
           push: never
       - name: ryucad's pinned assemblies
         uses: devcontainers/ci@v0.3

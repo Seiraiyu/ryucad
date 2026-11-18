@@ -37,6 +37,8 @@ ryu-git = { path = "../ryu-git" }
 ryu-board = { path = "../ryu-board" }
 # Offsets of custom pads' openings; stage 5.B's copper and DRC.
 ryu-copper = { path = "../ryu-copper" }
+# Fabrication outputs (design 732): Gerber X2 and Excellon, product-neutral.
+ryu-gerber = { path = "../ryu-gerber" }
 # Product data management (design 629): ryupdm's core only. Its `cad`
 # feature is ryucad's half and pulls ryucad's file format; CI's
 # `ryupdm-core` job proves the core builds without it.
@@ -49,6 +51,10 @@ serde_json = { version = "1", features = ["float_roundtrip"] }
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 
 [dev-dependencies]
+# Its reader of its own output, for the export's tests.
+ryu-gerber = { path = "../ryu-gerber", features = ["testing"] }
+# gerbv's PNGs decoded (tests/gerbv.rs).
+png = "0.18"
 ryu-board = { path = "../ryu-board", features = ["testing"] }
 ryu-review = { path = "../ryu-review", features = ["testing"] }
 # Attestations signed with the test key, for approvals verified offline.

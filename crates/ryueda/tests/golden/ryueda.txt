@@ -1,6 +1,22 @@
 # ryueda's golden hashes: UPDATE_GOLDEN=1 cargo test -p ryueda --test determinism
 board.breakout.bottom.svg 72c1067b9270d02fdf99d5a4f4538fce
 board.breakout.drc 7605fe0787e864296dfae0de946924e5
+board.breakout.export.main-bom-jlc.csv 95a34369b6d5ee1764a169c8406eed50
+board.breakout.export.main-bom.csv 4945c2859f6f0d99ddb29a40404b044c
+board.breakout.export.main-copper-bottom.gbl 67a20d07418fe47bed8387f60f890ecc
+board.breakout.export.main-copper-top.gtl 5a3084fcbd8cc3bcbad400110b6c35ca
+board.breakout.export.main-mask-bottom.gbs 87a1db2c19bac553d266950e7cc03484
+board.breakout.export.main-mask-top.gts 10b0583a903177e08b165b1a5a702b17
+board.breakout.export.main-npth.drl befc7dd404f082d39cd40c8302eed4bc
+board.breakout.export.main-paste-bottom.gbp 0cbb33aba4b5d0b426f5e5b3e23b2692
+board.breakout.export.main-paste-top.gtp 375bdb0846bd29a1ae043380c5f26529
+board.breakout.export.main-pos-jlc.csv ff9e8ca25f495956d764ccacb85f2988
+board.breakout.export.main-pos.csv 1ee69d1da3b94d2703b03dd85a2596ec
+board.breakout.export.main-profile.gm1 4473cd5cd6e87ca1e1bab3ed8f39e909
+board.breakout.export.main-pth.drl 29b883590bcddd61aab4d46ceb389981
+board.breakout.export.main-silk-bottom.gbo d15c4fe753100d3975f2b2d43049bbe1
+board.breakout.export.main-silk-top.gto 7424ed0772ea3b389650b0396b7dd231
+board.breakout.export.manifest.json 4a2f6e1d1ad43081144f179e01bb481a
 board.breakout.islands 76123d034d769ec7719ecf8f9df14983
 board.breakout.layout 2453ac0cd695edd5fbaf41ab60371a1a
 board.breakout.show f44489a70dac3b507b133230e96a3433

@@ -118,11 +118,16 @@ pub fn drawn(s: &Drawn) -> Shape {
                     parts.push(region(Region::solid(k)));
                 }
             } else if w > 0 {
+                // The band the pen sweeps round the circle, as a stroke
+                // (Gerber draws it, and writes no region with a hole); a
+                // pen that reaches the centre fills the disc.
                 let inner = r - half(w);
-                match (circle(c, outer), circle(c, inner)) {
-                    (Ok(o), Ok(i)) => parts.push(region(Region::ring(o, i))),
-                    (Ok(o), Err(_)) => parts.push(region(Region::solid(o))),
-                    _ => {}
+                if inner > 0
+                    && let Ok(k) = circle(c, r)
+                {
+                    parts.push(stroke(k.edges().to_vec(), w));
+                } else if let Ok(o) = circle(c, outer) {
+                    parts.push(region(Region::solid(o)));
                 }
             }
         }
@@ -179,11 +184,44 @@ mod tests {
         let c = drawn(&d(
             json!({"type": "circle", "center": [0, 0], "radius_nm": 1000, "width_nm": 200}),
         ));
-        let Piece::Region(ring) = &c.parts[0].piece else {
-            panic!()
+        // A ring is the circle drawn with its pen: no region with a hole.
+        let Piece::Stroke(s) = &c.parts[0].piece else {
+            panic!("{c:?}")
         };
-        assert_eq!(ring.holes.len(), 1);
+        assert_eq!(s.pen, Pen::Round(200));
+        match s.path.as_slice() {
+            [Edge::Arc(a)] => {
+                assert!(a.is_full());
+                assert_eq!((a.centre, a.radius2()), (Point::new(0, 0), 1_000_000));
+            }
+            other => panic!("{other:?}"),
+        }
         assert_eq!(c.bounds().unwrap().max, Point::new(1100, 1100));
+        // A pen wider than the circle's diameter fills it.
+        let full = drawn(&d(
+            json!({"type": "circle", "center": [0, 0], "radius_nm": 100, "width_nm": 400}),
+        ));
+        let Piece::Region(r) = &full.parts[0].piece else {
+            panic!("{full:?}")
+        };
+        assert!(r.holes.is_empty());
+        assert_eq!(full.bounds().unwrap().max, Point::new(300, 300));
+    }
+
+    #[test]
+    fn no_graphic_makes_a_region_with_holes() {
+        for v in [
+            json!({"type": "circle", "center": [0, 0], "radius_nm": 1000, "width_nm": 200}),
+            json!({"type": "circle", "center": [5, 5], "radius_nm": 1000, "width_nm": 200, "fill": true}),
+            json!({"type": "rect", "start": [0, 0], "end": [10, 10], "width_nm": 2, "fill": true}),
+            json!({"type": "polygon", "points": [[0, 0], [0, 10], [10, 10]], "width_nm": 1, "fill": true}),
+        ] {
+            for p in drawn(&d(v.clone())).parts {
+                if let Piece::Region(r) = &p.piece {
+                    assert!(r.holes.is_empty(), "{v}");
+                }
+            }
+        }
     }
 
     #[test]
