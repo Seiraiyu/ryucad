@@ -427,6 +427,78 @@ details! {
     ],
 }
 
+/// Words written their own way in titles.
+const WORDS: &[(&str, &str)] = &[
+    ("json", "JSON"),
+    ("id", "ID"),
+    ("ids", "IDs"),
+    ("bom", "BOM"),
+    ("pdm", "PDM"),
+    ("odb", "ODB++"),
+    ("kicad", "KiCad"),
+    ("eda", "EDA"),
+    ("step", "STEP"),
+    ("git", "Git"),
+    ("github", "GitHub"),
+    ("erc", "ERC"),
+    ("nc", "No-connect"),
+    ("refdes", "Reference designator"),
+    ("demorgan", "De Morgan"),
+    ("io", "I/O"),
+];
+
+/// Titles that read better than their codes' words.
+const TITLES: &[(Code, &str)] = &[
+    (Code::Io, "Couldn't read or write a file"),
+    (Code::Usage, "Bad arguments"),
+    (Code::Daemon, "The daemon didn't answer"),
+    (Code::Internal, "Internal error"),
+    (Code::NotFound, "Not found"),
+    (Code::Conflict, "Changed since you read it"),
+    (Code::NotAGitRepo, "Not a Git repository"),
+    (Code::NothingToUndo, "Nothing to undo"),
+    (Code::UndoConflict, "Can't undo: the files changed since"),
+    (Code::Cancelled, "Cancelled"),
+    (Code::CheckFailed, "Check failed"),
+    (Code::RebuildFailed, "Rebuild failed"),
+    (Code::BlendFailed, "Fillet or chamfer failed"),
+    (Code::BooleanFailed, "Boolean failed"),
+    (Code::ReferenceUnresolved, "A reference no longer resolves"),
+    (Code::ReferenceForward, "A reference to a later feature"),
+    (Code::ReferenceBody, "A reference import can't be changed"),
+    (
+        Code::ReferenceNotSolid,
+        "An open reference import has no mass",
+    ),
+    (Code::FormatTooNew, "Written by a newer ryucad"),
+    (Code::AppNotInstalled, "The app isn't installed"),
+];
+
+/// A short title for `code`: its own from [`TITLES`], else its words
+/// (`unit_mismatch` is `Unit mismatch`), names written as they are
+/// (`invalid_json` is `Invalid JSON`).
+pub fn title(code: Code) -> String {
+    if let Some((_, t)) = TITLES.iter().find(|(c, _)| *c == code) {
+        return (*t).to_owned();
+    }
+    let name = serde_json::to_value(code)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_default();
+    let words: Vec<String> = name
+        .split('_')
+        .map(|w| match WORDS.iter().find(|(from, _)| *from == w) {
+            Some((_, to)) => (*to).to_owned(),
+            None => w.to_owned(),
+        })
+        .collect();
+    let mut s = words.join(" ");
+    if let Some(first) = s.get(..1) {
+        s = first.to_uppercase() + &s[1..];
+    }
+    s
+}
+
 /// `code` as agents see it: `not_found`.
 pub fn name(code: Code) -> String {
     serde_json::to_value(code)
@@ -760,5 +832,21 @@ mod tests {
             ),
             Kind::Str
         );
+    }
+
+    #[test]
+    fn every_code_has_a_title() {
+        assert!(Code::ALL.len() > 150, "{}", Code::ALL.len());
+        for &c in Code::ALL {
+            let t = title(c);
+            assert!(!t.is_empty() && !t.contains('_'), "{c:?}: {t}");
+            assert!(t.starts_with(char::is_uppercase), "{c:?}: {t}");
+        }
+        assert_eq!(title(Code::UnitMismatch), "Unit mismatch");
+        assert_eq!(title(Code::InvalidJson), "Invalid JSON");
+        assert_eq!(title(Code::OdbLayerUnreadable), "ODB++ layer unreadable");
+        assert_eq!(title(Code::BomItemDuplicate), "BOM item duplicate");
+        assert_eq!(title(Code::Cancelled), "Cancelled");
+        assert_eq!(title(Code::BlendFailed), "Fillet or chamfer failed");
     }
 }
