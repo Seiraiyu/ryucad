@@ -880,6 +880,41 @@ mod tests {
         }
     }
 
+    /// One arc, `Δ > 0` over `(0, π)` and `< 0` over `(π, 2π)` (charts
+    /// linear in `s`, their roots at `θ = 0` and `π`): its stretch where
+    /// `Δ < 0` must hold exactly two simple roots of `N`, one beside each
+    /// of `Δ`'s (plan 22.D's M5b). None or four, and it refuses.
+    #[test]
+    fn a_stretch_where_the_rulings_miss_holds_two_roots_of_n() {
+        let b = |x: f64| [x - 1e-12, x + 1e-12];
+        let lin = |c: [f64; 2]| Bernstein::from_f64(&c);
+        let with = |near: Vec<Event>| Turn {
+            start: -FRAC_PI_2,
+            delta: vec![Event::Rise(b(0.0)), Event::Fall(b(PI))],
+            near,
+            charts: Charts {
+                delta: [lin([-1.0, 1.0]), lin([1.0, -1.0])],
+                near: [lin([-1.0, 1.0]), lin([1.0, -1.0])],
+            },
+        };
+        let two = vec![Event::Fall(b(PI + 0.01)), Event::Rise(b(-0.01))];
+        let found = crossings(&with(two)).expect("one arc");
+        assert_eq!(found.arcs, [[0.0, PI]]);
+        assert!(found.touches.is_empty() && !found.round);
+        assert_eq!(crossings(&with(vec![])), None, "no root of N beside Δ's");
+        let four = vec![
+            Event::Fall(b(PI + 0.01)),
+            Event::Rise(b(PI + 1.0)),
+            Event::Fall(b(PI + 1.5)),
+            Event::Rise(b(-0.01)),
+        ];
+        assert_eq!(
+            crossings(&with(four)),
+            None,
+            "a near touch inside the stretch"
+        );
+    }
+
     #[test]
     fn signs_round_the_turn_make_arcs_touches_or_nothing() {
         let b = |x: f64| [x - 1e-12, x + 1e-12];
@@ -1213,6 +1248,21 @@ mod tests {
         let bore = cone((0.0, 0.0, 0.0), (0.0, 0.0, 1.0), 1.0, a);
         let along = cylinder((3.0, 0.0, 0.0), (s, 0.0, c), 0.2);
         assert_eq!(ruled(&along, &bore, &region(), &Meter::free()), Ok(None));
+        // At 45° the axis along a ruling makes `A` round to 5.6e-17,
+        // whose sign isn't certified: the charts refuse at once, before
+        // anything later could (plan 22.D's M8).
+        let steep = cone((0.0, 0.0, 0.0), (0.0, 0.0, 1.0), 1.0, FRAC_PI_4);
+        let along = cylinder((3.0, 0.0, 0.0), (1.0, 0.0, 1.0), 0.2);
+        let Surface::Cylinder(c) = &along else {
+            unreachable!()
+        };
+        let rl = Rulings::new(
+            *along.frame().unwrap(),
+            c.radius(),
+            Quadric::of(&steep).unwrap(),
+        );
+        assert!(charts(&rl, &region()).is_none());
+        assert_eq!(ruled(&along, &steep, &region(), &Meter::free()), Ok(None));
         let one = cylinder((0.0, 0.0, 0.0), (0.0, 0.0, 1.0), 1.0);
         let two = cylinder((0.5, 0.0, 0.0), (0.0, 0.0, 1.0), 0.3);
         assert_eq!(ruled(&two, &one, &region(), &Meter::free()), Ok(None));
@@ -1234,5 +1284,15 @@ mod tests {
         // Through the apex: not this form's.
         let apex = cylinder((0.0, 0.3, -1.0), (1.0, 0.0, 0.0), 0.3);
         assert_eq!(ruled(&apex, &bore, &region(), &Meter::free()), Ok(None));
+        // Refused by the apex's own check, not only by what follows it
+        // (plan 22.D's M10); and the cylinders above and below are off it.
+        let off = |c: &Surface| {
+            let Surface::Cylinder(k) = c else {
+                unreachable!()
+            };
+            Rulings::new(*c.frame().unwrap(), k.radius(), Quadric::of(&bore).unwrap()).apex_off()
+        };
+        assert!(!off(&apex));
+        assert!(off(&above) && off(&below));
     }
 }
