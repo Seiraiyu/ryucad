@@ -1,5 +1,3 @@
-#![allow(unused)]
-
 //! A cylinder against a cone or another cylinder on any axes (plan 22.D,
 //! design 724, question 1054).
 //!
@@ -194,16 +192,6 @@ impl Rulings {
         let (s, c) = math::sin_cos(th);
         self.cyl.x().get() * (-self.r * s) + self.cyl.y().get() * (self.r * c)
     }
-}
-
-/// See the module's doc. A stub until the pieces below are in.
-pub(crate) fn ruled(
-    _a: &Surface,
-    _b: &Surface,
-    _region: &Box3,
-    _m: &Meter,
-) -> Result<Option<(Vec<Raw>, Vec<Point3>)>, Failure> {
-    Ok(None)
 }
 
 /// The charts' reach: `u = U (2s − 1)` over `s ∈ [0, 1]`, so each chart
@@ -645,6 +633,112 @@ fn hermite(
     Ok(NurbsCurve::new(knots, points, None).ok())
 }
 
+impl Rulings {
+    /// The sign of `k + τ z` at `p` in the quadric's local coordinates:
+    /// which nappe of a cone `p` is on (positive: the cone's own). Always
+    /// positive for a cylinder.
+    fn nappe(&self, p: Point3) -> Option<Sign> {
+        let q = &self.q;
+        let o = q.frame.origin();
+        let d = [iv(p.x) - iv(o.x), iv(p.y) - iv(o.y), iv(p.z) - iv(o.z)];
+        let tau = iv(q.sin).checked_div(iv(q.cos))?;
+        strict(iv(q.k) + tau * idot(d, ivec(q.frame.z().get())))
+    }
+
+    /// Whether the cone's apex is certified off the cylinder, so no curve
+    /// passes from one nappe to the other (always, for a cylinder).
+    fn apex_off(&self) -> bool {
+        let q = &self.q;
+        if q.sin == 0.0 {
+            return true;
+        }
+        let Some(v) = (iv(q.k) * iv(q.cos)).checked_div(iv(q.sin)) else {
+            return false;
+        };
+        let (o, z, c) = (q.frame.origin(), q.frame.z().get(), self.cyl.origin());
+        let d = [
+            iv(o.x) - iv(z.x) * v - iv(c.x),
+            iv(o.y) - iv(z.y) * v - iv(c.y),
+            iv(o.z) - iv(z.z) * v - iv(c.z),
+        ];
+        let (x, y) = (ivec(self.cyl.x().get()), ivec(self.cyl.y().get()));
+        strict(idot(d, x).square() + idot(d, y).square() - iv(self.r).square()).is_some()
+    }
+}
+
+/// The closed form for a cylinder against a cone, or against a cylinder
+/// of another radius or on a skew axis: its branches and touch points.
+/// `None` where any of it can't be certified (see the module's doc), and
+/// for any other pair.
+pub(crate) fn ruled(
+    a: &Surface,
+    b: &Surface,
+    region: &Box3,
+    m: &Meter,
+) -> Result<Option<(Vec<Raw>, Vec<Point3>)>, Failure> {
+    let (cyl, other) = match (a, b) {
+        (Surface::Cylinder(x), Surface::Cylinder(y)) if y.radius() < x.radius() => (b, a),
+        (Surface::Cylinder(_), Surface::Cylinder(_) | Surface::Cone(_)) => (a, b),
+        (Surface::Cone(_), Surface::Cylinder(_)) => (b, a),
+        _ => return Ok(None),
+    };
+    #[cfg(test)]
+    TRIED.with(|n| n.set(n.get() + 1));
+    let Surface::Cylinder(c) = cyl else {
+        return Ok(None);
+    };
+    let (Some(frame), Some(q)) = (cyl.frame(), Quadric::of(other)) else {
+        return Ok(None);
+    };
+    let rl = Rulings::new(*frame, c.radius(), q);
+    if !rl.apex_off() {
+        return Ok(None);
+    }
+    let Some(charts) = charts(&rl, region) else {
+        return Ok(None);
+    };
+    let Some(turn) = turn(charts, m)? else {
+        return Ok(None);
+    };
+    let Some(found) = crossings(&turn) else {
+        return Ok(None);
+    };
+    let mut out = Out::new(region);
+    for &th in &found.touches {
+        let p = rl.point(th, -rl.b(th).0 / rl.a());
+        match rl.nappe(p) {
+            Some(Sign::Positive) => {}
+            Some(_) => continue,
+            None => return Ok(None),
+        }
+        if other.distance(p) > LINEAR_RESOLUTION {
+            return Ok(None);
+        }
+        out.point(p);
+    }
+    let mut curves = Vec::new();
+    for &arc in &found.arcs {
+        curves.push(hermite(&|phi| rl.on_loop(arc, phi), m)?);
+    }
+    if found.round {
+        for side in [1.0, -1.0] {
+            curves.push(hermite(&|th| rl.round(side, th), m)?);
+        }
+    }
+    for curve in curves {
+        let Some(curve) = curve else {
+            return Ok(None);
+        };
+        let curve = Curve::Nurbs(Arc::new(curve));
+        match rl.nappe(curve.point(PI)) {
+            Some(Sign::Positive) => out.closed(curve, false, 0.0),
+            Some(_) => {}
+            None => return Ok(None),
+        }
+    }
+    Ok(Some(out.finish()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -852,5 +946,50 @@ mod tests {
                 assert_eq!(p.x > 0.0, side > 0.0, "{p:?}");
             }
         }
+    }
+
+    fn region() -> Box3 {
+        Box3::new(
+            Point3::new(-10.0, -10.0, -10.0),
+            Point3::new(10.0, 10.0, 10.0),
+        )
+    }
+
+    fn cylinder(o: (f64, f64, f64), z: (f64, f64, f64), r: f64) -> Surface {
+        let x = if z.0.abs() < 0.9 {
+            (1.0, 0.0, 0.0)
+        } else {
+            (0.0, 1.0, 0.0)
+        };
+        Surface::Cylinder(Cylinder::new(frame(o, z, x), r).unwrap())
+    }
+
+    fn cone(o: (f64, f64, f64), z: (f64, f64, f64), r: f64, a: f64) -> Surface {
+        let x = if z.0.abs() < 0.9 {
+            (1.0, 0.0, 0.0)
+        } else {
+            (0.0, 1.0, 0.0)
+        };
+        Surface::Cone(Cone::new(frame(o, z, x), r, a).unwrap())
+    }
+
+    /// `ruled` either way round, the same answer; and any other pair, or
+    /// a pair of planes and cones, is not its.
+    #[test]
+    fn ruled_takes_cylinders_with_cones_or_cylinders_only() {
+        let m = Meter::free();
+        let pin = cylinder((0.0, 0.0, 0.3), (1.0, 0.0, 0.0), 0.5);
+        let bore = cone((0.0, 0.0, 0.0), (0.0, 0.0, 1.0), 2.0, 5f64.to_radians());
+        let one = ruled(&pin, &bore, &region(), &m).unwrap().unwrap();
+        let two = ruled(&bore, &pin, &region(), &m).unwrap().unwrap();
+        assert_eq!(one, two);
+        assert_eq!(one.0.len(), 2);
+        let plane = Surface::Plane(crate::geom::Plane::new(frame(
+            (0.0, 0.0, 0.0),
+            (0.0, 0.0, 1.0),
+            (1.0, 0.0, 0.0),
+        )));
+        assert_eq!(ruled(&plane, &bore, &region(), &m), Ok(None));
+        assert_eq!(ruled(&bore, &bore, &region(), &m), Ok(None));
     }
 }
