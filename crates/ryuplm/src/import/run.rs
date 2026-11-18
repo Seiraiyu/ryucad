@@ -487,14 +487,35 @@ fn lines(
     Ok(())
 }
 
-/// Items and lines this import made that its source no longer has (Task 14).
+/// `import_missing` for each item this import made whose key the source
+/// no longer has, and each line it made that no row placed again (Task
+/// 15 fills `placed`). Nothing is deleted.
 fn missing(
-    _cat: &Catalogue,
-    _name: &str,
-    _seen: &BTreeSet<String>,
-    _by_key: &BTreeMap<String, Id>,
-    _t: &mut Tally,
+    cat: &Catalogue,
+    name: &str,
+    seen: &BTreeSet<String>,
+    by_key: &BTreeMap<String, Id>,
+    t: &mut Tally,
 ) {
+    for (key, id) in by_key {
+        if seen.contains(key) {
+            continue;
+        }
+        let number = cat
+            .items
+            .get(id)
+            .map(|i| i.number.clone())
+            .unwrap_or_default();
+        t.missing.push(
+            Fault::warning(
+                Code::ImportMissing,
+                format!("item {id} ({number}): key {key:?} is no longer in the source; it stays"),
+            )
+            .with("item", id)
+            .with("key", key)
+            .to_json(),
+        );
+    }
 }
 
 /// `import.run`.
@@ -733,5 +754,101 @@ pub(crate) mod tests {
         .unwrap();
         let e = ask(false).unwrap_err();
         assert_eq!(e.code, Code::PartNumberDuplicate);
+    }
+
+    #[test]
+    fn re_import_takes_source_changes_keeps_catalogue_changes_and_reports_both() {
+        let mut f = files(&[]);
+        let (_, first) = planned(&f, &master(), CSV, None);
+        apply(&mut f, &first);
+        // Unchanged: nothing.
+        let (_, again) = planned(&f, &master(), CSV, None);
+        assert_eq!(
+            (again.report["unchanged"].clone(), again.items.len()),
+            (json!(2), 0)
+        );
+        // The catalogue edits the screw's description and the plate's thread.
+        let cat = Catalogue::load(&f).unwrap();
+        let (sid, _) = cat
+            .items
+            .iter()
+            .find(|(_, i)| i.number == "100-0001")
+            .unwrap();
+        let (pid, _) = cat
+            .items
+            .iter()
+            .find(|(_, i)| i.number == "100-0002")
+            .unwrap();
+        let mut s = cat.items[sid].clone();
+        s.description = Some("Screw, zinc".into());
+        f.insert(crate::ids::item_path(sid), s.to_text().into_bytes());
+        // The source changes the screw's thread (only the source: taken),
+        // the plate's description (only the source: taken), and the screw's
+        // description to something else (both: a conflict).
+        let csv2 =
+            "ID,PN,Desc,Thread,Kind,Old\n1,100-0001,Screw M4,M4,S,b\n2,100-0002,Plate 2,,P,\n";
+        let (_, out) = planned(&f, &master(), csv2, None);
+        let s2 = &out.items[sid];
+        assert_eq!(s2.properties["thread"], "M4");
+        assert_eq!(
+            s2.description.as_deref(),
+            Some("Screw, zinc"),
+            "the conflict leaves it"
+        );
+        assert_eq!(s2.extra["erp"], json!({"Old": "b"}));
+        assert_eq!(out.items[pid].description.as_deref(), Some("Plate 2"));
+        let c = &out.report["conflicts"];
+        assert_eq!(c.as_array().unwrap().len(), 1);
+        assert_eq!(
+            c[0]["details"],
+            json!({"item": sid, "key": "1", "row": 2, "field": "description",
+            "base": "Screw", "catalogue": "Screw, zinc", "source": "Screw M4"})
+        );
+        apply(&mut f, &out);
+        // Run again: the conflict is reported again, nothing else moves.
+        let (_, again) = planned(&f, &master(), csv2, None);
+        assert_eq!(again.report["conflicts"].as_array().unwrap().len(), 1);
+        assert!(
+            again.items.is_empty()
+                || again
+                    .items
+                    .values()
+                    .all(|i| i.description.as_deref() != Some("Screw M4"))
+        );
+        // --prefer source settles it.
+        let (_, settled) = planned(&f, &master(), csv2, Some(Prefer::Source));
+        assert_eq!(settled.items[sid].description.as_deref(), Some("Screw M4"));
+        assert_eq!(settled.report["conflicts"], json!([]));
+        apply(&mut f, &settled);
+        let (_, quiet) = planned(&f, &master(), csv2, None);
+        assert_eq!(
+            (quiet.report["unchanged"].clone(), quiet.items.len()),
+            (json!(2), 0)
+        );
+    }
+
+    #[test]
+    fn a_renumber_by_import_keeps_the_old_number_and_rows_gone_are_missing() {
+        let mut f = files(&[]);
+        let (_, first) = planned(&f, &master(), CSV, None);
+        apply(&mut f, &first);
+        let (_, out) = planned(
+            &f,
+            &master(),
+            "ID,PN,Desc,Thread,Kind,Old\n1,100-0101,Screw,M3,S,a\n",
+            None,
+        );
+        let s = out.items.values().find(|i| i.number == "100-0101").unwrap();
+        assert_eq!(s.previous_numbers, ["100-0001"]);
+        let missing = &out.report["missing"];
+        assert_eq!(missing.as_array().unwrap().len(), 1);
+        assert_eq!(missing[0]["code"], "import_missing");
+        assert_eq!(missing[0]["details"]["key"], "2");
+        assert_eq!(missing[0]["severity"], "warning");
+        assert_eq!(
+            out.items.len(),
+            1,
+            "the missing plate isn't touched, let alone deleted"
+        );
     }
 }
