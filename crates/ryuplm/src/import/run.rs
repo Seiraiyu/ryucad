@@ -53,6 +53,11 @@ pub struct Provenance {
     pub digest: String,
     pub values: BTreeMap<String, Value>,
     pub lines: Vec<ProvLine>,
+    /// A history import's legacy revisions as stored
+    /// (`{label, date?, state?, change?, author?, values, extra?}`), and
+    /// the carried one's label (design 935).
+    pub revisions: Vec<Value>,
+    pub carried: Option<String>,
 }
 
 impl Provenance {
@@ -72,6 +77,12 @@ impl Provenance {
                 })
                 .collect();
         }
+        if !self.revisions.is_empty() {
+            v["revisions"] = Value::Array(self.revisions.clone());
+        }
+        if let Some(c) = &self.carried {
+            v["carried"] = json!(c);
+        }
         v
     }
 
@@ -83,7 +94,7 @@ impl Provenance {
         let bad = || {
             ryu_doc::files::invalid(
                 &format!("/source/{name}"),
-                "provenance is {key, digest, values, lines?}",
+                "provenance is {key, digest, values, lines?, revisions?, carried?}",
             )
             .with("item", id)
         };
@@ -107,11 +118,42 @@ impl Provenance {
                 quantity: lt("quantity").ok_or_else(bad)?,
             });
         }
+        let mut revisions = Vec::new();
+        match o.get("revisions") {
+            None => {}
+            Some(Value::Array(list)) => {
+                for (i, r) in list.iter().enumerate() {
+                    if !r.get("label").is_some_and(Value::is_string)
+                        || !r.get("values").is_some_and(Value::is_object)
+                    {
+                        return Err(ryu_doc::files::invalid(
+                            &format!("/source/{name}/revisions/{i}"),
+                            "a revision is {label, date?, state?, change?, author?, values, extra?}",
+                        )
+                        .with("item", id));
+                    }
+                    revisions.push(r.clone());
+                }
+            }
+            Some(_) => return Err(bad()),
+        }
+        let carried = text("carried");
+        if let Some(c) = &carried
+            && !revisions.iter().any(|r| r["label"] == json!(c))
+        {
+            return Err(ryu_doc::files::invalid(
+                &format!("/source/{name}/carried"),
+                "carried names one of the revisions",
+            )
+            .with("item", id));
+        }
         Ok(Some(Provenance {
             key: text("key").ok_or_else(bad)?,
             digest: text("digest").ok_or_else(bad)?,
             values: values.iter().map(|(k, x)| (k.clone(), x.clone())).collect(),
             lines,
+            revisions,
+            carried,
         }))
     }
 }
@@ -438,6 +480,8 @@ pub fn plan(
             digest: digest(&stored, &r.extra),
             values: stored,
             lines: Vec::new(),
+            revisions: Vec::new(),
+            carried: None,
         };
         set_extra(&mut item, name, &r.extra);
         item.source.insert(name.to_owned(), p.to_json());
@@ -1299,5 +1343,44 @@ pub(crate) mod tests {
         )
         .unwrap_err();
         assert_eq!(e.code, Code::InvalidDocument, "{e:?}");
+    }
+
+    #[test]
+    fn provenance_keeps_revisions_and_the_carried_label() {
+        let id = Id::parse("k3v9q2m8x4c1p", "item").unwrap();
+        let mut item = Item::new("A-1");
+        let p = Provenance {
+            key: "A-1".into(),
+            digest: "ff".into(),
+            values: BTreeMap::new(),
+            lines: Vec::new(),
+            revisions: vec![
+                json!({"label": "A", "values": {}}),
+                json!({"label": "B", "date": "2020-11-02", "values": {"number": "A-1"}}),
+            ],
+            carried: Some("B".into()),
+        };
+        item.source.insert("hist".into(), p.to_json());
+        assert_eq!(item.source["hist"]["carried"], "B");
+        assert_eq!(Provenance::of(&id, &item, "hist").unwrap(), Some(p));
+        let bad = |v: Value| {
+            let mut i = Item::new("A-1");
+            i.source.insert("hist".into(), v);
+            Provenance::of(&id, &i, "hist").unwrap_err().details["pointer"].clone()
+        };
+        assert_eq!(
+            bad(
+                json!({"key": "A-1", "digest": "ff", "values": {}, "revisions": [{"label": "A", "values": {}}], "carried": "C"})
+            ),
+            "/source/hist/carried"
+        );
+        assert_eq!(
+            bad(json!({"key": "A-1", "digest": "ff", "values": {}, "revisions": [{"values": {}}]})),
+            "/source/hist/revisions/0"
+        );
+        assert_eq!(
+            bad(json!({"key": "A-1", "digest": "ff", "values": {}, "revisions": {}})),
+            "/source/hist"
+        );
     }
 }
