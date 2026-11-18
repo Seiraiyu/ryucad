@@ -118,6 +118,197 @@ pub fn tops(here: &Path, folders: &[PathBuf]) -> Vec<PathBuf> {
     out
 }
 
+/// One line a representation's BOM gives.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RepLine {
+    /// What tells it from the representation's other lines: ryupdm's row
+    /// key for ryucad (`<part>` or `<project>:<part>`), ryueda's part,
+    /// value and footprint joined by NUL.
+    pub key: String,
+    /// The child representation's project: `None` when ryueda names it by
+    /// a library alias with no project ID, so no item can link it.
+    pub project: Option<ProjectId>,
+    pub part: Id,
+    /// How many: ryucad's instance count, ryueda's populated occurrences.
+    pub quantity: u64,
+    /// ryucad's item number in the assembly.
+    pub find: Option<String>,
+    /// ryueda's designators.
+    pub refdes: Option<String>,
+}
+
+/// The lines one representation gave, and the revision they were read
+/// at: `working`, or a commit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Read {
+    pub lines: Vec<RepLine>,
+    pub rev: String,
+}
+
+/// Which revision of the catalogue lines are read for.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum At {
+    Working,
+    /// A commit of the catalogue's repository, in hex.
+    Commit(String),
+}
+
+impl At {
+    pub fn text(&self) -> &str {
+        match self {
+            At::Working => "working",
+            At::Commit(c) => c,
+        }
+    }
+}
+
+/// Where representation lines come from.
+pub trait Reps {
+    fn lines(&mut self, link: &crate::item::Link, at: &At) -> Result<Read>;
+}
+
+/// `item_link_unresolved` for `link`, saying why.
+pub fn unresolved(link: &crate::item::Link, why: &str) -> Error {
+    Error::new(
+        Code::ItemLinkUnresolved,
+        format!(
+            "{} {}:{} can't be read: {why}",
+            link.product, link.project, link.part
+        ),
+    )
+    .with("product", &link.product)
+    .with("project", &link.project)
+    .with("part", &link.part)
+}
+
+/// Representation lines held in memory, by what a link names: for tests,
+/// the golden and fuzzing.
+#[derive(Clone, Debug, Default)]
+pub struct Fixed(pub BTreeMap<(String, ProjectId, Id), Vec<RepLine>>);
+
+impl Reps for Fixed {
+    fn lines(&mut self, link: &crate::item::Link, at: &At) -> Result<Read> {
+        let k = (link.product.clone(), link.project.clone(), link.part.clone());
+        let lines = self
+            .0
+            .get(&k)
+            .cloned()
+            .ok_or_else(|| unresolved(link, "it isn't held"))?;
+        Ok(Read {
+            lines,
+            rev: at.text().to_owned(),
+        })
+    }
+}
+
+/// The variable naming the `ryueda` executable; `ryueda` on PATH without it.
+pub const RYUEDA_EXE: &str = "RYUEDA_EXE";
+
+/// The lines of `ryueda bom`'s answer (`schema` 1) for a design of the
+/// project `own`: `self/<id>` lines are `own`'s components,
+/// `<project>:<id>` another project's, `<alias>/<id>` of no known
+/// project. A line whose every occurrence is DNP (quantity 0) buys
+/// nothing and is left out. Anything else is `item_link_unresolved`.
+pub fn eda_answer(stdout: &[u8], own: &ProjectId) -> Result<Vec<RepLine>> {
+    let bad =
+        |why: String| Error::new(Code::ItemLinkUnresolved, format!("ryueda's bom answer {why}"));
+    let v: Value =
+        serde_json::from_slice(stdout).map_err(|e| bad(format!("isn't JSON: {e}")))?;
+    if v.get("ok") != Some(&Value::Bool(true)) {
+        let msg = v
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .unwrap_or("is a failure");
+        return Err(bad(format!("is an error: {msg}"))
+            .with("ryueda", v.get("error").cloned().unwrap_or(Value::Null)));
+    }
+    let r = &v["result"];
+    if r.get("schema").and_then(Value::as_u64) != Some(1) {
+        return Err(bad(
+            "isn't schema 1: upgrade ryuplm or ryueda so they agree".to_owned(),
+        ));
+    }
+    let list = r
+        .get("lines")
+        .and_then(Value::as_array)
+        .ok_or_else(|| bad("has no lines".to_owned()))?;
+    let mut out = Vec::new();
+    for (i, l) in list.iter().enumerate() {
+        let text = |k: &str| l.get(k).and_then(Value::as_str).unwrap_or("").to_owned();
+        let part_text = text("part");
+        let quantity = l
+            .get("quantity")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| bad(format!("line {i} has no quantity")))?;
+        if quantity == 0 {
+            continue;
+        }
+        let (project, id) = if let Some(id) = part_text.strip_prefix("self/") {
+            (Some(own.clone()), id)
+        } else if let Some((p, id)) = part_text.split_once(':') {
+            let p = ProjectId::parse(p).map_err(|_| bad(format!("line {i} names project {p:?}")))?;
+            (Some(p), id)
+        } else if let Some((_, id)) = part_text.split_once('/') {
+            (None, id)
+        } else {
+            return Err(bad(format!("line {i} names part {part_text:?}")));
+        };
+        let part =
+            Id::parse(id, "part").map_err(|_| bad(format!("line {i} names part {part_text:?}")))?;
+        out.push(RepLine {
+            key: format!("{part_text}\0{}\0{}", text("value"), text("footprint")),
+            project,
+            part,
+            quantity,
+            find: None,
+            refdes: Some(text("refdes")).filter(|s| !s.is_empty()),
+        });
+    }
+    Ok(out)
+}
+
+/// The executable [`RYUEDA_EXE`] names, else `ryueda` on PATH.
+pub fn ryueda_exe() -> PathBuf {
+    std::env::var_os(RYUEDA_EXE)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("ryueda"))
+}
+
+/// `exe -C <dir> --no-daemon bom <part> [--rev <rev>]`, read by
+/// [`eda_answer`].
+pub fn eda_lines_with(
+    exe: &Path,
+    dir: &Path,
+    own: &ProjectId,
+    part: &Id,
+    rev: Option<&str>,
+) -> Result<Vec<RepLine>> {
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("-C")
+        .arg(dir)
+        .arg("--no-daemon")
+        .arg("bom")
+        .arg(part.as_str());
+    if let Some(r) = rev {
+        cmd.arg("--rev").arg(r);
+    }
+    let out = cmd
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .map_err(|e| {
+            Error::new(
+                Code::ItemLinkUnresolved,
+                format!(
+                    "{} couldn't be run ({e}): install ryueda, or set {RYUEDA_EXE} to it",
+                    exe.display()
+                ),
+            )
+            .with("exe", exe.display().to_string())
+        })?;
+    eda_answer(&out.stdout, own)
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -210,5 +401,96 @@ pub(crate) mod tests {
         assert_eq!(number_of(&eda, "ryueda", &id("main")).as_deref(), Some("PCB-1"));
         assert_eq!(number_of(&mech, "ryucad", &id("bolt")), None);
         assert_eq!(manifest_of("ryudfm"), None);
+    }
+
+    /// What `ryueda bom` prints: a design placing a component of its own
+    /// library, one of a library project by ID, one by an alias with no
+    /// project, and one whose every occurrence is DNP.
+    pub(crate) fn eda_stdout(lib: &ProjectId) -> String {
+        serde_json::json!({"ok": true, "warnings": [], "result": {
+            "schema": 1, "design": "main", "rev": "working", "columns": [], "findings": [],
+            "lines": [
+                {"part": "self/r10k", "revision": "working", "quantity": 3, "value": "10k",
+                 "footprint": "R0603", "refdes": "R1,R2,R3"},
+                {"part": format!("{lib}:mcu"), "revision": "A", "quantity": 1, "value": "RP2040",
+                 "footprint": "QFN56", "refdes": "U1"},
+                {"part": "passives/c100n", "revision": "working", "quantity": 2, "value": "100n",
+                 "footprint": "C0402", "refdes": "C1,C2"},
+                {"part": "self/tp", "revision": "working", "quantity": 0, "value": "",
+                 "footprint": "TP", "refdes": ""}
+            ]}})
+        .to_string()
+    }
+
+    #[test]
+    fn ryuedas_answer_reads_as_lines() {
+        let id = |s: &str| Id::parse(s, "part").unwrap();
+        let lines = eda_answer(eda_stdout(&pid(5)).as_bytes(), &pid(4)).unwrap();
+        assert_eq!(
+            lines,
+            [
+                RepLine {
+                    key: "self/r10k\u{0}10k\u{0}R0603".into(),
+                    project: Some(pid(4)),
+                    part: id("r10k"),
+                    quantity: 3,
+                    find: None,
+                    refdes: Some("R1,R2,R3".into()),
+                },
+                RepLine {
+                    key: format!("{}:mcu\u{0}RP2040\u{0}QFN56", pid(5)),
+                    project: Some(pid(5)),
+                    part: id("mcu"),
+                    quantity: 1,
+                    find: None,
+                    refdes: Some("U1".into()),
+                },
+                RepLine {
+                    key: "passives/c100n\u{0}100n\u{0}C0402".into(),
+                    project: None,
+                    part: id("c100n"),
+                    quantity: 2,
+                    find: None,
+                    refdes: Some("C1,C2".into()),
+                },
+            ]
+        );
+        for bad in [
+            "not json".to_owned(),
+            r#"{"ok": false, "error": {"code": "not_found", "message": "no design"}}"#.to_owned(),
+            r#"{"ok": true, "result": {"schema": 2, "lines": []}}"#.to_owned(),
+        ] {
+            let e = eda_answer(bad.as_bytes(), &pid(4)).unwrap_err();
+            assert_eq!(e.code, Code::ItemLinkUnresolved, "{bad}");
+        }
+    }
+
+    #[test]
+    fn lines_held_in_memory_and_a_missing_executable() {
+        let link = crate::item::Link {
+            product: "ryueda".into(),
+            project: pid(4),
+            part: Id::parse("main", "part").unwrap(),
+        };
+        let mut fixed = Fixed::default();
+        let e = fixed.lines(&link, &At::Working).unwrap_err();
+        assert_eq!(e.code, Code::ItemLinkUnresolved);
+        fixed.0.insert(
+            ("ryueda".into(), pid(4), link.part.clone()),
+            eda_answer(eda_stdout(&pid(5)).as_bytes(), &pid(4)).unwrap(),
+        );
+        let r = fixed.lines(&link, &At::Commit("abc".into())).unwrap();
+        assert_eq!((r.lines.len(), r.rev.as_str()), (3, "abc"));
+        // An executable that isn't there is a typed error, never a panic.
+        let e = eda_lines_with(
+            std::path::Path::new("/no/such/ryueda"),
+            std::path::Path::new("."),
+            &pid(4),
+            &link.part,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::ItemLinkUnresolved);
+        assert!(e.message.contains("RYUEDA_EXE"), "{}", e.message);
     }
 }
