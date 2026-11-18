@@ -640,6 +640,144 @@ fn a_narrowed_ladder_climbs_and_stays_narrowed() {
     ));
 }
 
+fn built_rung() -> super::Rung {
+    super::done(Ok((block(), crate::name::Journal::new())))
+}
+
+fn refused_rung() -> super::Rung {
+    super::done(Err(crate::TweakError::Uncertain {
+        at: Name::from_u128(4),
+    }
+    .into()))
+}
+
+/// An ask for room for the block's +x side.
+fn asks() -> Option<super::near::Adjusts> {
+    let b = block();
+    Some(super::near::Adjusts::from([(
+        face_of(&b, FaceRole::PlusX),
+        super::near::Adjust::Room(1),
+    )]))
+}
+
+/// Design 724's adjusted builds: a narrowed build that asks nothing
+/// answers alone; one that asks is built again with what it asks; the
+/// first adjusted build that builds answers; at most `ADJUSTS` are made;
+/// a stopped meter answers at once; where none builds, the first answer
+/// stands.
+#[test]
+fn adjusted_builds_answer_only_when_they_build() {
+    use super::near::Adjusts;
+    use super::{ADJUSTS, Rung, adjusting};
+    let never = |_: &Adjusts| -> (Rung, Option<Adjusts>) { panic!("built again") };
+    let r = adjusting((walked_rung(), None), &|| false, never);
+    assert!(matches!(r, Rung::Walked(_)));
+    let mut n = 0;
+    let r = adjusting((walked_rung(), asks()), &|| false, |a: &Adjusts| {
+        assert_eq!(Some(a.clone()), asks());
+        n += 1;
+        (built_rung(), None)
+    });
+    assert!(matches!(&r, Rung::Done(d) if d.is_ok()) && n == 1);
+    let mut n = 0;
+    let r = adjusting((walked_rung(), asks()), &|| false, |_: &Adjusts| {
+        n += 1;
+        (refused_rung(), asks())
+    });
+    assert!(matches!(r, Rung::Walked(_)), "the first answer stands");
+    assert_eq!(n, ADJUSTS);
+    let mut n = 0;
+    let r = adjusting((walked_rung(), asks()), &|| false, |_: &Adjusts| {
+        n += 1;
+        (walked_rung(), None)
+    });
+    assert!(matches!(r, Rung::Walked(_)) && n == 1);
+    let r = adjusting((walked_rung(), asks()), &|| true, |_: &Adjusts| {
+        (super::done(Err(crate::Error::Cancelled)), asks())
+    });
+    assert!(matches!(&r, Rung::Done(d) if matches!(**d, Err(crate::Error::Cancelled))));
+}
+
+/// Design 724: only a narrowed build's clip asks room, for the input faces
+/// of the face clipped and of the faces whose clipped sides it reached,
+/// those working and not fixed.
+#[test]
+fn only_a_narrowed_clip_at_a_carried_face_asks_room() {
+    use super::walk::WalkError;
+    use super::{Build, ask_room, near};
+    use std::collections::BTreeSet;
+    let b = block();
+    let changes = raised(&b, 0.1);
+    let changed = changes.motion.keys().copied().collect();
+    let region = super::region::region(&b, &changed);
+    let bx = super::body::region_box(&b, &region, super::reach(&b, &changes));
+    let ws: BTreeMap<FaceId, super::working::Working> = region
+        .faces
+        .iter()
+        .map(|&f| {
+            let w = super::working::working(
+                &b,
+                f,
+                changes.surface.get(&f),
+                b.faces[f].sense,
+                true,
+                &bx,
+            );
+            (f, w.unwrap())
+        })
+        .collect();
+    // unmetered: a unit test.
+    let mut w = super::body::work_body(K, &b, &region, &ws, &crate::work::Meter::free()).unwrap();
+    let wf = *w.working.iter().next().unwrap();
+    let input = w.origin[&wf];
+    let clip = WalkError::Clipped { piece: 0 };
+    let give = |c: &BTreeSet<FaceId>| Some(c.iter().map(|&i| (i, near::Adjust::Room(1))).collect());
+    let one = |i: FaceId| Some(near::Adjusts::from([(i, near::Adjust::Room(1))]));
+    let none = BTreeSet::new();
+    assert_eq!(
+        ask_room(&w, clip, wf, &none, Build::Retry, give),
+        one(input)
+    );
+    assert_eq!(ask_room(&w, clip, wf, &none, Build::Only, give), one(input));
+    assert_eq!(ask_room(&w, clip, wf, &none, Build::First, give), None);
+    for e in [
+        WalkError::Open { piece: 0 },
+        WalkError::Ambiguous { piece: 0 },
+        WalkError::Halted { piece: 0 },
+    ] {
+        assert_eq!(ask_room(&w, e, wf, &none, Build::Only, give), None, "{e:?}");
+    }
+    let outside = w
+        .body
+        .faces()
+        .find(|g| !w.working.contains(g))
+        .expect("the bottom, outside");
+    assert_eq!(ask_room(&w, clip, outside, &none, Build::Only, give), None);
+    // A piece of an outside face that reached a working face's clipped
+    // side asks room for that face (NIST STC 10's coplanar planes).
+    let owners = BTreeSet::from([wf]);
+    assert_eq!(
+        ask_room(&w, clip, outside, &owners, Build::Only, give),
+        one(input)
+    );
+    assert_eq!(
+        ask_room(&w, clip, outside, &owners, Build::First, give),
+        None
+    );
+    let other = *w.working.iter().nth(1).unwrap();
+    let both = BTreeSet::from([w.origin[&wf], w.origin[&other]]);
+    assert_eq!(
+        ask_room(&w, clip, other, &owners, Build::Only, give),
+        give(&both)
+    );
+    w.fixed.insert(wf);
+    assert_eq!(
+        ask_room(&w, clip, wf, &none, Build::Only, give),
+        None,
+        "a fixed face gets no room"
+    );
+}
+
 /// FNV-1a of `b`'s `dump_unnamed` (as `ryukei-testkit`'s `fnv`, which the
 /// crate can't depend on).
 fn free_hash(b: &Body) -> u64 {
@@ -1109,4 +1247,324 @@ fn a_failed_walk_with_nothing_to_yield_fails_as_before() {
     );
     assert!(matches!(r, Rung::Walked(_) | Rung::Next(_)));
     assert!(changes.deleted.is_empty());
+}
+
+/// Where the twin's slot starts (through the block's -x side), how far
+/// before the round it ends, and the rung and build whose walk clips
+/// (plan 22.A: census VII found the plan's slot, starting inside the
+/// block, never clips; this one does).
+const TWIN_START: f64 = -0.01;
+const TWIN_SHORT: f64 = 0.05;
+const TWIN_RUNG: usize = 3;
+const TWIN_BUILD: super::Build = super::Build::Only;
+
+/// Plan 22.A's twin in the crate: `pinned_faces`' block 0.2 × 0.1 × 0.05
+/// with its +x top edge rounded 0.01, and a slot 0.02 wide and deep from
+/// `start` (through the -x side) to `short` before the round
+/// (ryukei-testkit's `near_room` is this body, with the same keys).
+/// Returns it and the slot's far end.
+fn run_out_slot(start: f64, short: f64) -> (Body, FaceId) {
+    use crate::blend::{BlendKind, EdgeBlend, blend};
+    let k = OpKey(0x21a0);
+    let (b, _) = primitive::block(k, 0.2, 0.1, 0.05, &Rigid::IDENTITY).unwrap();
+    let face = |r: FaceRole| match b.by_name(Name::derive(k, Role::Face(r), &[])) {
+        Some(EntityId::Face(f)) => f,
+        _ => panic!("no face {r:?}"),
+    };
+    let (px, pz) = (face(FaceRole::PlusX), face(FaceRole::PlusZ));
+    let edge = b
+        .edges()
+        .find(|&e| {
+            let fs: Vec<FaceId> = b
+                .edge_fins(e)
+                .map(|fin| b.loops[b.fins[fin].loop_].face)
+                .collect();
+            fs.contains(&px) && fs.contains(&pz)
+        })
+        .expect("the +x top edge");
+    let (r, _) = blend(
+        OpKey(0x21a1),
+        &b,
+        &[EdgeBlend {
+            edge: b.edges[edge].name,
+            kind: BlendKind::Fillet { radius: 0.01 },
+        }],
+    )
+    .unwrap();
+    let end = 0.2 - 0.01 - short;
+    let (slot, _) =
+        primitive::block(OpKey(0x22a2), end - start, 0.02, 0.03, &Rigid::IDENTITY).unwrap();
+    let (s, _) = boolean(
+        OpKey(0x22a3),
+        BooleanOp::Subtract,
+        &r,
+        &[Tool {
+            key: ToolKey(1),
+            body: &slot,
+            place: Rigid::translation(Vector3::new(start, 0.04, 0.03)),
+        }],
+    )
+    .unwrap();
+    let far = s
+        .faces()
+        .find(|&f| {
+            let bx = crate::intersect::face_box(&s, f);
+            matches!(
+                s.surfaces[s.faces[f].surface],
+                crate::geom::Surface::Plane(_)
+            ) && (bx.min().x - end).abs() < 1e-9
+                && (bx.max().x - end).abs() < 1e-9
+        })
+        .expect("the slot's far end");
+    (s, far)
+}
+
+/// The twin's run-out volume: the rounded block less the slot's section
+/// from the -x side to the +x side, the round's part included.
+fn run_out_volume() -> f64 {
+    let quarter = core::f64::consts::FRAC_PI_4 * 1e-4;
+    let block = 0.2 * 0.1 * 0.05 - (1e-4 - quarter) * 0.1;
+    let under = (0.2 - 0.01) * 0.02 + 0.01 * (0.02 - 0.01) + quarter;
+    block - 0.02 * under
+}
+
+/// Design 724: the twin's narrowed build clips the top, which touches the
+/// change, and asks room; its first build asks nothing. Given room, the
+/// top and the walls run on but the floor, given none, is dropped: that
+/// build doesn't answer and asks room for the floor (plan 22.A's guard;
+/// unguarded it answered a body of two shells, the slot cut through to
+/// the bottom, volume 0.000798 for 0.000918, checking clean). Given it,
+/// the rung builds the run-out slot, which checks clean.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn a_clipped_face_given_room_runs_the_slot_out() {
+    use super::near::Adjusts;
+    use super::{Rung, adjusting, attempt_adjusted};
+    use std::collections::BTreeSet;
+    let (b, end) = run_out_slot(TWIN_START, TWIN_SHORT);
+    let changes = Changes {
+        deleted: BTreeSet::from([end]),
+        ..Changes::default()
+    };
+    let mut region = super::region::region(&b, &changes.deleted);
+    for _ in 2..=TWIN_RUNG {
+        region = region.grown(&b);
+    }
+    let mut bx = super::body::region_box(&b, &region, super::reach(&b, &changes));
+    if TWIN_RUNG == 1 {
+        bx = super::body::doubled(&bx);
+    }
+    // unmetered: a unit test.
+    let m = crate::work::Meter::free();
+    let build = |which: super::Build, adjusts: &Adjusts| {
+        let mut ask = None;
+        let r = attempt_adjusted(
+            K, &b, &changes, &region, &bx, TWIN_RUNG, which, None, adjusts, &mut ask, &m,
+        );
+        (r, ask)
+    };
+    let (_, ask) = build(super::Build::First, &Adjusts::new());
+    assert_eq!(ask, None, "a first build asks nothing");
+    let (first, ask) = build(TWIN_BUILD, &Adjusts::new());
+    assert!(
+        matches!(first, Rung::Walked(_)),
+        "main's narrowed build clips"
+    );
+    let asked = ask.expect("room asked");
+    assert!(
+        asked
+            .keys()
+            .any(|&f| super::near::touched(&b, &region, f).contains(&end)),
+        "room for a face touching the change: {asked:?}"
+    );
+    // The floor: the plane at z = 0.03 under the slot.
+    let floor = b
+        .faces()
+        .find(|&f| {
+            let fb = crate::intersect::face_box(&b, f);
+            (fb.min().z - 0.03).abs() < 1e-9 && (fb.max().z - 0.03).abs() < 1e-9
+        })
+        .expect("the slot's floor");
+    assert!(!asked.contains_key(&floor));
+    // Given that room, the floor is dropped: no answer, room for it.
+    let (r, again) = build(TWIN_BUILD, &asked);
+    let Rung::Walked(crate::Error::InvalidTweak(crate::TweakError::RegionTooSmall { face })) = r
+    else {
+        panic!("a build dropping the floor answered");
+    };
+    assert_eq!(face, b.faces[floor].name);
+    let again = again.expect("room asked for the floor");
+    assert!(again.contains_key(&floor), "{again:?}");
+    let r = adjusting((first, Some(asked)), &|| false, |a: &Adjusts| {
+        build(TWIN_BUILD, a)
+    });
+    let Rung::Done(d) = r else {
+        panic!("no adjusted build built");
+    };
+    let (o, _) = (*d).unwrap();
+    let (v, want) = (volume(&o), run_out_volume());
+    assert!((v - want).abs() <= 2e-3 * want, "{v} {want}");
+    assert_eq!(o.counts().faces, 12);
+    assert_eq!(o.counts().shells, b.counts().shells);
+}
+
+/// Plan 22.A's guard, through the whole delete (the regression the
+/// coxswain asked for): the twin's end deleted builds one body of the
+/// input's shells and the run-out volume, never the two shells of the
+/// slot cut through to the bottom (0.000798) that room alone gave.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn room_never_drops_the_slots_floor() {
+    for short in [0.04, TWIN_SHORT, 0.06] {
+        let (b, end) = run_out_slot(TWIN_START, short);
+        let spec = crate::tweak::DeleteSpec {
+            faces: vec![b.faces[end].name],
+            heal: crate::tweak::Heal::Grow,
+        };
+        let (o, _) = crate::tweak::delete_faces(OpKey(0x22a5), &b, &spec)
+            .unwrap_or_else(|e| panic!("{short}: refused: {e:?}"));
+        assert_eq!(crate::check::check_intersections(&o), [], "{short}");
+        assert_eq!(o.counts().shells, b.counts().shells, "{short}");
+        let (v, want) = (volume(&o), run_out_volume());
+        assert!((v - want).abs() <= 2e-3 * want, "{short}: {v} {want}");
+    }
+}
+
+struct ClipCut {
+    body: Body,
+    rung: usize,
+    x: crate::geom::Box3,
+    near: crate::geom::Box3,
+    clipped: FaceId,
+    changed: std::collections::BTreeSet<FaceId>,
+    working: std::collections::BTreeSet<FaceId>,
+    points: Vec<crate::geom::Point3>,
+}
+
+fn clip_cut(bytes: &[u8], text: &str) -> ClipCut {
+    use crate::geom::{Box3, Point3};
+    use std::collections::BTreeSet;
+    let body = crate::codec::decode_body(bytes).unwrap();
+    let face =
+        |hex: &str| match body.by_name(Name::from_u128(u128::from_str_radix(hex, 16).unwrap())) {
+            Some(EntityId::Face(f)) => f,
+            _ => panic!("no face {hex}"),
+        };
+    let float = |hex: &str| f64::from_bits(u64::from_str_radix(hex, 16).unwrap());
+    let boxed =
+        |v: Vec<f64>| Box3::new(Point3::new(v[0], v[1], v[2]), Point3::new(v[3], v[4], v[5]));
+    let (mut rung, mut x, mut near, mut clipped) = (None, None, None, None);
+    let (mut changed, mut working, mut points) = (BTreeSet::new(), BTreeSet::new(), Vec::new());
+    for line in text.lines() {
+        let mut w = line.split_whitespace();
+        match w.next() {
+            Some("rung") => rung = Some(w.next().unwrap().parse().unwrap()),
+            Some("box") => x = Some(boxed(w.map(float).collect())),
+            Some("near") => near = Some(boxed(w.map(float).collect())),
+            Some("clipped") => clipped = Some(face(w.next().unwrap())),
+            Some("changed") => changed.extend(w.map(face)),
+            Some("working") => working.extend(w.map(face)),
+            Some("point") => {
+                let v: Vec<f64> = w.map(float).collect();
+                points.push(Point3::new(v[0], v[1], v[2]));
+            }
+            _ => {}
+        }
+    }
+    let clipped = clipped.expect("a clipped face");
+    ClipCut {
+        body,
+        rung: rung.expect("a rung"),
+        x: x.expect("the rung's box"),
+        near: near.expect("its near box"),
+        clipped,
+        changed,
+        working,
+        points,
+    }
+}
+
+/// Whether `p` lies strictly inside `b`.
+fn strictly_inside(b: &crate::geom::Box3, p: crate::geom::Point3) -> bool {
+    let (l, h) = (b.min(), b.max());
+    l.x < p.x && p.x < h.x && l.y < p.y && p.y < h.y && l.z < p.z && p.z < h.z
+}
+
+/// A cut's clipped face under main's rule: it touches the change, the cut
+/// gives the near box the census read, and the walk reached its clipped
+/// side at points the near box doesn't hold strictly inside. Returns the
+/// cut, its region and changes, for Task 7's room.
+fn clipped_at_its_near_box(bytes: &[u8], text: &str) -> (ClipCut, super::region::Region, Changes) {
+    let c = clip_cut(bytes, text);
+    let region = super::region::Region {
+        changed: c.changed.clone(),
+        faces: c.body.faces().collect(),
+        frontier: Default::default(),
+    };
+    let changes = Changes {
+        deleted: c.changed.clone(),
+        ..Changes::default()
+    };
+    assert!(!super::near::touched(&c.body, &region, c.clipped).is_empty());
+    let n = super::near::near_box(&c.body, &changes, &region, c.clipped, &c.x, c.rung);
+    assert_eq!(n, c.near, "the cut misses a face the near box needs");
+    assert!(!c.points.is_empty());
+    for &p in &c.points {
+        assert!(!strictly_inside(&n, p), "{p:?} inside {n:?}");
+    }
+    (c, region, changes)
+}
+
+/// A cut's clipped face given room (design 724, plan 22.A): room asked
+/// for it holds every clip point strictly inside its adjusted near box,
+/// and goes to its working neighbours too.
+fn given_room_holds_its_clip(bytes: &[u8], text: &str) {
+    let (c, region, changes) = clipped_at_its_near_box(bytes, text);
+    let near = |g: FaceId| super::near::near_box(&c.body, &changes, &region, g, &c.x, c.rung);
+    let adjusts = super::near::room(
+        &c.body,
+        &c.working,
+        &std::collections::BTreeSet::from([c.clipped]),
+        &c.x,
+        &super::near::Adjusts::new(),
+        &near,
+    )
+    .expect("room to give");
+    let roomy = super::near::adjusted(&c.near, &c.x, adjusts.get(&c.clipped).copied());
+    for &p in &c.points {
+        assert!(strictly_inside(&roomy, p), "{p:?} outside {roomy:?}");
+    }
+    assert!(
+        adjusts.len() > 1,
+        "no working neighbour given room: {adjusts:?}"
+    );
+}
+
+/// CTC 02 with PMI #295 (#658, census VII): working plane `1294043e`
+/// clipped at its near box in rung 3's narrowed retry; given room, its
+/// near box holds the clip.
+#[test]
+fn ctc_02s_plane_is_given_room() {
+    given_room_holds_its_clip(
+        include_bytes!("../../../tests/data/nist_ctc_02_room.body"),
+        include_str!("../../../tests/data/nist_ctc_02_room.txt"),
+    );
+}
+
+/// STC 10 #3044 (#658, census VII): working plane `ccab7076` (z = 75 mm),
+/// whose clipped side a piece of coplanar plane `a7b86e65` reached in rung
+/// 2's narrowed retry, clipped at its near box; given room, its near box
+/// holds the clip.
+#[test]
+fn stc_10s_coplanar_plane_is_given_room() {
+    given_room_holds_its_clip(
+        include_bytes!("../../../tests/data/nist_stc_10_room.body"),
+        include_str!("../../../tests/data/nist_stc_10_room.txt"),
+    );
 }

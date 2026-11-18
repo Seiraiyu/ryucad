@@ -74,22 +74,29 @@ pub fn slot_end() -> f64 {
 /// [`SLOT_START`] to [`slot_end`], y centred, z from `HEIGHT -
 /// SLOT_DEPTH` up through the top.
 pub fn slotted() -> Body {
+    slotted_to(SLOT_START, slot_end(), [OpKey(0x21a2), OpKey(0x21a3)])
+}
+
+/// The rounded block with a slot like [`slotted`]'s from `start` to
+/// `end`, the slot block and the cut keyed by `keys` (`near_room` shares
+/// this).
+pub fn slotted_to(start: f64, end: f64, keys: [OpKey; 2]) -> Body {
     let b = rounded();
     let (slot, _) = primitive::block(
-        OpKey(0x21a2),
-        slot_end() - SLOT_START,
+        keys[0],
+        end - start,
         SLOT_WIDTH,
         SLOT_DEPTH + 0.01,
         &Rigid::IDENTITY,
     )
     .unwrap();
     let place = Rigid::translation(Vector3::new(
-        SLOT_START,
+        start,
         0.5 * (WIDTH - SLOT_WIDTH),
         HEIGHT - SLOT_DEPTH,
     ));
     boolean(
-        OpKey(0x21a3),
+        keys[1],
         BooleanOp::Subtract,
         &b,
         &[Tool {
@@ -104,7 +111,11 @@ pub fn slotted() -> Body {
 
 /// The slot's far end: the plane face at x = [`slot_end`].
 pub fn far_end(b: &Body) -> FaceId {
-    let x = slot_end();
+    far_end_at(b, slot_end())
+}
+
+/// The plane face at x = `x`: a slot's far end.
+pub fn far_end_at(b: &Body, x: f64) -> FaceId {
     b.faces()
         .find(|&f| {
             let bx = ryukei::intersect::face_box(b, f);
