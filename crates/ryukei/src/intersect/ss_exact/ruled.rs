@@ -206,6 +206,126 @@ pub(crate) fn ruled(
     Ok(None)
 }
 
+/// The charts' reach: `u = U (2s − 1)` over `s ∈ [0, 1]`, so each chart
+/// covers `±2 atan 2.5` (about ±136°) about its middle. `U² = 6.25` is
+/// exact.
+const U: f64 = 2.5;
+
+fn iv(x: f64) -> Interval {
+    Interval::point(x)
+}
+
+fn ivec(v: Vector3) -> [Interval; 3] {
+    [iv(v.x), iv(v.y), iv(v.z)]
+}
+
+fn idot(a: [Interval; 3], b: [Interval; 3]) -> Interval {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+/// A certified strict sign.
+fn strict(x: Interval) -> Option<Sign> {
+    x.sign().filter(|&s| s != Sign::Zero)
+}
+
+/// The angle at `s` in chart `c`.
+fn theta_of(c: usize, s: f64) -> f64 {
+    c as f64 * PI + 2.0 * math::atan2(U * (2.0 * s - 1.0), 1.0)
+}
+
+/// The `s` of angle `local` (taken from the chart's middle) in a chart.
+fn s_of(local: f64) -> f64 {
+    (math::tan(local / 2.0) / U + 1.0) / 2.0
+}
+
+/// `1 + u²`, `1 − u²` and `2u` in Bernstein form of degree 2.
+fn basis() -> [Bernstein; 3] {
+    [
+        Bernstein::from_f64(&[7.25, -5.25, 7.25]),
+        Bernstein::from_f64(&[-5.25, 7.25, -5.25]),
+        Bernstein::from_f64(&[-5.0, 0.0, 5.0]),
+    ]
+}
+
+/// The miss margin `M`. Within [`LINEAR_RESOLUTION`] of any point of
+/// `region`, the quadric's form changes by less than `M`. Its gradient
+/// `2(DL + e)` is at most `G = 2(max(1, τ²) L + kτ)` long, `L` being the
+/// farthest the region reaches from the quadric's origin (plus the
+/// resolution twice). Its second-order part `δ·Dδ` is at most
+/// `max(1, τ²) δ²`. Rounded up by a millionth.
+fn margin(q: &Quadric, region: &Box3) -> f64 {
+    let (lo, hi) = (region.min(), region.max());
+    let o = q.frame.origin();
+    let far = (0..8)
+        .map(|i| {
+            let x = if i & 1 == 0 { lo.x } else { hi.x };
+            let y = if i & 2 == 0 { lo.y } else { hi.y };
+            let z = if i & 4 == 0 { lo.z } else { hi.z };
+            Point3::new(x, y, z).distance(o)
+        })
+        .fold(0.0, f64::max)
+        + 2.0 * LINEAR_RESOLUTION;
+    let tau = q.tan();
+    let big = (tau * tau).max(1.0);
+    let g = 2.0 * (big * far + q.k * tau);
+    (g * LINEAR_RESOLUTION + big * LINEAR_RESOLUTION * LINEAR_RESOLUTION) * (1.0 + 1e-6)
+}
+
+/// `(1 + u²)² Δ` and `(1 + u²)² N` in each chart, in `s` over `[0, 1]`.
+struct Charts {
+    delta: [Bernstein; 2],
+    near: [Bernstein; 2],
+}
+
+/// The charts, in interval arithmetic from the frames as stored. `None`
+/// where `A`'s sign can't be certified (`A = 0`: not this form's).
+fn charts(rl: &Rulings, region: &Box3) -> Option<Charts> {
+    let q = &rl.q;
+    let axes = [q.frame.x().get(), q.frame.y().get(), q.frame.z().get()].map(ivec);
+    let local = |v: [Interval; 3]| axes.map(|a| idot(v, a));
+    let (o, p) = (rl.cyl.origin(), q.frame.origin());
+    let u0 = local([iv(o.x) - iv(p.x), iv(o.y) - iv(p.y), iv(o.z) - iv(p.z)]);
+    let r = iv(rl.r);
+    let uc = local(ivec(rl.cyl.x().get())).map(|x| x * r);
+    let us = local(ivec(rl.cyl.y().get())).map(|x| x * r);
+    let w = local(ivec(rl.cyl.z().get()));
+    let tau = iv(q.sin).checked_div(iv(q.cos))?;
+    let (t2, kt, k2) = (tau * tau, iv(q.k) * tau, iv(q.k) * iv(q.k));
+    let a = w[0] * w[0] + w[1] * w[1] - t2 * w[2] * w[2];
+    let a_abs = match strict(a)? {
+        Sign::Positive => a,
+        _ => -a,
+    };
+    let m = iv(margin(q, region));
+    let [p1, pc, ps] = basis();
+    let dd = |x: &[Bernstein; 3], y: &[Bernstein; 3]| {
+        x[0].mul(&y[0])
+            .add(&x[1].mul(&y[1]))
+            .sub(&x[2].mul(&y[2]).scale(t2))
+    };
+    let wb = w.map(|x| Bernstein::new(vec![x]));
+    let chart = |sigma: f64| {
+        let sg = iv(sigma);
+        let uh: [Bernstein; 3] = core::array::from_fn(|i| {
+            p1.scale(u0[i])
+                .add(&pc.scale(uc[i] * sg))
+                .add(&ps.scale(us[i] * sg))
+        });
+        let b = dd(&wb, &uh).sub(&p1.scale(kt * w[2]));
+        let c = dd(&uh, &uh)
+            .sub(&uh[2].mul(&p1).scale(iv(2.0) * kt))
+            .sub(&p1.mul(&p1).scale(k2));
+        let delta = b.mul(&b).sub(&c.scale(a));
+        let near = delta.add(&p1.mul(&p1).scale(a_abs * m));
+        (delta, near)
+    };
+    let ((d0, n0), (d1, n1)) = (chart(1.0), chart(-1.0));
+    Some(Charts {
+        delta: [d0, d1],
+        near: [n0, n1],
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -249,6 +369,38 @@ mod tests {
             assert!((rl.b(th).1 - num(&|x| rl.b(x))).abs() < 1e-6);
             assert!((rl.c(th).1 - num(&|x| rl.c(x))).abs() < 1e-6);
             assert!((rl.delta(th).1 - num(&|x| rl.delta(x))).abs() < 1e-6);
+        }
+    }
+
+    /// Each chart's quartic, at 33 values of `s`, holds `(1 + u²)² Δ(θ)`
+    /// computed in floats; `N` holds it plus `(1 + u²)² |A| M`.
+    #[test]
+    fn the_charts_hold_delta() {
+        let cyl = frame((0.1, -0.2, 0.3), (0.2, 1.0, 0.1), (1.0, 0.0, 0.0));
+        let cone = frame((0.0, 0.0, 0.0), (0.0, 0.1, 1.0), (1.0, 0.0, 0.0));
+        let other = Surface::Cone(Cone::new(cone, 1.2, 0.3).unwrap());
+        let q = Quadric::of(&other).unwrap();
+        let rl = Rulings::new(cyl, 0.4, q);
+        let region = Box3::new(Point3::new(-5.0, -5.0, -5.0), Point3::new(5.0, 5.0, 5.0));
+        let ch = charts(&rl, &region).unwrap();
+        let m = margin(&q, &region);
+        assert!(m > 0.0 && m < 1e-5, "{m}");
+        for c in 0..2 {
+            for k in 0..=32 {
+                let s = f64::from(k) / 32.0;
+                let u = U * (2.0 * s - 1.0);
+                let w = (1.0 + u * u) * (1.0 + u * u);
+                let want = rl.delta(theta_of(c, s)).0 * w;
+                let got = ch.delta[c].eval(s);
+                let slack = 1e-9 * want.abs().max(1.0);
+                assert!(
+                    got.lo() - slack <= want && want <= got.hi() + slack,
+                    "{c} {s}: {got:?} against {want}"
+                );
+                let near = ch.near[c].eval(s);
+                let want_near = want + w * rl.a().abs() * m;
+                assert!(near.lo() - slack <= want_near && want_near <= near.hi() + slack);
+            }
         }
     }
 }
