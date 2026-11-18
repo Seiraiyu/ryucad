@@ -249,6 +249,72 @@ pub fn problems(code: Code, details: &Value) -> Vec<Problem> {
     found
 }
 
+/// Set to a file, the check appends what it finds there (one
+/// `code<TAB>key<TAB>kind<TAB>declared` line a problem) instead of
+/// panicking: the record run of plan 33.E, and of whoever declares the
+/// next codes.
+pub const RECORD: &str = "RYU_DETAILS_RECORD";
+
+/// Checks `e` against its code's declaration as it leaves a product. A
+/// debug build panics on a key the code doesn't declare or a value of
+/// another kind (see [`RECORD`]); a release build does nothing.
+pub fn check(e: &super::Error) {
+    check_value(e.code, &e.details);
+}
+
+/// [`check`] for a refusal whose details are already JSON text
+/// (`ryu_session::rpc::Raw::Error`: a failed rebuild's report).
+pub fn check_raw(code: Code, details: &str) {
+    if !cfg!(debug_assertions) || keys(code).is_none() || details == "null" {
+        return;
+    }
+    let v: Value = serde_json::from_str(details)
+        .unwrap_or_else(|e| panic!("error `{}`: its details aren't JSON: {e}", name(code)));
+    check_value(code, &v);
+}
+
+fn check_value(code: Code, details: &Value) {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let found = problems(code, details);
+    if found.is_empty() {
+        return;
+    }
+    if let Some(file) = std::env::var_os(RECORD) {
+        record(std::path::Path::new(&file), code, &found);
+        return;
+    }
+    let list: Vec<String> = found.iter().map(ToString::to_string).collect();
+    panic!(
+        "error `{}`: {}; declare it in crates/ryu-doc/src/error/details.rs or fix the call (design 698, #771)",
+        name(code),
+        list.join("; ")
+    );
+}
+
+/// Appends `found` to `file`, in one write so parallel tests' lines don't
+/// interleave.
+fn record(file: &std::path::Path, code: Code, found: &[Problem]) {
+    use std::io::Write;
+    let code = name(code);
+    let mut text = String::new();
+    for p in found {
+        let declared = p.declared.map_or("-", Kind::name);
+        text.push_str(&format!(
+            "{code}\t{}\t{}\t{declared}\n",
+            p.key,
+            p.got.name()
+        ));
+    }
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(file)
+        .unwrap_or_else(|e| panic!("{RECORD}={}: {e}", file.display()));
+    let _ = f.write_all(text.as_bytes());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -328,5 +394,53 @@ mod tests {
                 }
             }
         }
+    }
+
+    use crate::error::Error;
+
+    #[test]
+    fn a_declared_error_passes_and_undeclared_codes_are_not_read() {
+        check(
+            &Error::new(Code::LabelNotFound, "x")
+                .with("part", "p")
+                .with("hint", "h"),
+        );
+        check_raw(Code::LabelNotFound, r#"{"part":"p","commit":"abc"}"#);
+        check_raw(Code::LabelNotFound, "null");
+        check_raw(
+            Code::Conflict,
+            "not even JSON: an undeclared code isn't read",
+        );
+    }
+
+    /// In a debug build an undeclared key panics, naming the code, the key
+    /// and where to declare it. (Not under the record switch, which writes
+    /// instead.)
+    #[test]
+    fn check_panics_in_debug_builds() {
+        if !cfg!(debug_assertions) || std::env::var_os(RECORD).is_some() {
+            return;
+        }
+        let e = Error::new(Code::LabelNotFound, "x").with("colour", "red");
+        let panic = std::panic::catch_unwind(|| check(&e)).unwrap_err();
+        let text = panic.downcast_ref::<String>().expect("a formatted panic");
+        assert!(
+            text.contains("error `label_not_found`: `colour` (str) isn't declared")
+                && text.contains("crates/ryu-doc/src/error/details.rs"),
+            "{text}"
+        );
+        let raw = std::panic::catch_unwind(|| check_raw(Code::LabelNotFound, r#"{"label":1}"#));
+        assert!(raw.is_err(), "a raw refusal is checked too");
+    }
+
+    #[test]
+    fn the_record_switch_appends_one_line_a_problem() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("found.txt");
+        let found = problems(Code::LabelNotFound, &json!({"colour": "red", "label": 1}));
+        record(&file, Code::LabelNotFound, &found);
+        record(&file, Code::LabelNotFound, &found);
+        let once = "label_not_found\tcolour\tstr\t-\nlabel_not_found\tlabel\tnum\tstr\n";
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), once.repeat(2));
     }
 }
