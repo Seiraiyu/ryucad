@@ -53,6 +53,24 @@ static FILE: Mutex<Option<File>> = Mutex::new(None);
 static ENDED: AtomicBool = AtomicBool::new(false);
 /// The main thread panicked: the process ends with it.
 static MAIN_PANICKED: AtomicBool = AtomicBool::new(false);
+/// The window's `on_exit` ran: what follows is a quit, even if the
+/// system's own `exit()` ends the process before `main` returns, as
+/// macOS's Cmd+Q does from inside the event loop (#871).
+static CLOSING: AtomicBool = AtomicBool::new(false);
+
+/// The line for an exit after the window closed that `main` didn't make.
+const QUIT: &str = "exited: the window closed (the system quit the app)";
+
+/// The window is closing: an `exit()` from now on is the system's quit.
+pub fn closing() {
+    CLOSING.store(true, Ordering::SeqCst);
+}
+
+/// An `exit()` that isn't `main`'s, after the window closed: the quit
+/// (#871), which is said plainly, without a backtrace.
+fn quitting() -> bool {
+    CLOSING.load(Ordering::SeqCst) && !ENDED.load(Ordering::SeqCst)
+}
 
 thread_local! {
     /// The size of the last allocation that returned null on this thread,
@@ -446,6 +464,10 @@ mod unix {
     use super::*;
 
     extern "C" fn at_exit() {
+        if quitting() {
+            trace(QUIT);
+            return;
+        }
         if let Some(how) = exiting_unexpectedly() {
             trace(&format!(
                 "{how}; {}\n{}",
@@ -848,6 +870,10 @@ pub mod win {
     /// The process detaching (`ExitProcess`, which `std::process::exit`
     /// calls) without `main`'s `exited` line: who called it, as frames.
     pub fn detaching() {
+        if quitting() {
+            emergency(format_args!("{QUIT}"));
+            return;
+        }
         if let Some(how) = exiting_unexpectedly() {
             emergency(format_args!("{how}; {}; from {}", Doing, Stack(0)));
         }
@@ -965,7 +991,8 @@ pub mod win {
 /// Debug builds only: fails as `how` says, so tests can see each way of
 /// ending leave its line (`tests/exits.rs`): `panic`, `alloc` (an
 /// allocation that fails), `null` (one that returns null, recovered from,
-/// then `exit(5)`), `exit` (`process::exit` from another thread),
+/// then `exit(5)`), `exit` (`process::exit` from another thread), `quit`
+/// (the window closing, then `process::exit(0)`, as macOS's Cmd+Q),
 /// `fault` (a write through null) and `overflow` (a stack overflow).
 #[cfg(debug_assertions)]
 pub fn fail_for_tests(how: &str) {
@@ -1003,6 +1030,12 @@ pub fn fail_for_tests(how: &str) {
         }
         "exit" => {
             let _ = std::thread::spawn(|| std::process::exit(3)).join();
+        }
+        "quit" => {
+            // As Cmd+Q: the window's on_exit, then exit(0) from the event
+            // loop, not main.
+            closing();
+            std::process::exit(0)
         }
         "fault" => {
             // SAFETY: none: the fault is the point.

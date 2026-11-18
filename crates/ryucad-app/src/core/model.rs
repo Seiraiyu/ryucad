@@ -1063,6 +1063,9 @@ pub struct Model {
     /// How many `mesh.get`s the workspace's `fetch` sent: a part's bodies
     /// go by the batch, as an assembly's do (#801).
     pub mesh_requests: u64,
+    /// How many requests [`crate::core::workspace::Workspace::fetch_levels`]
+    /// has sent: a part's bodies at one level go by the batch (#876).
+    pub level_requests: u64,
     /// How many bytes answers brought after their lines: meshes, mostly.
     pub received: u64,
     /// What the model was last read at: its revision and the draft's
@@ -1770,11 +1773,17 @@ impl Model {
     }
 
     /// The part the Part section, Parameters and Releases follow (#741):
-    /// the chosen feature's, else the one part the window shows, else the
-    /// first.
+    /// the chosen feature's, unless the window is focused on another part
+    /// (#869: the choice is stale), else the one part the window shows,
+    /// else the first.
     pub fn followed_part(&self, chosen: Option<&BodyKey>) -> Option<String> {
+        let focused = self
+            .focus
+            .as_deref()
+            .filter(|f| self.parts.contains_key(*f));
         chosen
             .map(|k| k.0.clone())
+            .filter(|p| focused.is_none_or(|f| f == p))
             .or_else(|| match self.shown().as_slice() {
                 [one] => Some((*one).to_owned()),
                 _ => None,
@@ -2091,10 +2100,17 @@ mod tests {
         m.focus = Some("bolt".into());
         assert_eq!(m.followed_part(None).as_deref(), Some("bolt"));
         let k = ("ann-block".to_owned(), "b".to_owned());
+        // #869: a choice on a part the window no longer shows is stale.
+        assert_eq!(m.followed_part(Some(&k)).as_deref(), Some("bolt"));
+        // Once its part is shown again, the choice wins.
+        m.focus = Some("ann-block".into());
         assert_eq!(m.followed_part(Some(&k)).as_deref(), Some("ann-block"));
         m.focus = None;
         // Both shown: no one part, so the first.
         assert_eq!(m.followed_part(None).as_deref(), Some("ann-block"));
+        // Nothing focused, so the choice wins (#741), whatever is shown.
+        let b = ("bolt".to_owned(), "b".to_owned());
+        assert_eq!(m.followed_part(Some(&b)).as_deref(), Some("bolt"));
     }
 
     #[test]

@@ -2742,8 +2742,14 @@ pub fn repair_with(
         };
         for c in &r.changes {
             if c.path == GIT_INSTALL {
-                crate::drivers::install(root, true)?;
-                changes.push(json!({"change": "git_install"}));
+                let g = crate::drivers::install(root, true)?;
+                let mut change = json!({"change": "git_install"});
+                // #920: a binary inside a checkout of the clone installs nothing.
+                if let Some(why) = g.get("skipped") {
+                    change["skipped"] = why.clone();
+                    change["warning"] = g["warning"].clone();
+                }
+                changes.push(change);
                 continue;
             }
             let path = root.join(&c.path);

@@ -106,6 +106,25 @@ fn exit_called_elsewhere() {
     check("exit", &[&["exited: exit() called, not by main"]], 0);
 }
 
+/// #871: macOS's Cmd+Q calls exit() from inside the event loop after the
+/// window's on_exit; the trace says the window closed, not "exit()
+/// called, not by main", and with no backtrace.
+#[test]
+fn the_system_quitting_after_the_window_closed() {
+    let run = tempfile::tempdir().unwrap();
+    let (out, trace) = fail("quit", run.path());
+    assert!(out.status.success(), "{:?}", out.status);
+    assert!(
+        trace.contains("exited: the window closed (the system quit the app)"),
+        "{trace}"
+    );
+    assert!(!trace.contains("exit() called"), "{trace}");
+    assert!(!trace.contains("backtrace"), "{trace}");
+    if cfg!(windows) {
+        assert_eq!(dumps(run.path()), 0, "{trace}");
+    }
+}
+
 #[test]
 fn a_fault() {
     let want: &[&[&str]] = if cfg!(windows) {
