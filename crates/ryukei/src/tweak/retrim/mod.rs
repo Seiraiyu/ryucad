@@ -147,11 +147,12 @@ pub(crate) const ADJUSTS: usize = 3;
 
 /// A narrowed rung's answer (design 724, plan 22.A). `first` is its first
 /// narrowed build and what that build asks: `Some` adjustments where its
-/// walk failed `Clipped` at a working face with room to give. The rung is
-/// built again by `again` with what each build asks, at most [`ADJUSTS`]
-/// times. The first adjusted build that builds (closes and checks clean)
-/// answers, and so does one after which the meter is stopped (a cancel
-/// or a halt answers at once). Otherwise the first answer stands, so
+/// walk failed `Clipped` at a working face with room to give, or it
+/// refused `Uncertain` at a working face and a pin it shares nothing with
+/// (plan 22.B). The rung is built again by `again` with what each build
+/// asks, at most [`ADJUSTS`] times. The first adjusted build that builds
+/// (closes and checks clean) answers, and so does one after which the
+/// meter is stopped (a cancel or a halt answers at once). Otherwise the first answer stands, so
 /// refusals keep their names and a failed walk climbs as before.
 pub(crate) fn adjusting(
     first: (Rung, Option<near::Adjusts>),
@@ -198,8 +199,11 @@ pub(crate) fn retrim(
 /// `Scope::Rung` cap; once one is, every later rung is built narrowed
 /// only (design 669). A narrowed build whose walk fails `Clipped` at a
 /// working face is built again with room for that face, the faces whose
-/// clipped sides it reached, and their working neighbours, at most
-/// `ADJUSTS` times ([`adjusting`], design 724).
+/// clipped sides it reached, and their working neighbours; one that
+/// refuses `Uncertain` at a working face and a pin it shares no edge or
+/// vertex with is built again with that face's near box cut back short
+/// of the pin; at most `ADJUSTS` times in all, a face adjusted one way
+/// only ([`adjusting`], design 724).
 pub(crate) fn retrim_with(
     key: OpKey,
     body: &Body,
@@ -678,7 +682,7 @@ fn attempt_adjusted(
         (Err(Fail::Inconsistent), None) => {
             return done(Err(Error::Topology(TopologyError::Inconsistent)));
         }
-        (Err(Fail::Uncertain(a, _)), None) => {
+        (Err(Fail::Uncertain(a, b)), None) => {
             let e: Error = TweakError::Uncertain {
                 at: name_of(a.face),
             }
@@ -688,6 +692,12 @@ fn attempt_adjusted(
             if which == Build::First {
                 return Rung::Uncertain(e);
             }
+            // One at a working face and a pin it shares nothing with asks
+            // that face kept off the pin, its near box cut back by the
+            // sheet's overshoot too (design 724, plan 22.B).
+            *ask = ask_off_pin(body, &w, a.face, b.face, which, |wf, pf| {
+                off_pin(body, changes, region, bx, rung, &w, adjusts, wf, pf)
+            });
             return done(Err(e));
         }
         (Err(Fail::Unsupported(a, _)), None) => {
@@ -707,7 +717,10 @@ fn attempt_adjusted(
     // cut it: its piece holding its old interior reached its own clipped
     // side, and the walk closed round it (design 724, plan 22.A: a slot's
     // floor dropped while its walls, given room, ran down to the bottom).
-    // It doesn't answer; it asks room for those faces too.
+    // It doesn't answer; it asks room for those faces too. A dropped face
+    // kept off a pin asks room, which ends the adjustments (one way only,
+    // plan 22.B). The guard may hide wins, where a right answer drops a
+    // face left as it is (22.A's review): kept, and counted by census VII.
     if !adjusts.is_empty() {
         let gone: std::collections::BTreeSet<Name> = journal
             .events()
@@ -911,6 +924,86 @@ fn ask_room(
         return None;
     }
     room(&clipped)
+}
+
+/// What a narrowed build that refused `Uncertain` at table pair `a`, `b`
+/// (working-body faces) asks (design 724, plan 22.B): `off(working,
+/// pinned)` where one is a working face and the other is pinned, and
+/// their input faces share no vertex and no edge (in the input they don't
+/// meet, so the working face needn't be carried that far). A first build,
+/// a pair of two working faces, or a pair sharing anything asks nothing.
+fn ask_off_pin(
+    input: &Body,
+    w: &WorkBody,
+    a: FaceId,
+    b: FaceId,
+    which: Build,
+    off: impl FnOnce(FaceId, FaceId) -> Option<near::Adjusts>,
+) -> Option<near::Adjusts> {
+    if !which.narrowed() {
+        return None;
+    }
+    let (wf, pf) = if w.working.contains(&a) && w.pinned.contains(&b) {
+        (a, b)
+    } else if w.working.contains(&b) && w.pinned.contains(&a) {
+        (b, a)
+    } else {
+        return None;
+    };
+    let (wi, pi) = (w.origin[&wf], w.origin[&pf]);
+    if !region::face_vertices(input, wi).is_disjoint(&region::face_vertices(input, pi))
+        || shares_edge(input, wi, pi)
+    {
+        return None;
+    }
+    off(wf, pf)
+}
+
+/// Working face `wf` of `w` kept off pin `pf` (design 724, plan 22.B):
+/// [`near::kept_off`] for its input face, from its near box at `rung` as
+/// `adjusts` already leave it, with the sheet the build that failed
+/// carried (its box in `w`), its [`near::own_box`] to keep, the pin's box
+/// in `w`, and the gap `WorkBody::pairs` grows the pair by (each face's
+/// `max_tolerance`, summed).
+#[allow(clippy::too_many_arguments)]
+fn off_pin(
+    body: &Body,
+    changes: &Changes,
+    region: &Region,
+    bx: &crate::geom::Box3,
+    rung: usize,
+    w: &WorkBody,
+    adjusts: &near::Adjusts,
+    wf: FaceId,
+    pf: FaceId,
+) -> Option<near::Adjusts> {
+    let i = w.origin[&wf];
+    let now = near::adjusted(
+        &near::near_box(body, changes, region, i, bx, rung),
+        bx,
+        adjusts.get(&i).copied(),
+    );
+    let gap = crate::intersect::max_tolerance((&w.body, wf))
+        + crate::intersect::max_tolerance((&w.body, pf));
+    near::kept_off(
+        i,
+        &now,
+        &crate::intersect::face_box(&w.body, wf),
+        &near::own_box(body, region, i),
+        &crate::intersect::face_box(&w.body, pf),
+        gap,
+        adjusts,
+    )
+}
+
+/// Whether faces `a` and `b` of `body` share an edge.
+fn shares_edge(body: &Body, a: FaceId, b: FaceId) -> bool {
+    body.face_loops(a).any(|l| {
+        body.loop_fins(l).any(|fin| {
+            body.edge_fins(body.fins[fin].edge)
+                .any(|g| body.loops[body.fins[g].loop_].face == b)
+        })
+    })
 }
 
 /// Whether the fixed engine's refusal `e` means the topology must change

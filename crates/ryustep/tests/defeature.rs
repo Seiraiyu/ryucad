@@ -88,7 +88,14 @@ const MAX_SIZE: f64 = 2e-3;
 /// "a kept ball bounded only by a held seam"). Plan 21.D changes neither
 /// (FTC 07 and FTC 10 stop where 21.C left them). Plan 22.A leaves FTC
 /// 07 rd (22.B) and FTC 10 rb (22.C) where they were; FTC 07 spends its
-/// adjusted builds first (31 s to 56 s, inside the deadline).
+/// adjusted builds first (31 s to 56 s, inside the deadline). Plan 22.B
+/// keeps a working face off a pin it shares nothing with, but working
+/// NURBS `33b57350` and pin `f19ffa9e` share a vertex (census VII), and
+/// the pin's box meets the NURBS' own box on every axis (they touch at
+/// that vertex), so no one-sided cut keeps the own box and clears the
+/// pin (census VII's INSIDE): FTC 07 rd still stops at that pair in 56 s
+/// (#652; moved to ryukei 23, "a pin touching the working face at a
+/// vertex, its box meeting the face's own box").
 const KNOWN_REFUSED: &[(&str, u32)] = &[("nist_ftc_07", 652), ("nist_ftc_10", 652)];
 
 /// How a body's delete ended, for [`Tally::count`].
@@ -618,7 +625,7 @@ fn ftc_08s_pocket_floor_loses_its_fillets() {
 /// builds) and recorded what stops both next; plan 21.A's pins move FTC
 /// 07 on to its next cause (see [`KNOWN_REFUSED`]).
 #[test]
-#[ignore = "#652: FTC 10's kept ball bounded only by a held seam (ryukei 22); FTC 07's working NURBS 33b57350 grows into pin f19ffa9e (ryukei 22)"]
+#[ignore = "#652: FTC 10's kept ball bounded only by a held seam (ryukei 22.C); FTC 07's working NURBS 33b57350 meets pin f19ffa9e, which touches it at a vertex, its box meeting the NURBS' own box (ryukei 23)"]
 fn ftc_07s_and_ftc_10s_blends_are_deleted() {
     let one = rayon::ThreadPoolBuilder::new()
         .num_threads(1)
@@ -728,6 +735,12 @@ fn ftc_07s_and_ftc_10s_blends_are_deleted() {
 /// (`GapNotHealed` in 28 s). Refusals spend their adjusted builds first:
 /// FTC 07 rd 31 s to 55 s, FTC 09 e1 3 s to 10 s, FTC 10 e2 27 s to 37 s,
 /// all inside the deadline.
+///
+/// Plan 22.B keeps a working face off a pin it shares nothing with (its
+/// near box cut back short of the pin): the same 18 defeature and none
+/// more, every answer and time as on main. No narrowed build in the
+/// corpus refuses at such a pair (census VII); FTC 07 rd's pair shares a
+/// vertex (#652; moved to ryukei 23).
 const PINNED_DEFEATURED: &[(&str, u64)] = &[
     ("nist_ctc_01_asme1_ap203.stp", 148),
     ("nist_ctc_01_asme1_rd.stp", 13),

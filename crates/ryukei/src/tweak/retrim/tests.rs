@@ -778,6 +778,308 @@ fn only_a_narrowed_clip_at_a_carried_face_asks_room() {
     );
 }
 
+/// Design 724, plan 22.B: only a narrowed build's `Uncertain` at a
+/// working face and a pin whose input faces share no vertex and no edge
+/// asks a cut, for the working face's input face, in either order.
+#[test]
+fn only_a_narrowed_uncertain_at_a_pin_it_shares_nothing_with_asks_a_cut() {
+    use super::{Build, ask_off_pin, near};
+    use std::collections::BTreeSet;
+    let b = block();
+    let changes = raised(&b, 0.2);
+    let changed = changes.motion.keys().copied().collect();
+    let whole = super::region::region(&b, &changed).grown(&b);
+    let bx = super::body::region_box(&b, &whole, super::reach(&b, &changes));
+    let (top, bottom, side) = (
+        face_of(&b, FaceRole::PlusZ),
+        face_of(&b, FaceRole::MinusZ),
+        face_of(&b, FaceRole::PlusX),
+    );
+    let pins = BTreeSet::from([bottom]);
+    let rest = whole.without(&b, &pins);
+    let ws: BTreeMap<FaceId, super::working::Working> = rest
+        .faces
+        .iter()
+        .map(|&f| {
+            let w = super::working::working(
+                &b,
+                f,
+                changes.surface.get(&f),
+                b.faces[f].sense,
+                true,
+                &bx,
+            );
+            (f, w.unwrap())
+        })
+        .collect();
+    // unmetered: a unit test.
+    let w = super::body::work_body(K, &b, &rest, &ws, &crate::work::Meter::free())
+        .unwrap()
+        .pinning(&pins);
+    let back: BTreeMap<FaceId, FaceId> = w.origin.iter().map(|(&wf, &i)| (i, wf)).collect();
+    let (wt, wb, wside) = (back[&top], back[&bottom], back[&side]);
+    assert!(w.working.contains(&wt) && w.working.contains(&wside));
+    assert!(w.pinned.contains(&wb));
+    let mark = |wf: FaceId, pf: FaceId| {
+        assert!(w.working.contains(&wf) && w.pinned.contains(&pf));
+        Some(near::Adjusts::from([(
+            w.origin[&wf],
+            near::Adjust::off(&bx),
+        )]))
+    };
+    let want = Some(near::Adjusts::from([(top, near::Adjust::off(&bx))]));
+    // The raised top shares nothing with the bottom.
+    assert_eq!(ask_off_pin(&b, &w, wt, wb, Build::Only, mark), want);
+    assert_eq!(ask_off_pin(&b, &w, wb, wt, Build::Retry, mark), want);
+    assert_eq!(ask_off_pin(&b, &w, wt, wb, Build::First, mark), None);
+    // The side shares an edge with the bottom.
+    assert_eq!(ask_off_pin(&b, &w, wside, wb, Build::Only, mark), None);
+    // Two working faces.
+    assert_eq!(ask_off_pin(&b, &w, wt, wside, Build::Only, mark), None);
+}
+
+/// 22.B's review: the cut a narrowed build's `Uncertain` asks (`off_pin`)
+/// on a real working body. The block's top raised 0.5 over the whole body
+/// (rung 2, the bottom pinned): the top's near box, grown by that reach,
+/// runs below the bottom, which it shares nothing with. The cut is
+/// `cut_short` of the near box as `adjusts` leave it, the top's sheet in
+/// the working body, its own box, the bottom's box and the pair's summed
+/// tolerances; asked again with that cut, nothing is left to cut (the
+/// near box as cut already ends short of the bottom); and the rung built
+/// with it builds the taller box.
+#[test]
+fn a_pins_cut_is_its_near_box_as_adjusted_cut_short_of_it() {
+    use super::near::{self, Adjust, Adjusts};
+    use super::{Build, Rung, attempt_adjusted, off_pin};
+    use std::collections::BTreeSet;
+    let b = block();
+    let changes = raised(&b, 0.5);
+    let changed = changes.motion.keys().copied().collect();
+    let whole = super::region::region(&b, &changed).grown(&b);
+    let bx = super::body::region_box(&b, &whole, super::reach(&b, &changes));
+    let (top, bottom) = (face_of(&b, FaceRole::PlusZ), face_of(&b, FaceRole::MinusZ));
+    let pins = BTreeSet::from([bottom]);
+    let rest = whole.without(&b, &pins);
+    // unmetered: a unit test.
+    let m = crate::work::Meter::free();
+    // The working faces as a narrowed build carries them: over their near
+    // boxes.
+    let ws: BTreeMap<FaceId, super::working::Working> = rest
+        .faces
+        .iter()
+        .map(|&f| {
+            let n = near::near_box(&b, &changes, &whole, f, &bx, 2);
+            let w =
+                super::working::working(&b, f, changes.surface.get(&f), b.faces[f].sense, true, &n);
+            (f, w.unwrap())
+        })
+        .collect();
+    let w = super::body::work_body(K, &b, &rest, &ws, &m)
+        .unwrap()
+        .pinning(&pins);
+    let back: BTreeMap<FaceId, FaceId> = w.origin.iter().map(|(&wf, &i)| (i, wf)).collect();
+    let (wt, wb) = (back[&top], back[&bottom]);
+    let now = near::near_box(&b, &changes, &whole, top, &bx, 2);
+    let sheet = crate::intersect::face_box(&w.body, wt);
+    let own = near::own_box(&b, &whole, top);
+    let pin = crate::intersect::face_box(&w.body, wb);
+    assert!(now.intersects(&pin), "{now:?} apart from {pin:?}");
+    let gap = crate::intersect::max_tolerance((&w.body, wt))
+        + crate::intersect::max_tolerance((&w.body, wb));
+    let cut = near::cut_short(&now, &sheet, &own, &pin, gap).expect("a side to cut");
+    let once = off_pin(&b, &changes, &whole, &bx, 2, &w, &Adjusts::new(), wt, wb);
+    assert_eq!(once, Some(Adjusts::from([(top, Adjust::off(&cut))])));
+    let once = once.unwrap();
+    // The cut ends above the bottom by the gap; the top's own box stays.
+    assert_eq!(cut.min().z, pin.max().z + gap);
+    assert!(cut.max().z >= own.max().z && cut.min().z <= own.min().z);
+    // Asked again from the cut, nothing is left to cut; from the uncut
+    // near box (`adjusts` ignored) the same cut would be asked again.
+    assert_eq!(
+        off_pin(&b, &changes, &whole, &bx, 2, &w, &once, wt, wb),
+        None
+    );
+    // A face given room is never kept off (one way only).
+    let roomy = Adjusts::from([(top, Adjust::Room(1))]);
+    assert_eq!(
+        off_pin(&b, &changes, &whole, &bx, 2, &w, &roomy, wt, wb),
+        None
+    );
+    let mut ask = None;
+    let r = attempt_adjusted(
+        K,
+        &b,
+        &changes,
+        &whole,
+        &bx,
+        2,
+        Build::Only,
+        None,
+        &once,
+        &mut ask,
+        &m,
+    );
+    assert!(matches!(&r, Rung::Done(d) if d.is_ok()), "{}", what(&r));
+}
+
+/// A rung's outcome, for messages.
+fn what(r: &super::Rung) -> String {
+    match r {
+        super::Rung::Done(d) => format!("done: {:?}", d.as_ref().as_ref().map(|_| ())),
+        super::Rung::Next(e) => format!("next: {e:?}"),
+        super::Rung::Walked(e) => format!("walked: {e:?}"),
+        super::Rung::Uncertain(e) => format!("uncertain: {e:?}"),
+        super::Rung::Unchanged => "unchanged".into(),
+    }
+}
+
+/// Design 724: a face kept off a pin has less sheet, and where the
+/// result needs the part cut away, the walk fails: a wrong cut gives a
+/// refusal, never a wrong body. The block's top raised 0.2 over the whole
+/// body (rung 2, the bottom pinned): its +x side, cut off at z = 0.3,
+/// can't reach the new top. Uncut, the same build builds the taller box.
+/// No adjusted build would give that side room: it is kept off.
+#[test]
+fn a_cut_that_takes_what_the_result_needs_fails_its_walk() {
+    use super::near::{Adjust, Adjusts};
+    use super::{Build, Rung, attempt_adjusted};
+    let b = block();
+    let changes = raised(&b, 0.2);
+    let changed = changes.motion.keys().copied().collect();
+    let whole = super::region::region(&b, &changed).grown(&b);
+    let bx = super::body::region_box(&b, &whole, super::reach(&b, &changes));
+    let side = face_of(&b, FaceRole::PlusX);
+    let n = super::near::near_box(&b, &changes, &whole, side, &bx, 2);
+    let (l, h) = (n.min(), n.max());
+    let cut = crate::geom::Box3::new(l, crate::geom::Point3::new(h.x, h.y, 0.3));
+    // unmetered: a unit test.
+    let m = crate::work::Meter::free();
+    let build = |adjusts: &Adjusts| {
+        let mut ask = None;
+        let r = attempt_adjusted(
+            K,
+            &b,
+            &changes,
+            &whole,
+            &bx,
+            2,
+            Build::Only,
+            None,
+            adjusts,
+            &mut ask,
+            &m,
+        );
+        (r, ask)
+    };
+    let (r, ask) = build(&Adjusts::from([(side, Adjust::off(&cut))]));
+    assert!(matches!(r, Rung::Walked(_) | Rung::Next(_)), "{}", what(&r));
+    assert!(
+        ask.as_ref()
+            .is_none_or(|a| !matches!(a.get(&side), Some(Adjust::Room(_)))),
+        "room for a face kept off: {ask:?}"
+    );
+    let (r, _) = build(&Adjusts::new());
+    assert!(matches!(&r, Rung::Done(d) if d.is_ok()), "{}", what(&r));
+}
+
+/// Plan 22.B: a block 1 × 0.1 × 0.4 with a slot 0.2 wide and 0.01 deep
+/// across its top (x from 0.4 to 0.6, through both y sides), so its top
+/// is two coplanar strips sharing no vertex, as NIST STC 10's planes
+/// `a7b86e65` and `ccab7076` are. Returns the body, the strips (x < 0.4,
+/// then x > 0.6) and the slot's two walls and floor.
+fn two_strips() -> (Body, [FaceId; 2], std::collections::BTreeSet<FaceId>) {
+    let (b, _) = primitive::block(OpKey(0x22b0), 1.0, 0.1, 0.4, &Rigid::IDENTITY).unwrap();
+    let (slot, _) = primitive::block(OpKey(0x22b1), 0.2, 0.12, 0.02, &Rigid::IDENTITY).unwrap();
+    let (s, _) = boolean(
+        OpKey(0x22b2),
+        BooleanOp::Subtract,
+        &b,
+        &[Tool {
+            key: ToolKey(1),
+            body: &slot,
+            place: Rigid::translation(Vector3::new(0.4, -0.01, 0.39)),
+        }],
+    )
+    .unwrap();
+    let fb = |f: FaceId| crate::intersect::face_box(&s, f);
+    let flat = |f: FaceId, z: f64| {
+        let x = fb(f);
+        (x.min().z - z).abs() < 1e-9 && (x.max().z - z).abs() < 1e-9
+    };
+    let left = s
+        .faces()
+        .find(|&f| flat(f, 0.4) && fb(f).max().x < 0.41)
+        .expect("the left strip");
+    let right = s
+        .faces()
+        .find(|&f| flat(f, 0.4) && fb(f).min().x > 0.59)
+        .expect("the right strip");
+    let slot = s
+        .faces()
+        .filter(|&f| {
+            let x = fb(f);
+            x.min().x > 0.399 && x.max().x < 0.601 && x.min().z > 0.389
+        })
+        .collect();
+    (s, [left, right], slot)
+}
+
+/// 22.A's review: the clip owners, on a real walk. The two strips with
+/// their slot deleted, built narrowed: one strip's piece reaches the
+/// other's clipped side (coplanar sheets, as in NIST STC 10). The strips
+/// share no vertex, so only the owners could name the other strip in the
+/// ask, and the ask names it. Rung 0 (the region and its box), where
+/// census VII (plan 22.B, Task 1) found the first such clip; every rung
+/// clips the same way.
+#[test]
+fn a_clips_owners_name_the_face_whose_side_was_reached() {
+    use super::near::Adjusts;
+    use super::{Build, Rung, attempt_adjusted};
+    let (b, strips, slot) = two_strips();
+    assert_eq!(slot.len(), 3, "two walls and a floor");
+    let changes = Changes {
+        deleted: slot.clone(),
+        ..Changes::default()
+    };
+    let region = super::region::region(&b, &slot);
+    assert!(strips.iter().all(|f| region.faces.contains(f)));
+    let bx = super::body::region_box(&b, &region, super::reach(&b, &changes));
+    // unmetered: a unit test.
+    let m = crate::work::Meter::free();
+    let mut ask = None;
+    let r = attempt_adjusted(
+        K,
+        &b,
+        &changes,
+        &region,
+        &bx,
+        0,
+        Build::Only,
+        None,
+        &Adjusts::new(),
+        &mut ask,
+        &m,
+    );
+    let Rung::Walked(crate::Error::InvalidTweak(crate::TweakError::RegionTooSmall { face })) = r
+    else {
+        panic!("not clipped: {}", what(&r));
+    };
+    let f = strips
+        .into_iter()
+        .find(|&s| b.faces[s].name == face)
+        .expect("clipped at a strip");
+    let other = strips.into_iter().find(|&s| s != f).unwrap();
+    assert!(
+        super::region::face_vertices(&b, f).is_disjoint(&super::region::face_vertices(&b, other)),
+        "the strips share a vertex"
+    );
+    let ask = ask.expect("room asked");
+    assert!(
+        ask.contains_key(&other),
+        "the owners missed the other strip: {ask:?}"
+    );
+}
+
 /// FNV-1a of `b`'s `dump_unnamed` (as `ryukei-testkit`'s `fnv`, which the
 /// crate can't depend on).
 fn free_hash(b: &Body) -> u64 {
@@ -1566,5 +1868,156 @@ fn stc_10s_coplanar_plane_is_given_room() {
     given_room_holds_its_clip(
         include_bytes!("../../../tests/data/nist_stc_10_room.body"),
         include_str!("../../../tests/data/nist_stc_10_room.txt"),
+    );
+}
+
+/// A census VII cut (plan 22.B): a working face, the pin a narrowed build
+/// met it at `Uncertain`, and the faces round them (`body`); and the
+/// census's reading (`text`): `rung`, `box` (the rung's), `working`,
+/// `pin`, `changed` (the changed faces the working face touches) and
+/// `near` (its near box before any adjustment), floats as bits.
+struct PinCut {
+    body: Body,
+    rung: usize,
+    x: crate::geom::Box3,
+    working: FaceId,
+    pin: FaceId,
+    changed: std::collections::BTreeSet<FaceId>,
+    near: crate::geom::Box3,
+}
+
+fn pin_cut(bytes: &[u8], text: &str) -> PinCut {
+    use crate::geom::{Box3, Point3};
+    use std::collections::BTreeSet;
+    let body = crate::codec::decode_body(bytes).unwrap();
+    let face =
+        |hex: &str| match body.by_name(Name::from_u128(u128::from_str_radix(hex, 16).unwrap())) {
+            Some(EntityId::Face(f)) => f,
+            _ => panic!("no face {hex}"),
+        };
+    let float = |hex: &str| f64::from_bits(u64::from_str_radix(hex, 16).unwrap());
+    let boxed =
+        |v: Vec<f64>| Box3::new(Point3::new(v[0], v[1], v[2]), Point3::new(v[3], v[4], v[5]));
+    let (mut rung, mut x, mut working, mut pin, mut near) = (None, None, None, None, None);
+    let mut changed = BTreeSet::new();
+    for line in text.lines() {
+        let mut w = line.split_whitespace();
+        match w.next() {
+            Some("rung") => rung = Some(w.next().unwrap().parse().unwrap()),
+            Some("box") => x = Some(boxed(w.map(float).collect())),
+            Some("working") => working = Some(face(w.next().unwrap())),
+            Some("pin") => pin = Some(face(w.next().unwrap())),
+            Some("changed") => changed.extend(w.map(face)),
+            Some("near") => near = Some(boxed(w.map(float).collect())),
+            _ => {}
+        }
+    }
+    PinCut {
+        body,
+        rung: rung.expect("a rung"),
+        x: x.expect("the rung's box"),
+        working: working.expect("a working face"),
+        pin: pin.expect("a pin"),
+        changed,
+        near: near.expect("its near box"),
+    }
+}
+
+/// The box of face `f`'s sheet carried over near box `n`, as
+/// `attempt_adjusted` carries a face left as it is, and the tolerance
+/// `WorkBody::pairs` grows it by.
+fn sheet_over(body: &Body, f: FaceId, n: &crate::geom::Box3) -> (crate::geom::Box3, f64) {
+    let w = super::working::working(body, f, None, body.faces[f].sense, true, n).unwrap();
+    let (sheet, _) = crate::sheet::from_surface(K, &w.surface, w.rect).unwrap();
+    let sf = sheet.faces().next().unwrap();
+    (
+        crate::intersect::face_box(&sheet, sf),
+        crate::intersect::max_tolerance((&sheet, sf)),
+    )
+}
+
+/// A pin cut under main's rule: the cut gives the near box the census
+/// read, the pair shares a vertex but no edge (FTC 07 rd's, census VII),
+/// and the working face carried over
+/// its near box reaches the pin's box, so the table meets them. Returns
+/// the cut, its region and changes, for Task 8's cut.
+fn reaches_its_pin(bytes: &[u8], text: &str) -> (PinCut, super::region::Region, Changes) {
+    let c = pin_cut(bytes, text);
+    let region = super::region::Region {
+        changed: c.changed.clone(),
+        faces: c.body.faces().collect(),
+        frontier: Default::default(),
+    };
+    let changes = Changes {
+        deleted: c.changed.clone(),
+        ..Changes::default()
+    };
+    let n = super::near::near_box(&c.body, &changes, &region, c.working, &c.x, c.rung);
+    assert_eq!(n, c.near, "the cut misses a face the near box needs");
+    // Census VII's reading: the pair shares a vertex, never an edge, so
+    // no narrowed build asks it kept off (plan 22.B's Decision 5).
+    assert!(
+        !super::region::face_vertices(&c.body, c.working)
+            .is_disjoint(&super::region::face_vertices(&c.body, c.pin)),
+        "the pair shares no vertex"
+    );
+    assert!(
+        !super::shares_edge(&c.body, c.working, c.pin),
+        "the pair shares an edge"
+    );
+    let pin = crate::intersect::face_box(&c.body, c.pin);
+    let tp = crate::intersect::max_tolerance((&c.body, c.pin));
+    let (sheet, tw) = sheet_over(&c.body, c.working, &n);
+    assert!(
+        sheet.grow(tw).intersects(&pin.grow(tp)),
+        "{sheet:?} apart from {pin:?}"
+    );
+    (c, region, changes)
+}
+
+/// FTC 07 rd (#652, census VII): working NURBS `33b57350`, touching
+/// change `374dbdc2`, carried over its near box into pin `f19ffa9e`
+/// (0.15 mm tall), which it shares a vertex with and no edge.
+#[test]
+fn ftc_07s_nurbs_reaches_its_pin() {
+    reaches_its_pin(
+        include_bytes!("../../../tests/data/nist_ftc_07_pin.body"),
+        include_str!("../../../tests/data/nist_ftc_07_pin.txt"),
+    );
+}
+
+/// FTC 07 rd (#652, census VII): working NURBS `33b57350` can't be kept
+/// off pin `f19ffa9e` (plan 22.B): they share a vertex, so the pin's box
+/// touches the NURBS' own box on every axis, and no side of its near box
+/// can be cut short of the pin and still hold its own box and its
+/// changes' (`cut_short`: no side valid, census VII's INSIDE). The cause
+/// is recorded on #652 and moves to ryukei 23.
+#[test]
+fn ftc_07s_nurbs_cannot_be_kept_off_its_pin() {
+    use super::near::{Adjusts, cut_short, kept_off, own_box};
+    let (c, region, _) = reaches_its_pin(
+        include_bytes!("../../../tests/data/nist_ftc_07_pin.body"),
+        include_str!("../../../tests/data/nist_ftc_07_pin.txt"),
+    );
+    let pin = crate::intersect::face_box(&c.body, c.pin);
+    let tp = crate::intersect::max_tolerance((&c.body, c.pin));
+    let (sheet, tw) = sheet_over(&c.body, c.working, &c.near);
+    let must = own_box(&c.body, &region, c.working);
+    assert!(must.intersects(&pin), "{must:?} apart from {pin:?}");
+    // Neither the sheet's overshoot nor the gap matters: with neither, no
+    // side is valid either.
+    assert_eq!(cut_short(&c.near, &sheet, &must, &pin, tw + tp), None);
+    assert_eq!(cut_short(&c.near, &c.near, &must, &pin, 0.0), None);
+    assert_eq!(
+        kept_off(
+            c.working,
+            &c.near,
+            &sheet,
+            &must,
+            &pin,
+            tw + tp,
+            &Adjusts::new()
+        ),
+        None
     );
 }
