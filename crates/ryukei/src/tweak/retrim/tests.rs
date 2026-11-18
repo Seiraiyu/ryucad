@@ -660,6 +660,151 @@ fn asks() -> Option<super::near::Adjusts> {
     )]))
 }
 
+/// Design 919, plan 23.B: a ladder within a gap. While the gap lasts it
+/// climbs as `climb` does. Once it is spent no build starts, the build
+/// that spent it is discarded unless it built, and the ladder answers
+/// the last rung that finished, or `fallback` if none did.
+#[test]
+fn a_ladder_stops_at_its_gap_with_its_last_finished_rungs_cause() {
+    use super::{Build, Narrow, Rung, climb, climb_within};
+    use std::cell::Cell;
+    let walked = |n: u128| {
+        Rung::Walked(
+            crate::TweakError::RegionTooSmall {
+                face: Name::from_u128(n),
+            }
+            .into(),
+        )
+    };
+    let capped = || {
+        super::done(Err(crate::TweakError::Uncertain {
+            at: Name::from_u128(7),
+        }
+        .into()))
+    };
+    let fallback = || -> crate::Error {
+        crate::TweakError::Uncertain {
+            at: Name::from_u128(99),
+        }
+        .into()
+    };
+    let at = |r: &Result<(Body, crate::name::Journal), crate::Error>| match r {
+        Err(crate::Error::InvalidTweak(
+            crate::TweakError::RegionTooSmall { face } | crate::TweakError::Uncertain { at: face },
+        )) => face.to_u128(),
+        other => panic!("{:?}", other.as_ref().map(|_| ())),
+    };
+    // Spent during rung 2's build: rung 2's answer (a capped Uncertain)
+    // is discarded, rung 3 never starts, rung 1's cause answers.
+    let spent = Cell::new(false);
+    let mut calls = Vec::new();
+    let r = climb_within(
+        Narrow::AfterUncertain,
+        &|| spent.get(),
+        fallback,
+        |rung, b| {
+            calls.push((rung, b));
+            if rung == 2 {
+                spent.set(true);
+                return Some(capped());
+            }
+            Some(walked(10 + rung as u128))
+        },
+    );
+    assert_eq!(
+        calls,
+        [(0, Build::First), (1, Build::First), (2, Build::First)]
+    );
+    assert_eq!(at(&r), 11);
+    // Spent in rung 0's first build: nothing finished, `fallback`.
+    let spent = Cell::new(false);
+    let r = climb_within(Narrow::AfterUncertain, &|| spent.get(), fallback, |_, _| {
+        spent.set(true);
+        Some(capped())
+    });
+    assert_eq!(at(&r), 99);
+    // A build that builds as it spends the gap answers.
+    let spent = Cell::new(false);
+    let r = climb_within(
+        Narrow::AfterUncertain,
+        &|| spent.get(),
+        fallback,
+        |rung, _| {
+            if rung == 1 {
+                spent.set(true);
+                return Some(built_rung());
+            }
+            Some(walked(10))
+        },
+    );
+    assert!(r.is_ok());
+    // A narrowed retry after a first build that spent the gap never runs.
+    let spent = Cell::new(false);
+    let mut calls = Vec::new();
+    let r = climb_within(
+        Narrow::AfterUncertain,
+        &|| spent.get(),
+        fallback,
+        |rung, b| {
+            calls.push((rung, b));
+            if rung == 1 {
+                spent.set(true);
+                return Some(uncertain_rung());
+            }
+            Some(walked(10))
+        },
+    );
+    assert_eq!(calls, [(0, Build::First), (1, Build::First)]);
+    assert_eq!(at(&r), 10);
+    // Never spent: as `climb`, call for call and answer for answer.
+    let script = |rung: usize, b: Build| {
+        Some(match (rung, b) {
+            (0, Build::First) => uncertain_rung(),
+            _ => walked(20 + rung as u128),
+        })
+    };
+    let (mut a, mut b) = (Vec::new(), Vec::new());
+    let x = climb(Narrow::AfterUncertain, |r, w| {
+        a.push((r, w));
+        script(r, w)
+    });
+    let y = climb_within(Narrow::AfterUncertain, &|| false, fallback, |r, w| {
+        b.push((r, w));
+        script(r, w)
+    });
+    assert_eq!(a, b);
+    assert_eq!(at(&x), at(&y));
+}
+
+/// Plan 23.B: a re-trim within a small gap. The block raised 0.2 over
+/// the whole body: within a gap of every unit it spends it builds, as
+/// outside one, bit for bit; within one unit it refuses `Uncertain` at
+/// the face given, having finished no rung.
+#[test]
+fn a_retrim_within_its_gap_builds_and_past_it_refuses_at_the_least_face() {
+    use super::{Narrow, retrim_gap, retrim_with};
+    let b = block();
+    let changes = raised(&b, 0.2);
+    let w = crate::work::Work::unlimited();
+    let m = crate::work::Meter::new(&w);
+    let (o, j) = retrim_with(K, &b, &changes, Narrow::AfterUncertain, &m).unwrap();
+    let all = m.spent();
+    let least = Name::from_u128(5);
+    let w = crate::work::Work::unlimited();
+    let m = crate::work::Meter::new(&w);
+    let (o2, j2) = retrim_gap(K, &b, &changes, least, all, &m).unwrap();
+    assert_eq!(o.dump(), o2.dump());
+    assert_eq!(j.events(), j2.events());
+    assert_eq!(m.spent(), all);
+    let w = crate::work::Work::unlimited();
+    let m = crate::work::Meter::new(&w);
+    let r = retrim_gap(K, &b, &changes, least, 1, &m);
+    assert_eq!(
+        r.map(|_| ()).unwrap_err(),
+        crate::TweakError::Uncertain { at: least }.into()
+    );
+}
+
 /// Design 724's adjusted builds: a narrowed build that asks nothing
 /// answers alone; one that asks is built again with what it asks; the
 /// first adjusted build that builds answers; at most `ADJUSTS` are made;
@@ -1780,6 +1925,7 @@ fn a_wrong_pin_released_builds_the_taller_box() {
         2,
         Build::Only,
         Some(&forced),
+        &|| false,
         &m,
     );
     assert!(matches!(r, Rung::Walked(_)), "{}", what(&r));

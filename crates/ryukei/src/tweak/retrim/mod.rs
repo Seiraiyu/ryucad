@@ -107,14 +107,35 @@ pub(crate) fn settle(first: Rung, narrow: Narrow, again: impl FnOnce() -> Rung) 
 /// ([`settle`]); once a rung was built narrowed, every later rung is built
 /// narrowed only: its first build would carry the same faces farther over
 /// a bigger region. `Next` and failed walks climb, and the last answers
-/// when the ladder ends.
+/// when the ladder ends. [`climb_within`] never spent; the builds use
+/// that.
+#[cfg(test)]
 pub(crate) fn climb(
     narrow: Narrow,
+    build: impl FnMut(usize, Build) -> Option<Rung>,
+) -> Result<(Body, Journal), Error> {
+    climb_within(narrow, &|| false, || panic!("one rung ran"), build)
+}
+
+/// [`climb`] within a gap (design 919, plan 23.B): `spent` says whether
+/// the gap's units are spent. Once they are, no build starts, and a build
+/// that spent them is discarded unless it built (a capped build's
+/// `Uncertain` names whatever pair it stopped at). The ladder then
+/// answers the last rung that finished, or `fallback` if none did.
+/// Never spent, it is `climb`, call for call.
+pub(crate) fn climb_within(
+    narrow: Narrow,
+    spent: &dyn Fn() -> bool,
+    fallback: impl FnOnce() -> Error,
     mut build: impl FnMut(usize, Build) -> Option<Rung>,
 ) -> Result<(Body, Journal), Error> {
+    let built = |r: &Rung| matches!(r, Rung::Done(d) if d.is_ok());
     let mut last = None;
     let mut narrowed = false;
     for rung in 0..4 {
+        if spent() {
+            break;
+        }
         let r = if narrowed {
             let Some(r) = build(rung, Build::Only) else {
                 break;
@@ -124,12 +145,18 @@ pub(crate) fn climb(
             let Some(first) = build(rung, Build::First) else {
                 break;
             };
+            if spent() && !built(&first) {
+                break;
+            }
             let (r, now) = settle(first, narrow, || {
                 build(rung, Build::Retry).expect("a rung built once builds again")
             });
             narrowed = now;
             r
         };
+        if spent() && !built(&r) {
+            break;
+        }
         match r {
             Rung::Done(r) => return *r,
             Rung::Next(e) | Rung::Walked(e) => last = Some(e),
@@ -138,7 +165,7 @@ pub(crate) fn climb(
             Rung::Unchanged => {}
         }
     }
-    Err(last.expect("one rung ran"))
+    Err(last.unwrap_or_else(fallback))
 }
 
 /// How many adjusted builds a narrowed rung may make (design 724): a
@@ -211,6 +238,34 @@ pub(crate) fn retrim(
     retrim_with(key, body, changes, Narrow::AfterUncertain, m)
 }
 
+/// [`retrim_within`] outside any gap: every re-trim but a delete's.
+pub(crate) fn retrim_with(
+    key: OpKey,
+    body: &Body,
+    changes: &Changes,
+    narrow: Narrow,
+    m: &Meter,
+) -> Result<(Body, Journal), Error> {
+    retrim_within(key, body, changes, narrow, None, m)
+}
+
+/// A deleted set's re-trim within its gap of `units` (design 919, plan
+/// 23.B, `Scope::Gap`): every rung and build shares the gap, and past it
+/// the ladder answers its last finished rung's cause, or `Uncertain` at
+/// `least`, the set's least face, if none finished ([`climb_within`]).
+pub(crate) fn retrim_gap(
+    key: OpKey,
+    body: &Body,
+    changes: &Changes,
+    least: Name,
+    units: u64,
+    m: &Meter,
+) -> Result<(Body, Journal), Error> {
+    m.capped_with(crate::work::Scope::Gap, units, || {
+        retrim_within(key, body, changes, Narrow::AfterUncertain, Some(least), m)
+    })
+}
+
 /// `body` tweaked by `changes` with its topology free to change, named
 /// from `key`. Refusals: `NotASolid` for a sheet, `LaminarFace` for a
 /// region face with a laminar edge, `GapNotHealed`, `HealAmbiguous`,
@@ -231,11 +286,14 @@ pub(crate) fn retrim(
 /// nothing, is built again with that pin released, a working face carried
 /// over its own and its working neighbours' near boxes, at most
 /// `RELEASES` times apart from `ADJUSTS` (design 919, plan 23.A).
-pub(crate) fn retrim_with(
+/// Within a gap (`gap` names the set's least face; plan 23.B) the ladder
+/// stops once the gap's units are spent ([`climb_within`]).
+pub(crate) fn retrim_within(
     key: OpKey,
     body: &Body,
     changes: &Changes,
     narrow: Narrow,
+    gap: Option<Name>,
     m: &Meter,
 ) -> Result<(Body, Journal), Error> {
     body.require_solid("re-trim")?;
@@ -251,7 +309,19 @@ pub(crate) fn retrim_with(
     // grown by a ring, twice. It stops once the region is every face.
     // `at` is the rung the region and box were made for.
     let mut at: Option<(usize, crate::geom::Box3)> = None;
-    climb(narrow, |rung, which| {
+    let spent = || gap.is_some() && m.exhausted();
+    let fallback = || -> Error {
+        TweakError::Uncertain {
+            at: gap.unwrap_or(Name::from_u128(0)),
+        }
+        .into()
+    };
+    climb_within(narrow, &spent, fallback, |rung, which| {
+        // Past the gap no build starts (plan 23.B): a rung's working faces
+        // are unmetered, so a build past its cap could still take seconds.
+        if spent() {
+            return Some(Rung::Unchanged);
+        }
         if at.map(|a| a.0) != Some(rung) {
             // Polled, never charged: a rung's working faces and their
             // sheets are unmetered (13.D: NIST FTC 10's blends ran 17
@@ -285,7 +355,7 @@ pub(crate) fn retrim_with(
         // A narrowed build, then its adjusted and released builds while
         // each asks (designs 724 and 919).
         Some(narrowed_rung(
-            key, body, changes, &region, &bx, rung, which, None, m,
+            key, body, changes, &region, &bx, rung, which, None, &spent, m,
         ))
     })
 }
@@ -294,7 +364,8 @@ pub(crate) fn retrim_with(
 /// each asks ([`adjusting`]; design 724, plans 22.A and 22.B; design 919,
 /// plan 23.A), each under its own `Scope::Rung` cap: a cap taken inside
 /// another shares it. `forced` pins as [`attempt_with`]'s do (the tests
-/// only); `retrim_with` passes `None`.
+/// only); `retrim_with` passes `None`. `spent` stops the adjusted and
+/// released builds once a gap is spent (plan 23.B).
 #[allow(clippy::too_many_arguments)]
 fn narrowed_rung(
     key: OpKey,
@@ -305,6 +376,7 @@ fn narrowed_rung(
     rung: usize,
     which: Build,
     forced: Option<&std::collections::BTreeSet<FaceId>>,
+    spent: &dyn Fn() -> bool,
     m: &Meter,
 ) -> Rung {
     let once = |adjusts: &near::Adjusts| {
@@ -317,7 +389,7 @@ fn narrowed_rung(
         })
     };
     let first = once(&near::Adjusts::new());
-    adjusting(first, &|| m.poll().is_err(), once)
+    adjusting(first, &|| m.poll().is_err() || spent(), once)
 }
 
 /// How far a changed face's vertex moves, at most, and at least ten
