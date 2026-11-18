@@ -992,4 +992,149 @@ mod tests {
         assert_eq!(ruled(&plane, &bore, &region(), &m), Ok(None));
         assert_eq!(ruled(&bore, &bore, &region(), &m), Ok(None));
     }
+
+    /// Inside `region()` less a millimetre on every side.
+    fn inner(p: Point3) -> bool {
+        let r = region().grow(-1e-3);
+        let (lo, hi) = (r.min(), r.max());
+        (lo.x..=hi.x).contains(&p.x) && (lo.y..=hi.y).contains(&p.y) && (lo.z..=hi.z).contains(&p.z)
+    }
+
+    /// Every crossing of 1,024 rulings, found by walking each one through
+    /// the implicit form of `other` (both nappes) and keeping those on
+    /// `other` itself.
+    fn sampled(cyl: &Surface, other: &Surface) -> Vec<Point3> {
+        let Surface::Cylinder(c) = cyl else { panic!() };
+        let f = cyl.frame().unwrap();
+        let imp = crate::intersect::implicit::Implicit::of(other).unwrap();
+        let value = |p: Point3| {
+            let v = imp.value(imp.local(p.to_vector()));
+            (v.lo() + v.hi()) / 2.0
+        };
+        let mut out = Vec::new();
+        for k in 0..1024 {
+            let th = TAU * (f64::from(k) + 0.5) / 1024.0;
+            let (s, co) = math::sin_cos(th);
+            let base =
+                f.origin() + f.x().get() * (c.radius() * co) + f.y().get() * (c.radius() * s);
+            let at = |t: f64| base + f.z().get() * t;
+            let steps = 8192;
+            let (lo, hi) = (-30.0, 30.0);
+            let mut prev = value(at(lo));
+            for i in 1..=steps {
+                let t1 = lo + (hi - lo) * f64::from(i) / f64::from(steps);
+                let now = value(at(t1));
+                if (prev < 0.0) != (now < 0.0) {
+                    let (mut a, mut b) = (t1 - (hi - lo) / f64::from(steps), t1);
+                    for _ in 0..80 {
+                        let m = (a + b) / 2.0;
+                        if (value(at(m)) < 0.0) == (prev < 0.0) {
+                            a = m
+                        } else {
+                            b = m
+                        }
+                    }
+                    let p = at((a + b) / 2.0);
+                    if other.distance(p) <= 1e-7 && inner(p) {
+                        out.push(p);
+                    }
+                }
+                prev = now;
+            }
+        }
+        out
+    }
+
+    /// Every branch within 2e-8 of both surfaces at 1,024 points; every
+    /// sampled crossing within 1e-6 of a branch; and the branch count.
+    fn agrees(cyl: &Surface, other: &Surface, branches: usize) {
+        let (raws, points) = ruled(cyl, other, &region(), &Meter::free())
+            .unwrap()
+            .expect("a closed form");
+        assert!(points.is_empty(), "{points:?}");
+        assert_eq!(raws.len(), branches);
+        for r in &raws {
+            for k in 0..=1024 {
+                let p = r
+                    .curve
+                    .point(r.range[0] + (r.range[1] - r.range[0]) * f64::from(k) / 1024.0);
+                assert!(
+                    cyl.distance(p) <= 2e-8 && other.distance(p) <= 2e-8,
+                    "{p:?}"
+                );
+            }
+        }
+        let crossings = sampled(cyl, other);
+        assert!(!crossings.is_empty());
+        for p in crossings {
+            assert!(
+                raws.iter().any(|r| r.curve.distance(p) <= 1e-6),
+                "missed {p:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pin_through_a_bore_meets_it_in_two_curves_round_the_pin() {
+        let pin = cylinder((0.0, 0.0, 0.3), (1.0, 0.0, 0.0), 0.5);
+        let bore = cone((0.0, 0.0, 0.0), (0.0, 0.0, 1.0), 2.0, 5f64.to_radians());
+        agrees(&pin, &bore, 2);
+    }
+
+    #[test]
+    fn a_pin_through_a_bores_wall_meets_it_in_one_loop() {
+        // Axis at y = −2, on the wall: the rulings toward the bore's axis
+        // cross, the arc running across θ = 0 (the frame's x is world y).
+        let pin = Surface::Cylinder(
+            Cylinder::new(
+                frame((0.0, -2.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)),
+                0.5,
+            )
+            .unwrap(),
+        );
+        let bore = cone((0.0, 0.0, 0.0), (0.0, 0.0, 1.0), 2.0, 5f64.to_radians());
+        agrees(&pin, &bore, 1);
+    }
+
+    #[test]
+    fn a_rod_wider_than_a_bore_meets_it_in_two_loops() {
+        let rod = cylinder((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), 1.5);
+        let bore = cone((0.0, 0.0, 0.0), (0.0, 0.0, 1.0), 1.0, 10f64.to_radians());
+        agrees(&rod, &bore, 2);
+    }
+
+    #[test]
+    fn skew_cylinders_of_unequal_radii() {
+        let big = cylinder((0.0, 0.0, 0.0), (0.0, 0.0, 1.0), 1.0);
+        // Through: the small one's rulings all cross the big one.
+        let through = cylinder((0.0, 0.3, 0.0), (1.0, 0.0, 0.3), 0.4);
+        agrees(&through, &big, 2);
+        // Either way round, the smaller one is ruled.
+        assert_eq!(
+            ruled(&big, &through, &region(), &Meter::free()),
+            ruled(&through, &big, &region(), &Meter::free())
+        );
+        // Partly: an axis 0.8 off, the rulings on its far side miss.
+        let partly = cylinder((0.0, 0.8, 0.0), (1.0, 0.0, 0.3), 0.4);
+        agrees(&partly, &big, 1);
+    }
+
+    #[test]
+    fn a_root_on_a_chart_seam_still_gives_its_loop() {
+        let wall = Surface::Cylinder(
+            Cylinder::new(
+                frame((0.0, 0.0, 0.0), (0.0, 0.0, 1.0), (1.0, 0.0, 0.0)),
+                1.0,
+            )
+            .unwrap(),
+        );
+        let pipe = Surface::Cylinder(
+            Cylinder::new(
+                frame((0.0, 1.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)),
+                0.5,
+            )
+            .unwrap(),
+        );
+        agrees(&pipe, &wall, 1);
+    }
 }
