@@ -809,6 +809,7 @@ fn finish(outcome: Result<Value>, warnings: Vec<String>, pretty: bool) -> ExitCo
             0,
         ),
         Err(e) => {
+            ryudfm::error::details::check(&e);
             let code = e.code.exit_code();
             (json!({"ok": false, "error": e, "warnings": warnings}), code)
         }

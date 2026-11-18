@@ -7520,6 +7520,7 @@ fn finish(outcome: Result<Value>, warnings: Vec<String>, pretty: bool) -> ExitCo
             0,
         ),
         Err(e) => {
+            ryucad::error::details::check(&e);
             let code = e.code.exit_code();
             (json!({"ok": false, "error": e, "warnings": warnings}), code)
         }
@@ -8234,5 +8235,15 @@ mod tests {
             let c = Cli::try_parse_from(["ryucad", "part", "list"]).unwrap();
             assert!(batch_request(&c.command, dir.path()).unwrap().is_none());
         });
+    }
+
+    #[test]
+    fn the_envelope_checks_its_error() {
+        if !cfg!(debug_assertions) || std::env::var_os(ryucad::error::details::RECORD).is_some() {
+            return;
+        }
+        let bad = Error::new(Code::LabelNotFound, "x").with("colour", "red");
+        let panic = std::panic::catch_unwind(|| finish(Err(bad), Vec::new(), false)).unwrap_err();
+        assert!(panic.downcast_ref::<String>().unwrap().contains("`colour`"));
     }
 }
