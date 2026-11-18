@@ -1582,7 +1582,7 @@ impl View {
         // last 5 s kept in frame, eased out to and never in. A followed
         // camera holds it, the first framing comes first, and a hand on
         // the camera pauses it (`Workspace::hand_moved`).
-        if ws.follows_work() && self.framed {
+        if ws.follows_work() && self.framed && ws.view.work.pending() {
             let now = std::time::Instant::now();
             let picker = self.picker(ws);
             let work = ws.view.work.bounds(now, &ws.model, picker);
