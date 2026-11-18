@@ -145,25 +145,48 @@ pub(crate) fn climb(
 /// work bound, not a tolerance. Each costs at most a rung's cap.
 pub(crate) const ADJUSTS: usize = 3;
 
-/// A narrowed rung's answer (design 724, plan 22.A). `first` is its first
-/// narrowed build and what that build asks: `Some` adjustments where its
-/// walk failed `Clipped` at a working face with room to give, or it
-/// refused `Uncertain` at a working face and a pin it shares nothing with
-/// (plan 22.B). The rung is built again by `again` with what each build
-/// asks, at most [`ADJUSTS`] times. The first adjusted build that builds
-/// (closes and checks clean) answers, and so does one after which the
-/// meter is stopped (a cancel or a halt answers at once). Otherwise the first answer stands, so
-/// refusals keep their names and a failed walk climbs as before.
+/// How many released builds a narrowed rung may make (design 919, plan
+/// 23.A), apart from [`ADJUSTS`]: a work bound, not a tolerance. Each
+/// costs at most a rung's cap. CTC 02 with PMI spends two room builds
+/// before it asks one.
+pub(crate) const RELEASES: usize = 2;
+
+/// A narrowed rung's answer (design 724, plans 22.A and 22.B; design
+/// 919, plan 23.A). `first` is its first narrowed build and what that
+/// build asks: `Some` adjustments where its walk failed `Clipped` at a
+/// working face with room to give, or it refused `Uncertain` at a working
+/// face and a pin it shares nothing with, or (room asking nothing) its
+/// walk failed at a pin, which it asks released. The rung is built again
+/// by `again` with what each build asks: an ask that releases more faces
+/// than the build that asked it is a released build, at most
+/// [`RELEASES`]; any other is an adjusted build, at most [`ADJUSTS`].
+/// The first such build that builds (closes and checks clean) answers,
+/// and so does one after which the meter is stopped (a cancel or a halt
+/// answers at once). Otherwise the first answer stands, so refusals keep
+/// their names and a failed walk climbs as before.
 pub(crate) fn adjusting(
     first: (Rung, Option<near::Adjusts>),
     stopped: &dyn Fn() -> bool,
     mut again: impl FnMut(&near::Adjusts) -> (Rung, Option<near::Adjusts>),
 ) -> Rung {
     let (first, mut ask) = first;
-    for _ in 0..ADJUSTS {
-        let Some(adjusts) = ask.take() else {
-            break;
-        };
+    let (mut adjusted, mut released) = (0, 0);
+    // How many faces the build that asked had released.
+    let mut had = 0;
+    while let Some(adjusts) = ask.take() {
+        let now = near::released(&adjusts).len();
+        if now > had {
+            if released == RELEASES {
+                break;
+            }
+            released += 1;
+        } else {
+            if adjusted == ADJUSTS {
+                break;
+            }
+            adjusted += 1;
+        }
+        had = now;
         let (r, next) = again(&adjusts);
         if matches!(&r, Rung::Done(d) if d.is_ok()) || stopped() {
             return r;

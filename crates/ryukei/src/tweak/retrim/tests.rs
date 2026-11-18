@@ -698,6 +698,80 @@ fn adjusted_builds_answer_only_when_they_build() {
     assert!(matches!(&r, Rung::Done(d) if matches!(**d, Err(crate::Error::Cancelled))));
 }
 
+/// An ask that releases the block's bottom, on top of `asks()`'s room.
+fn releases() -> Option<super::near::Adjusts> {
+    let b = block();
+    let mut a = asks().unwrap();
+    a.insert(face_of(&b, FaceRole::MinusZ), super::near::Adjust::Released);
+    Some(a)
+}
+
+/// Design 919, plan 23.A: released builds have their own budget, apart
+/// from `ADJUSTS`. An ask releasing a face is built; one that builds
+/// answers; at most `RELEASES` are made, after any number of room builds
+/// up to `ADJUSTS`; where none builds, the first answer stands; a stopped
+/// meter answers at once.
+#[test]
+fn released_builds_have_their_own_budget() {
+    use super::near::{Adjust, Adjusts, released};
+    use super::{ADJUSTS, RELEASES, Rung, adjusting};
+    // A release asked first is built, and answers when it builds.
+    let mut n = 0;
+    let r = adjusting((walked_rung(), releases()), &|| false, |a: &Adjusts| {
+        assert_eq!(Some(a.clone()), releases());
+        n += 1;
+        (built_rung(), None)
+    });
+    assert!(matches!(&r, Rung::Done(d) if d.is_ok()) && n == 1);
+    // Room until `ADJUSTS`, then releases until `RELEASES`, each failing:
+    // every build is made, and the first answer stands.
+    let b = block();
+    let (mut rooms, mut frees) = (0, 0);
+    let r = adjusting((walked_rung(), asks()), &|| false, |a: &Adjusts| {
+        let k = released(a).len();
+        if k == 0 {
+            rooms += 1;
+        } else {
+            frees += 1;
+        }
+        // Room again until `ADJUSTS` rooms, then one more face released each time.
+        let mut next = a.clone();
+        if rooms < ADJUSTS {
+            next.insert(face_of(&b, FaceRole::PlusX), Adjust::Room(rooms as u32 + 1));
+        } else {
+            let more = [
+                FaceRole::MinusZ,
+                FaceRole::MinusX,
+                FaceRole::PlusY,
+                FaceRole::MinusY,
+            ];
+            next.insert(face_of(&b, more[k]), Adjust::Released);
+        }
+        (refused_rung(), Some(next))
+    });
+    assert!(matches!(r, Rung::Walked(_)), "the first answer stands");
+    assert_eq!((rooms, frees), (ADJUSTS, RELEASES));
+    // Releases first spend none of `ADJUSTS`: room asked after a release is still built.
+    let (mut rooms, mut frees) = (0, 0);
+    let r = adjusting((walked_rung(), releases()), &|| false, |a: &Adjusts| {
+        if released(a).len() == 1 && frees == 0 {
+            frees += 1;
+            let mut next = a.clone();
+            next.insert(face_of(&b, FaceRole::PlusX), Adjust::Room(2));
+            return (refused_rung(), Some(next));
+        }
+        rooms += 1;
+        (built_rung(), None)
+    });
+    assert!(matches!(&r, Rung::Done(d) if d.is_ok()));
+    assert_eq!((rooms, frees), (1, 1));
+    // A stopped meter answers at once.
+    let r = adjusting((walked_rung(), releases()), &|| true, |_: &Adjusts| {
+        (super::done(Err(crate::Error::Cancelled)), releases())
+    });
+    assert!(matches!(&r, Rung::Done(d) if matches!(**d, Err(crate::Error::Cancelled))));
+}
+
 /// Design 724: only a narrowed build's clip asks room, for the input faces
 /// of the face clipped and of the faces whose clipped sides it reached,
 /// those working and not fixed.
