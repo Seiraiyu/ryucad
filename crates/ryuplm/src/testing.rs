@@ -388,6 +388,76 @@ pub fn tree_mapping(
     t
 }
 
+/// A seeded master and a legacy revision history for it (design 935):
+/// `import_source`'s first source imported, then for every other row's
+/// number one to four revisions, dated in two patterns, every fifth
+/// key's last revision in work, every seventeenth key's labels outside
+/// the letters scheme. Returns the catalogue's files with the master
+/// imported, the history mapping and its CSV.
+pub fn history_source(
+    seed: &str,
+    n: usize,
+) -> (
+    BTreeMap<String, Vec<u8>>,
+    crate::import::mapping::Mapping,
+    String,
+) {
+    let (mut files, master, csv, _) = import_source(seed, n);
+    let config = ryupdm::config::Config::read_in(&files, crate::catalogue::NAME)
+        .expect("the seeded settings read");
+    let cat = crate::load::Catalogue::load(&files).expect("the seeded catalogue loads");
+    let table = crate::import::rows::Table::from_raw(
+        crate::import::csv::parse(&csv, ',').expect("the CSV reads"),
+        1,
+    )
+    .expect("a table");
+    let (rows, _) =
+        crate::import::records::map(&table, &master, &config, cat.manifest.default_unit)
+            .expect("the master maps");
+    let out = crate::import::run::plan(&files, &cat, &config, &master, &rows, None, 10)
+        .expect("the master plans");
+    for (id, it) in &out.items {
+        files.insert(crate::ids::item_path(id), it.to_text().into_bytes());
+    }
+    let mapping = crate::import::mapping::Mapping::from_json(
+        "history",
+        &json!({"format": 2, "kind": "ryuplm.import",
+            "reader": {"type": "csv"}, "key": "PN",
+            "fields": {"number": {"from": "PN", "trim": true}}, "numbers": "keep",
+            "history": {"revision": "Rev",
+                "date": {"from": "Released", "date": ["DD/MM/YYYY", "YYYY-MM-DD"]},
+                "state": "Lifecycle", "change": "ECO", "author": "By",
+                "released": {"Lifecycle": "Released"}}}),
+    )
+    .expect("the history mapping reads");
+    let mut h = String::from("PN,Rev,Released,Lifecycle,ECO,By,Title\n");
+    for k in (0..n).filter(|k| k % 2 == 0) {
+        let revs = 1 + k % 4;
+        for r in 0..revs {
+            let label = if k % 17 == 0 {
+                format!("X{}", r + 1)
+            } else {
+                ryupdm::label::label(ryupdm::config::Scheme::Letters, r as u64 + 1)
+            };
+            let in_work = k % 5 == 0 && r + 1 == revs;
+            let (day, month, year) = (1 + (k + r) % 28, 1 + (k + 3 * r) % 12, 2010 + r);
+            let date = if in_work {
+                String::new()
+            } else if (k + r) % 2 == 0 {
+                format!("{day:02}/{month:02}/{year}")
+            } else {
+                format!("{year}-{month:02}-{day:02}")
+            };
+            h += &format!(
+                "P-{k:05},{label},{date},{},ECO-{k}-{r},Author {},Part {k} at {label}\n",
+                if in_work { "In Work" } else { "Released" },
+                k % 9
+            );
+        }
+    }
+    (files, mapping, h)
+}
+
 /// A cell for [`xlsx`]: a shared string, an inline string, a number as
 /// written, a boolean, or no cell at all (the next one keeps its column).
 #[derive(Clone, Copy, Debug)]
