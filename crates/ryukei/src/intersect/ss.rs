@@ -1,7 +1,9 @@
 //! Surface–surface intersection: the entry point and its results.
 //!
 //! A coincident pair is reported as such; a pair with a closed form
-//! ([`super::ss_exact`]) gets exact curves; any other analytic pair is
+//! ([`super::ss_exact`]) gets exact curves; a cylinder against a cone or
+//! cylinder whose trace fails gets the closed form through its rulings
+//! ([`super::ss_exact::ruled`], plan 22.D); any other analytic pair is
 //! traced ([`super::ss_trace`]) and fitted ([`super::fit`]), and any other
 //! surface (a pipe, a NURBS, a swept surface) and an analytic one are
 //! traced in the first's parameter plane ([`super::sheet_trace`]), and
@@ -137,13 +139,18 @@ pub(crate) fn meet(
     let topo = match trace(a, b, region, m) {
         Ok(t) => t,
         // A cylinder continuing a torus's tube is tangent to it all along
-        // a circle, where no trace certifies (#652, FTC 10; plan 20.B):
-        // its closed form, tried only once the trace has failed, so every
-        // pair that traces keeps its result; and never in a re-trim
-        // rung's first build, whose `Uncertain` the narrowed retry
-        // answers today (19.A's bent rod), so it keeps its bits.
+        // a circle, where no trace certifies (#652, FTC 10; plan 20.B),
+        // and a cylinder grazing a cone (#658, FTC 07 AP242; plan 22.D)
+        // or a cylinder of another radius or on a skew axis is settled by
+        // its rulings: closed forms tried only once the trace has failed,
+        // so every pair that traces keeps its result; and never in a
+        // re-trim rung's first build, whose `Uncertain` the narrowed
+        // retry answers today (19.A's bent rod), so it keeps its bits.
         Err(Failure::Uncertain) if !m.in_first_build() => {
-            return match ss_exact::tube(a, b, region) {
+            if let Some((raws, points)) = ss_exact::tube(a, b, region) {
+                return exact_hit(raws, points, [a, b], m);
+            }
+            return match ss_exact::ruled(a, b, region, m)? {
                 Some((raws, points)) => exact_hit(raws, points, [a, b], m),
                 None => Err(Failure::Uncertain),
             };

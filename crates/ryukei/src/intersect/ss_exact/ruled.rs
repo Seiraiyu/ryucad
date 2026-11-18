@@ -58,6 +58,9 @@ use crate::work::Meter;
 use core::f64::consts::{FRAC_PI_2, FRAC_PI_4, PI, TAU};
 use std::sync::Arc;
 
+/// A closed form's branches and touch points.
+type Hit = (Vec<Raw>, Vec<Point3>);
+
 #[cfg(test)]
 thread_local! {
     /// How many times [`ruled`] was reached with a cylinder pair on this
@@ -675,7 +678,7 @@ pub(crate) fn ruled(
     b: &Surface,
     region: &Box3,
     m: &Meter,
-) -> Result<Option<(Vec<Raw>, Vec<Point3>)>, Failure> {
+) -> Result<Option<Hit>, Failure> {
     let (cyl, other) = match (a, b) {
         (Surface::Cylinder(x), Surface::Cylinder(y)) if y.radius() < x.radius() => (b, a),
         (Surface::Cylinder(_), Surface::Cylinder(_) | Surface::Cone(_)) => (a, b),

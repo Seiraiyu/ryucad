@@ -1464,4 +1464,17 @@ mod tests {
             assert!(b.tolerance <= 1e-7, "{}", b.tolerance);
         }
     }
+
+    /// Plan 22.D: the ruled form is tried only where a trace fails. A
+    /// pair that traces (crossing cylinders of unequal radii, as in
+    /// `cylinders`) never reaches it, and its result is the trace's.
+    #[test]
+    fn a_pair_that_traces_never_tries_the_ruled_form() {
+        let a = cylinder((0.0, 0.0, 0.0), (0.0, 0.0, 1.0), 1.0);
+        let b = cylinder((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), 0.5);
+        RULED_TRIED.with(|n| n.set(0));
+        let (branches, _) = meet(&a, &b);
+        assert_eq!(kinds(&branches), [("nurbs", false), ("nurbs", false)]);
+        assert_eq!(RULED_TRIED.with(|n| n.get()), 0);
+    }
 }
