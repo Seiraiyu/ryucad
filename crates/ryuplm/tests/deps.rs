@@ -29,7 +29,6 @@ fn depends_on_no_kernel_and_no_other_product() {
                     "ryukei",
                     "ryukei-testkit",
                     "ryucad",
-                    "ryucad-doc",
                     "ryueda",
                     "ryudfm",
                     "ryu-board",
@@ -58,4 +57,21 @@ fn takes_ryupdms_core_only() {
     ] {
         assert!(names(MANIFEST, "[dependencies]").contains(&name), "{name}");
     }
+}
+
+#[test]
+fn reads_ryucad_only_through_the_cad_feature() {
+    // ryucad's file format is optional, behind `cad` (design 734 leaves
+    // the readers to 0.B), so `--no-default-features` builds a catalogue
+    // with no ryucad-doc and no kernel; CI's `ryuplm-core` job checks it.
+    assert!(MANIFEST.contains(r#"ryucad-doc = { path = "../ryucad-doc", optional = true }"#));
+    assert!(MANIFEST.contains(r#"default = ["cad"]"#));
+    assert!(MANIFEST.contains(r#"cad = ["ryupdm/cad", "dep:ryucad-doc"]"#));
+    // The tests' own copy of the crate takes no default feature, so
+    // `--no-default-features` really tests without `cad`.
+    assert!(MANIFEST.contains(
+        r#"ryuplm = { path = ".", default-features = false, features = ["testing"] }"#
+    ));
+    // ryueda is read through its executable, never its crate.
+    assert!(!names(MANIFEST, "[dependencies]").contains(&"ryueda"));
 }

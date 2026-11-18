@@ -5243,6 +5243,7 @@ dependencies = [
  "ryu-doc",
  "ryu-git",
  "ryu-session",
+ "ryucad-doc",
  "ryueda-parts",
  "ryupdm",
  "ryuplm",

@@ -22,16 +22,25 @@ ryueda-parts = { path = "../ryueda-parts" }
 # Revisions, releases, states, the commit guard: ryupdm's core only. Its
 # `cad` feature would pull ryucad-doc.
 ryupdm = { path = "../ryupdm", default-features = false }
+# ryucad's file format, for linked ryucad assemblies' lines through
+# ryupdm's structure reader (`cad`). It depends on ryukei and ryusketch
+# itself; `--no-default-features` builds without it.
+ryucad-doc = { path = "../ryucad-doc", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 
 [features]
+default = ["cad"]
+# ryucad's half: linked ryucad assemblies' lines, read in process through
+# ryupdm's structure (design 180). ryueda's are read through its
+# executable, so there is no `eda` feature.
+cad = ["ryupdm/cad", "dep:ryucad-doc"]
 # Seeded catalogues for this crate's tests and the fuzz target.
 testing = []
 
 [dev-dependencies]
 assert_cmd = "2"
-ryuplm = { path = ".", features = ["testing"] }
+ryuplm = { path = ".", default-features = false, features = ["testing"] }
 tempfile = "3"
 
 # musl's allocator is slow under multithreaded allocation, as for ryucad,
