@@ -898,6 +898,104 @@ fn a_cut_that_takes_what_the_result_needs_fails_its_walk() {
     assert!(matches!(&r, Rung::Done(d) if d.is_ok()), "{}", what(&r));
 }
 
+/// Plan 22.B: a block 1 × 0.1 × 0.4 with a slot 0.2 wide and 0.01 deep
+/// across its top (x from 0.4 to 0.6, through both y sides), so its top
+/// is two coplanar strips sharing no vertex, as NIST STC 10's planes
+/// `a7b86e65` and `ccab7076` are. Returns the body, the strips (x < 0.4,
+/// then x > 0.6) and the slot's two walls and floor.
+fn two_strips() -> (Body, [FaceId; 2], std::collections::BTreeSet<FaceId>) {
+    let (b, _) = primitive::block(OpKey(0x22b0), 1.0, 0.1, 0.4, &Rigid::IDENTITY).unwrap();
+    let (slot, _) = primitive::block(OpKey(0x22b1), 0.2, 0.12, 0.02, &Rigid::IDENTITY).unwrap();
+    let (s, _) = boolean(
+        OpKey(0x22b2),
+        BooleanOp::Subtract,
+        &b,
+        &[Tool {
+            key: ToolKey(1),
+            body: &slot,
+            place: Rigid::translation(Vector3::new(0.4, -0.01, 0.39)),
+        }],
+    )
+    .unwrap();
+    let fb = |f: FaceId| crate::intersect::face_box(&s, f);
+    let flat = |f: FaceId, z: f64| {
+        let x = fb(f);
+        (x.min().z - z).abs() < 1e-9 && (x.max().z - z).abs() < 1e-9
+    };
+    let left = s
+        .faces()
+        .find(|&f| flat(f, 0.4) && fb(f).max().x < 0.41)
+        .expect("the left strip");
+    let right = s
+        .faces()
+        .find(|&f| flat(f, 0.4) && fb(f).min().x > 0.59)
+        .expect("the right strip");
+    let slot = s
+        .faces()
+        .filter(|&f| {
+            let x = fb(f);
+            x.min().x > 0.399 && x.max().x < 0.601 && x.min().z > 0.389
+        })
+        .collect();
+    (s, [left, right], slot)
+}
+
+/// 22.A's review: the clip owners, on a real walk. The two strips with
+/// their slot deleted, built narrowed: one strip's piece reaches the
+/// other's clipped side (coplanar sheets, as in NIST STC 10). The strips
+/// share no vertex, so only the owners could name the other strip in the
+/// ask, and the ask names it. Rung 0 (the region and its box), where
+/// census VII (plan 22.B, Task 1) found the first such clip; every rung
+/// clips the same way.
+#[test]
+fn a_clips_owners_name_the_face_whose_side_was_reached() {
+    use super::near::Adjusts;
+    use super::{Build, Rung, attempt_adjusted};
+    let (b, strips, slot) = two_strips();
+    assert_eq!(slot.len(), 3, "two walls and a floor");
+    let changes = Changes {
+        deleted: slot.clone(),
+        ..Changes::default()
+    };
+    let region = super::region::region(&b, &slot);
+    assert!(strips.iter().all(|f| region.faces.contains(f)));
+    let bx = super::body::region_box(&b, &region, super::reach(&b, &changes));
+    // unmetered: a unit test.
+    let m = crate::work::Meter::free();
+    let mut ask = None;
+    let r = attempt_adjusted(
+        K,
+        &b,
+        &changes,
+        &region,
+        &bx,
+        0,
+        Build::Only,
+        None,
+        &Adjusts::new(),
+        &mut ask,
+        &m,
+    );
+    let Rung::Walked(crate::Error::InvalidTweak(crate::TweakError::RegionTooSmall { face })) = r
+    else {
+        panic!("not clipped: {}", what(&r));
+    };
+    let f = strips
+        .into_iter()
+        .find(|&s| b.faces[s].name == face)
+        .expect("clipped at a strip");
+    let other = strips.into_iter().find(|&s| s != f).unwrap();
+    assert!(
+        super::region::face_vertices(&b, f).is_disjoint(&super::region::face_vertices(&b, other)),
+        "the strips share a vertex"
+    );
+    let ask = ask.expect("room asked");
+    assert!(
+        ask.contains_key(&other),
+        "the owners missed the other strip: {ask:?}"
+    );
+}
+
 /// FNV-1a of `b`'s `dump_unnamed` (as `ryukei-testkit`'s `fnv`, which the
 /// crate can't depend on).
 fn free_hash(b: &Body) -> u64 {
