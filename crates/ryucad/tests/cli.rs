@@ -212,7 +212,7 @@ fn version_reports_every_component() {
     let r = p.ok(&["version"]);
     assert_eq!(r["ryucad"], env!("CARGO_PKG_VERSION"));
     assert_eq!(r["ryukei"], env!("CARGO_PKG_VERSION"));
-    assert_eq!(r["protocol"], 3);
+    assert_eq!(r["protocol"], 4);
     assert!(r["target"].as_str().unwrap().contains('-'));
     assert!(!r["commit"].as_str().unwrap().is_empty());
 }
@@ -1622,6 +1622,7 @@ fn every_protocol_method_has_a_command() {
         ("compare.get", &["compare"]),
         ("compare.set", &["compare"]),
         ("view.focus", &["focus"]),
+        ("view.follow", &["follow"]),
         ("visibility.set", &["hide"]),
         ("section.get", &["section"]),
         ("drawing.list", &["drawing", "list"]),
@@ -6795,6 +6796,47 @@ fn named_views_from_the_cli() {
     let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
     assert_eq!((code, &v["ok"]), (0, &json!(true)), "{v}");
     assert!(p.daemon.join("parts/p/views/close.json").is_file());
+}
+
+/// `ryucad follow` (#812): a window's, so a session's only; an agent
+/// alone has no window to ask; named, one participant's window follows
+/// another's camera, and --off stops it.
+#[test]
+fn follow_from_the_cli() {
+    let p = Pair::new();
+    p.ok(&["init", "--unit", "mm"]);
+    let (code, v) = p.run_in(&p.direct, "", &["follow"]);
+    assert_eq!(
+        (code, &v["error"]["code"]),
+        (1, &json!("no_live_session")),
+        "{v}"
+    );
+    // The agent alone: its own view can't follow itself.
+    let (code, v) = p.run_in(&p.daemon, "", &["follow"]);
+    assert_eq!(
+        (code, &v["error"]["code"]),
+        (1, &json!("invalid_param")),
+        "{v}"
+    );
+    // The reviewer's view follows the agent.
+    let (code, v) = p.run_in(
+        &p.daemon,
+        "",
+        &["--as", "reviewer", "follow", "agent", "--for", "reviewer"],
+    );
+    assert_eq!(code, 0, "{v}");
+    let agent = v["result"]["following"].as_str().unwrap().to_owned();
+    let (_, list) = p.run_in(&p.daemon, "", &["participants"]);
+    let reviewer = list["result"]["participants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["name"] == "reviewer")
+        .unwrap()
+        .clone();
+    assert_eq!(reviewer["following"], json!(agent));
+    let (code, v) = p.run_in(&p.daemon, "", &["follow", "--for", "reviewer", "--off"]);
+    assert_eq!((code, &v["result"]["following"]), (0, &Value::Null), "{v}");
 }
 
 #[test]

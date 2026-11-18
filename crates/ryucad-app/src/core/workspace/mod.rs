@@ -459,6 +459,49 @@ impl Workspace {
         self.send(req, Route::Quiet);
     }
 
+    /// Whether View > Follow agents' work is on (`view.follow_work`, off
+    /// by default; #812).
+    pub fn follows_work(&self) -> bool {
+        self.session
+            .settings
+            .get("view.follow_work")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    }
+
+    /// How often following the agents' work may move the camera: once
+    /// per `daemon.publish_max_ms`, the pace the daemon tells of a burst's
+    /// changes at (#849).
+    pub fn publish_every(&self) -> Duration {
+        self.session
+            .settings
+            .get("daemon.publish_max_ms")
+            .and_then(Value::as_u64)
+            .map_or(crate::core::work::EVERY, Duration::from_millis)
+    }
+
+    /// The person moved the camera by hand (#812): following a
+    /// participant's camera ends, with a toast saying so and the session
+    /// told, and following the agents' work pauses for
+    /// [`crate::core::work::PAUSE`].
+    pub fn hand_moved(&mut self) {
+        let now = Instant::now();
+        self.view.work.hand(now);
+        if let Some(f) = self.session.following.clone() {
+            let name = self
+                .session
+                .people
+                .get(&f)
+                .map_or_else(|| f.clone(), |p| p.name.clone());
+            self.toasts.note(
+                &format!("Following {name}: your move stopped it"),
+                false,
+                now,
+            );
+            self.follow(None);
+        }
+    }
+
     /// Shows `part` if the window doesn't already (#737, #778, #780):
     /// what is chosen from the tree or the palette is shown with its
     /// part, so the viewport, `ryucad focus` and File > Export… are about
@@ -925,6 +968,12 @@ impl Workspace {
         {
             self.set_compare(Some(rev));
             self.ask_diff();
+        }
+        // …and nothing of whom it follows (#812).
+        self.session.following_seen = None;
+        self.session.following_asked = 0;
+        if let Some(f) = self.session.following.clone() {
+            self.follow(Some(f));
         }
         if let Some(part) = self.model.focus.clone() {
             self.set_focus(Some(part));
@@ -1407,6 +1456,10 @@ impl Workspace {
             }
             "activity.appended" => {
                 self.activity.appended(params);
+                // An agent's change is work to keep in frame (#812).
+                if self.follows_work() {
+                    self.view.work.activity(params, Instant::now());
+                }
                 let me = self.link.participant.clone();
                 self.toasts.activity(params, &me, Instant::now());
                 // The material library defines no part, yet colours them.
@@ -1425,12 +1478,26 @@ impl Workspace {
             }
             "app.open" => self.raised = true,
             "participant.changed" => {
+                // What an agent points at now, against before, is work to
+                // keep in frame (#812).
+                let id = params["participant"]["id"].as_str().map(str::to_owned);
+                let before = id
+                    .as_deref()
+                    .and_then(|i| self.session.people.get(i))
+                    .map(crate::core::work::pointing)
+                    .unwrap_or_default();
                 self.session.people.changed(params);
+                if self.follows_work()
+                    && let Some(p) = id.as_deref().and_then(|i| self.session.people.get(i))
+                {
+                    self.view.work.pointed(&before, p, Instant::now());
+                }
                 self.follow_draft();
                 self.follow_focus();
                 self.follow_sections();
                 self.follow_explode();
                 self.follow_motion();
+                self.follow_following();
                 // Following someone who left ends.
                 if self
                     .session

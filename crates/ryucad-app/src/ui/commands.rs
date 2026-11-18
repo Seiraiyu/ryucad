@@ -44,6 +44,7 @@ pub fn state(o: &mut Opened) -> State {
         nav_cube: o.view.cube,
         triad: o.view.triad,
         origin: o.view.origin,
+        follow_work: o.ws.follows_work(),
         measuring: o.ws.view.measure.on,
         selector: o.view.selector.is_some() || o.view.others.is_some(),
         sectioned: !o.ws.view.sections.planes.is_empty(),
@@ -364,6 +365,10 @@ pub fn run(o: &mut Opened, ctx: &egui::Context, id: &str, target: Option<&str>) 
         "view.nav_cube" => toggle(o, "display.nav_cube", o.view.cube),
         "view.triad" => toggle(o, "display.triad", o.view.triad),
         "view.origin" => toggle(o, "display.origin", o.view.origin),
+        "view.follow_work" => {
+            let on = o.ws.follows_work();
+            toggle(o, "view.follow_work", on);
+        }
         // A row's bodies: an occurrence's, a feature's solid (or what an
         // instance or a sketch frames), else every solid of a part.
         "view.fit_row" => {

@@ -64,4 +64,5 @@ pub mod tree;
 pub mod tweaks;
 pub mod views;
 pub mod where_used;
+pub mod work;
 pub mod workspace;
