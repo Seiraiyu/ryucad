@@ -2,7 +2,8 @@
 //! item, manifest or settings file that reads must write canonically and
 //! read back the same; a merge of three readable items must give a file
 //! that reads (or text with markers); textconv never panics; a catalogue
-//! of what reads is judged without panicking.
+//! of what reads is judged without panicking; ryueda's bom answer read
+//! and a joined BOM judged.
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
@@ -11,7 +12,7 @@ use std::collections::BTreeMap;
 fuzz_target!(|data: &[u8]| {
     let Some((&mode, rest)) = data.split_first() else { return };
     let id = ryuplm::id::Id::parse("k3v9q2m8x4c1p", "item").unwrap();
-    match mode % 5 {
+    match mode % 6 {
         0 => {
             if let Ok(item) = ryuplm::item::Item::read(&id, rest) {
                 let text = item.to_text();
@@ -42,6 +43,17 @@ fuzz_target!(|data: &[u8]| {
         }
         3 => {
             let _ = ryuplm::textconv::textconv(rest);
+        }
+        4 => {
+            // ryueda's bom answer, and the structured catalogue with this
+            // item added: judged and joined without panicking.
+            let _ = ryuplm::reps::eda_answer(rest, &ryuplm::id::ProjectId::from_bytes([4; 16]));
+            let (mut f, mut reps) = ryuplm::testing::structure("fuzz", 31);
+            f.insert(ryuplm::ids::item_path(&id), rest.to_vec());
+            if let Ok(c) = ryuplm::load::Catalogue::load(&f) {
+                let _ = ryuplm::judge::all(&f, &c, &Default::default());
+                let _ = ryuplm::bom::joined(&c, &mut reps, &ryuplm::reps::At::Working);
+            }
         }
         _ => {
             // A small catalogue: the seeded one, with this item added.
