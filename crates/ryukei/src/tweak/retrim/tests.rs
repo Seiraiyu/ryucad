@@ -838,6 +838,90 @@ fn only_a_narrowed_uncertain_at_a_pin_it_shares_nothing_with_asks_a_cut() {
     assert_eq!(ask_off_pin(&b, &w, wt, wside, Build::Only, mark), None);
 }
 
+/// 22.B's review: the cut a narrowed build's `Uncertain` asks (`off_pin`)
+/// on a real working body. The block's top raised 0.5 over the whole body
+/// (rung 2, the bottom pinned): the top's near box, grown by that reach,
+/// runs below the bottom, which it shares nothing with. The cut is
+/// `cut_short` of the near box as `adjusts` leave it, the top's sheet in
+/// the working body, its own box, the bottom's box and the pair's summed
+/// tolerances; asked again with that cut, nothing is left to cut (the
+/// near box as cut already ends short of the bottom); and the rung built
+/// with it builds the taller box.
+#[test]
+fn a_pins_cut_is_its_near_box_as_adjusted_cut_short_of_it() {
+    use super::near::{self, Adjust, Adjusts};
+    use super::{Build, Rung, attempt_adjusted, off_pin};
+    use std::collections::BTreeSet;
+    let b = block();
+    let changes = raised(&b, 0.5);
+    let changed = changes.motion.keys().copied().collect();
+    let whole = super::region::region(&b, &changed).grown(&b);
+    let bx = super::body::region_box(&b, &whole, super::reach(&b, &changes));
+    let (top, bottom) = (face_of(&b, FaceRole::PlusZ), face_of(&b, FaceRole::MinusZ));
+    let pins = BTreeSet::from([bottom]);
+    let rest = whole.without(&b, &pins);
+    // unmetered: a unit test.
+    let m = crate::work::Meter::free();
+    // The working faces as a narrowed build carries them: over their near
+    // boxes.
+    let ws: BTreeMap<FaceId, super::working::Working> = rest
+        .faces
+        .iter()
+        .map(|&f| {
+            let n = near::near_box(&b, &changes, &whole, f, &bx, 2);
+            let w =
+                super::working::working(&b, f, changes.surface.get(&f), b.faces[f].sense, true, &n);
+            (f, w.unwrap())
+        })
+        .collect();
+    let w = super::body::work_body(K, &b, &rest, &ws, &m)
+        .unwrap()
+        .pinning(&pins);
+    let back: BTreeMap<FaceId, FaceId> = w.origin.iter().map(|(&wf, &i)| (i, wf)).collect();
+    let (wt, wb) = (back[&top], back[&bottom]);
+    let now = near::near_box(&b, &changes, &whole, top, &bx, 2);
+    let sheet = crate::intersect::face_box(&w.body, wt);
+    let own = near::own_box(&b, &whole, top);
+    let pin = crate::intersect::face_box(&w.body, wb);
+    assert!(now.intersects(&pin), "{now:?} apart from {pin:?}");
+    let gap = crate::intersect::max_tolerance((&w.body, wt))
+        + crate::intersect::max_tolerance((&w.body, wb));
+    let cut = near::cut_short(&now, &sheet, &own, &pin, gap).expect("a side to cut");
+    let once = off_pin(&b, &changes, &whole, &bx, 2, &w, &Adjusts::new(), wt, wb);
+    assert_eq!(once, Some(Adjusts::from([(top, Adjust::off(&cut))])));
+    let once = once.unwrap();
+    // The cut ends above the bottom by the gap; the top's own box stays.
+    assert_eq!(cut.min().z, pin.max().z + gap);
+    assert!(cut.max().z >= own.max().z && cut.min().z <= own.min().z);
+    // Asked again from the cut, nothing is left to cut; from the uncut
+    // near box (`adjusts` ignored) the same cut would be asked again.
+    assert_eq!(
+        off_pin(&b, &changes, &whole, &bx, 2, &w, &once, wt, wb),
+        None
+    );
+    // A face given room is never kept off (one way only).
+    let roomy = Adjusts::from([(top, Adjust::Room(1))]);
+    assert_eq!(
+        off_pin(&b, &changes, &whole, &bx, 2, &w, &roomy, wt, wb),
+        None
+    );
+    let mut ask = None;
+    let r = attempt_adjusted(
+        K,
+        &b,
+        &changes,
+        &whole,
+        &bx,
+        2,
+        Build::Only,
+        None,
+        &once,
+        &mut ask,
+        &m,
+    );
+    assert!(matches!(&r, Rung::Done(d) if d.is_ok()), "{}", what(&r));
+}
+
 /// A rung's outcome, for messages.
 fn what(r: &super::Rung) -> String {
     match r {

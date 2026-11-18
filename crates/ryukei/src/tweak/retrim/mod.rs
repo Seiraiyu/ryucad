@@ -696,23 +696,7 @@ fn attempt_adjusted(
             // that face kept off the pin, its near box cut back by the
             // sheet's overshoot too (design 724, plan 22.B).
             *ask = ask_off_pin(body, &w, a.face, b.face, which, |wf, pf| {
-                let i = w.origin[&wf];
-                let now = near::adjusted(
-                    &near::near_box(body, changes, region, i, bx, rung),
-                    bx,
-                    adjusts.get(&i).copied(),
-                );
-                let gap = crate::intersect::max_tolerance((&w.body, wf))
-                    + crate::intersect::max_tolerance((&w.body, pf));
-                near::kept_off(
-                    i,
-                    &now,
-                    &crate::intersect::face_box(&w.body, wf),
-                    &near::own_box(body, region, i),
-                    &crate::intersect::face_box(&w.body, pf),
-                    gap,
-                    adjusts,
-                )
+                off_pin(body, changes, region, bx, rung, &w, adjusts, wf, pf)
             });
             return done(Err(e));
         }
@@ -973,6 +957,43 @@ fn ask_off_pin(
         return None;
     }
     off(wf, pf)
+}
+
+/// Working face `wf` of `w` kept off pin `pf` (design 724, plan 22.B):
+/// [`near::kept_off`] for its input face, from its near box at `rung` as
+/// `adjusts` already leave it, with the sheet the build that failed
+/// carried (its box in `w`), its [`near::own_box`] to keep, the pin's box
+/// in `w`, and the gap `WorkBody::pairs` grows the pair by (each face's
+/// `max_tolerance`, summed).
+#[allow(clippy::too_many_arguments)]
+fn off_pin(
+    body: &Body,
+    changes: &Changes,
+    region: &Region,
+    bx: &crate::geom::Box3,
+    rung: usize,
+    w: &WorkBody,
+    adjusts: &near::Adjusts,
+    wf: FaceId,
+    pf: FaceId,
+) -> Option<near::Adjusts> {
+    let i = w.origin[&wf];
+    let now = near::adjusted(
+        &near::near_box(body, changes, region, i, bx, rung),
+        bx,
+        adjusts.get(&i).copied(),
+    );
+    let gap = crate::intersect::max_tolerance((&w.body, wf))
+        + crate::intersect::max_tolerance((&w.body, pf));
+    near::kept_off(
+        i,
+        &now,
+        &crate::intersect::face_box(&w.body, wf),
+        &near::own_box(body, region, i),
+        &crate::intersect::face_box(&w.body, pf),
+        gap,
+        adjusts,
+    )
 }
 
 /// Whether faces `a` and `b` of `body` share an edge.
