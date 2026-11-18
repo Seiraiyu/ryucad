@@ -33,6 +33,11 @@ use crate::tol::{ANGULAR_RESOLUTION, LINEAR_RESOLUTION, in_size_box};
 use core::f64::consts::{FRAC_PI_4, PI, TAU};
 use std::sync::Arc;
 
+mod ruled;
+#[cfg(test)]
+pub(crate) use ruled::TRIED as RULED_TRIED;
+pub(crate) use ruled::ruled;
+
 /// The closed form for this pair, if it has one: its branches and
 /// points.
 pub(crate) fn exact(a: &Surface, b: &Surface, region: &Box3) -> Option<(Vec<Raw>, Vec<Point3>)> {
