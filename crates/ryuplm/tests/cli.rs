@@ -379,6 +379,10 @@ fn mech(p: &Pair) -> &'static str {
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "cad"),
+    ignore = "needs ryucad's lines: the `cad` feature"
+)]
 fn links_boms_and_where_used_from_the_cli() {
     let p = Pair::project();
     let pid = mech(&p);
