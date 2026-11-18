@@ -20,6 +20,7 @@ pub mod ids;
 pub mod item;
 pub mod items;
 pub mod judge;
+pub mod links;
 pub mod load;
 pub mod merge;
 pub mod notify;
