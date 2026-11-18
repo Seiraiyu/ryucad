@@ -72,7 +72,12 @@ pub fn read_table(
             let d = reader.delimiter.unwrap_or_else(|| csv::sniff(&s));
             csv::parse(&s, d)?
         }
-        mapping::ReaderKind::Xlsx => xlsx::read(bytes, reader.sheet.as_deref())?,
+        mapping::ReaderKind::Xlsx => {
+            let (raw, d1904) = xlsx::read_book(bytes, reader.sheet.as_deref())?;
+            let mut t = rows::Table::from_raw(raw, reader.header_row)?;
+            t.date1904 = d1904;
+            return Ok(t);
+        }
         mapping::ReaderKind::Json => {
             return rows::Table::from_records(json::read(
                 bytes,
