@@ -4054,6 +4054,21 @@ fn draw(
         layout.sheets.retain(|id, _| used.contains(id));
     }
     crate::canvas::arrange(block, &mut layout, prev);
+    // Sheets this layout made are named in canvas order (#880); kept
+    // sheets, and those a `sheet` instruction or move names, keep theirs.
+    let kept: BTreeSet<String> = prev
+        .map(|l| l.sheets.keys().cloned().collect())
+        .unwrap_or_default();
+    let given: BTreeSet<String> = block
+        .instructions
+        .values()
+        .chain(&block.moves)
+        .filter_map(|i| match i {
+            Instruction::Sheet { sheet, .. } => Some(sheet.clone()),
+            _ => None,
+        })
+        .collect();
+    crate::canvas::name_new_in_order(&mut layout, &kept, &given);
     let blocked = st.blocked;
     let mut notes = st.notes;
     notes.extend(bus_notes);

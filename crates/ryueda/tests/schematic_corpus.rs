@@ -1242,18 +1242,17 @@ fn names_as_drawn_are_accepted() {
         1,
         &["place", "mitayi", "--dry-run", "align U3B U3C row"],
     );
-    // A sheet by its ID.
+    // A sheet by its ID, told by its name (s2's, which canvas order gives
+    // it: #880).
+    let s2 = layout_of(&rp, "mitayi")["sheets"]["s2"]["name"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     let out = ryueda(&rp, 1, &["place", "mitayi", "--dry-run", "sheet R3 s2"]);
+    let text = out["instructions"][0]["text"].as_str().unwrap();
     assert!(
-        out["instructions"][0]["text"]
-            .as_str()
-            .unwrap()
-            .ends_with("\"Sheet 2\"")
-            || out["instructions"][0]["text"]
-                .as_str()
-                .unwrap()
-                .ends_with("Sheet 2"),
-        "{}",
+        text.ends_with(&format!("\"{s2}\"")) || text.ends_with(&s2),
+        "{s2}: {}",
         out["instructions"]
     );
     let (eth, _) = fresh(dir.path(), "ethernet");
@@ -1367,6 +1366,32 @@ fn describe_gives_boxes_and_pins() {
     assert_eq!(ph["name"], "PH", "{u1}");
     assert_eq!(ph["side"], "right", "{u1}");
     assert_eq!(ph["at_mm"].as_array().unwrap().len(), 2);
+}
+
+/// #880: a layout from nothing names its sheets in canvas order (the top
+/// row first, each row left to right), as `scene` and the PDF read them.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release only")]
+fn the_rp2040s_sheets_read_in_canvas_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let (board, _) = fresh(dir.path(), "rp2040");
+    let l = layout_of(&board, "mitayi");
+    let mut sheets: Vec<(i64, i64, String, String)> = l["sheets"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .map(|(id, s)| {
+            (
+                -s["at"][1].as_i64().unwrap(),
+                s["at"][0].as_i64().unwrap(),
+                id.clone(),
+                s["name"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    sheets.sort();
+    let names: Vec<&str> = sheets.iter().map(|s| s.3.as_str()).collect();
+    assert_eq!(names, ["Sheet 1", "Sheet 2", "Sheet 3"], "{sheets:?}");
 }
 
 /// A sheet is renamed by its ID or name, and sheet instructions follow it
