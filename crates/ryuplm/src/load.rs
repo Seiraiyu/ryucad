@@ -45,24 +45,40 @@ impl Catalogue {
         let mut paths = Vec::new();
         walk(src, ITEMS, &mut paths)?;
         paths.sort();
+        // Read in path order (a source needn't be shared across threads),
+        // then parsed on threads, then gathered in path order again: the
+        // same items and faults as one by one, in a fraction of the time
+        // at 100,000 items (design 734's bar).
+        let mut read: Vec<Read> = Vec::with_capacity(paths.len());
+        for path in paths {
+            let got = match item_of(&path) {
+                Some(id) => src.read_shared(&path)?.map(|b| (id, b)),
+                None => None,
+            };
+            read.push((path, got));
+        }
+        let parsed = parse_all(&read);
         let mut items = BTreeMap::new();
         let mut faults = Vec::new();
-        for path in paths {
-            let Some(id) = item_of(&path) else {
+        for ((path, got), item) in read.iter().zip(parsed) {
+            let Some((id, _)) = got else {
+                if item_of(path).is_some() {
+                    continue; // listed, then gone
+                }
                 let mut e = ryu_doc::files::invalid(
                     "",
                     "not an item file: items/<first two characters of the ID>/<ID>.json",
                 )
-                .with("path", &path);
-                if let Some(name) = shard_of(&path).and_then(|n| Id::parse(n, "item").ok()) {
+                .with("path", path);
+                if let Some(name) = shard_of(path).and_then(|n| Id::parse(n, "item").ok()) {
                     e = e.with("expected", item_path(&name));
                 }
                 faults.push(e);
                 continue;
             };
-            match src.read(&path)?.map(|b| Item::read(&id, &b)) {
+            match item {
                 Some(Ok(item)) => {
-                    items.insert(id, item);
+                    items.insert(id.clone(), item);
                 }
                 Some(Err(e)) => faults.push(e),
                 None => {}
@@ -107,6 +123,35 @@ impl Catalogue {
             .with("item", s)
         })
     }
+}
+
+/// An item file's path, and its ID and bytes when it is one that reads.
+type Read = (String, Option<(Id, std::sync::Arc<[u8]>)>);
+
+/// Items parsed at or above this many go out on threads.
+const PARALLEL_FROM: usize = 256;
+
+/// Each read file parsed as its item, in order, on up to eight threads
+/// once there are many.
+fn parse_all(read: &[Read]) -> Vec<Option<Result<Item>>> {
+    let one = |(_, got): &Read| got.as_ref().map(|(id, b)| Item::read(id, b));
+    if read.len() < PARALLEL_FROM {
+        return read.iter().map(one).collect();
+    }
+    let threads = std::thread::available_parallelism()
+        .map_or(4, |n| n.get())
+        .min(8);
+    let per = read.len().div_ceil(threads);
+    std::thread::scope(|s| {
+        let handles: Vec<_> = read
+            .chunks(per)
+            .map(|chunk| s.spawn(move || chunk.iter().map(one).collect::<Vec<_>>()))
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().expect("a parsing thread doesn't panic"))
+            .collect()
+    })
 }
 
 #[cfg(test)]

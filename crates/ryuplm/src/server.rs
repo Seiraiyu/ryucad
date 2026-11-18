@@ -79,7 +79,11 @@ fn guarded<T>(
 ) -> Result<T> {
     let session = match slot {
         Some(s) => s,
-        None => slot.insert(Session::open(root)?),
+        None => {
+            let s = slot.insert(Session::open(root)?);
+            s.opened_now();
+            s
+        }
     };
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(session))) {
         Ok(r) => r,
@@ -251,6 +255,46 @@ fn dispatch(
                 working,
             },
         )?,
+        Request::ImportGuess {
+            file,
+            sheet,
+            delimiter,
+            encoding,
+            save,
+        } => crate::import::guess::answer(
+            session,
+            std::path::Path::new(&file),
+            sheet,
+            delimiter,
+            encoding,
+            save,
+        )?,
+        Request::ImportList {} => crate::import::list(session)?,
+        Request::ImportCheck { name, file, limit } => {
+            crate::import::preview::check(session, &name, std::path::Path::new(&file), limit)?
+        }
+        Request::ImportRun {
+            name,
+            file,
+            dry_run,
+            prefer,
+            limit,
+            expected_revision,
+        } => {
+            let prefer = prefer
+                .as_deref()
+                .map(crate::import::run::Prefer::parse)
+                .transpose()?;
+            crate::import::run::run(
+                session,
+                &name,
+                std::path::Path::new(&file),
+                dry_run,
+                prefer,
+                limit,
+                expected_revision.as_deref(),
+            )?
+        }
         Request::SettingsShow {} => settings::show(session)?,
         Request::SettingsEdit {
             change,

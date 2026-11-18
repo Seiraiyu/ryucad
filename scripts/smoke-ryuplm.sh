@@ -5,7 +5,8 @@
 # and listed, checked (the legacy number a warning), a duplicate refused,
 # a change undone and redone through the daemon, a kit's own line, its
 # BOM, a loop refused, where-used, the BOM diff and an unresolved link,
-# the activity log, the daemon's status and stop, and a check in process.
+# the activity log, an item master imported and imported again, the
+# daemon's status and stop, and a check in process.
 #
 #   scripts/smoke-ryuplm.sh path/to/ryuplm
 set -eu
@@ -105,6 +106,16 @@ has '"KIT-1"' "the BOM diff shows the kit's new line"
 run item link KIT-1 ryucad 0123456789abcdef0123456789abcdef kit
 run check
 has '"item_link_unresolved"' "a link no folder holds is a warning"
+# An item master through a mapping the agent saves: guessed, checked,
+# imported, imported again unchanged.
+printf 'Item ID,Part Number,Description\n9001,200-0001,Spacer\n9002,200-0002,Standoff\n' > master.csv
+run import guess master.csv --save erp
+has '"imports/erp.json"' "the mapping is saved"
+run import check erp master.csv
+run import run erp master.csv
+has '"written":2' "two items imported"
+run import run erp master.csv
+has '"written":0' "an unchanged re-import writes nothing"
 run daemon status
 has '"running":true' "a daemon is running"
 run daemon stop

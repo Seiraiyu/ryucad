@@ -15,7 +15,7 @@ use ryupdm::{PDM_CONFIG, RELEASES};
 use serde_json::Value;
 
 pub const ROOT_FILES: [&str; 3] = [MANIFEST, PDM_CONFIG, ".gitattributes"];
-pub const FOLDERS: [&str; 2] = [ITEMS, RELEASES];
+pub const FOLDERS: [&str; 3] = [ITEMS, RELEASES, crate::import::IMPORTS];
 
 impl ryu_git::Layout for Plm {
     const NAME: &'static str = crate::catalogue::NAME;
@@ -28,6 +28,7 @@ impl ryu_git::Layout for Plm {
             || rel
                 .strip_prefix("releases/")
                 .is_some_and(|f| f.matches('/').count() == 1)
+            || crate::import::name_of(rel).is_some()
     }
 }
 

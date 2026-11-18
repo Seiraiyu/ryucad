@@ -1179,6 +1179,19 @@ pub enum Code {
     BomLineTwice,
     /// Items whose BOM lines name each other in a loop (an error).
     BomCycle,
+    /// ryuplm import finding (a warning): a mapped field changed both in
+    /// the source and in the catalogue since the last import, to different
+    /// values. `details` has `item`, `key`, `row`, `field`, `base`,
+    /// `catalogue` and `source`; the field is left alone until
+    /// `--prefer source|catalogue` or an edit settles it.
+    ImportConflict,
+    /// ryuplm import finding (a warning): an item or a BOM line an import
+    /// made before is no longer in its source. Nothing is deleted.
+    ImportMissing,
+    /// An import mapping (`imports/<name>.json`) that doesn't read, names
+    /// a column the source hasn't, or a property, class or scheme the
+    /// catalogue doesn't declare (an error).
+    ImportMappingInvalid,
 }
 
 impl Code {
@@ -1578,6 +1591,9 @@ impl Code {
         Code::BomUnlinked,
         Code::BomLineTwice,
         Code::BomCycle,
+        Code::ImportConflict,
+        Code::ImportMissing,
+        Code::ImportMappingInvalid,
     ];
 
     /// The CLI's exit code: 1 the agent can fix it, 2 usage, 3 not a
@@ -1686,6 +1702,9 @@ mod tests {
             (Code::BomUnlinked, "bom_unlinked"),
             (Code::BomLineTwice, "bom_line_twice"),
             (Code::BomCycle, "bom_cycle"),
+            (Code::ImportConflict, "import_conflict"),
+            (Code::ImportMissing, "import_missing"),
+            (Code::ImportMappingInvalid, "import_mapping_invalid"),
             (Code::BomItemMissing, "bom_item_missing"),
         ] {
             assert_eq!(json!(c), json!(s));

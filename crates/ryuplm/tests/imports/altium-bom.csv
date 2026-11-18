@@ -1,0 +1,4 @@
+"Comment","Description","Designator","Footprint","LibRef","Quantity","Manufacturer 1","Manufacturer Part Number 1"
+"10k","Resistor, 1%, 0603","R1, R2, R5","R0603","RES","3","Ohmcraft Demo","OD-0603-10K"
+"100n","Capacitor, X7R, 0402","C1, C2, C3, C4","C0402","CAP","4","Farad Demo","FD-0402-104"
+"MCU","Microcontroller, QFN-32","U1","QFN32","MCU","1","Silicon Demo","SD-MCU-32"

@@ -3,7 +3,9 @@
 //! read back the same; a merge of three readable items must give a file
 //! that reads (or text with markers); textconv never panics; a catalogue
 //! of what reads is judged without panicking; ryueda's bom answer read
-//! and a joined BOM judged.
+//! and a joined BOM judged; an import mapping that reads writes
+//! canonically and reads back; the CSV and XLSX readers on any bytes never
+//! panic, nor does a small source planned through the seeded import.
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
@@ -12,7 +14,7 @@ use std::collections::BTreeMap;
 fuzz_target!(|data: &[u8]| {
     let Some((&mode, rest)) = data.split_first() else { return };
     let id = ryuplm::id::Id::parse("k3v9q2m8x4c1p", "item").unwrap();
-    match mode % 6 {
+    match mode % 10 {
         0 => {
             if let Ok(item) = ryuplm::item::Item::read(&id, rest) {
                 let text = item.to_text();
@@ -55,12 +57,50 @@ fuzz_target!(|data: &[u8]| {
                 let _ = ryuplm::bom::joined(&c, &mut reps, &ryuplm::reps::At::Working);
             }
         }
-        _ => {
+        5 => {
             // A small catalogue: the seeded one, with this item added.
             let mut f: BTreeMap<String, Vec<u8>> = ryuplm::testing::catalogue("fuzz", 12);
             f.insert(ryuplm::ids::item_path(&id), rest.to_vec());
             if let Ok(c) = ryuplm::load::Catalogue::load(&f) {
                 let _ = ryuplm::judge::all(&f, &c, &Default::default());
+            }
+        }
+        6 => {
+            // A mapping file: if it reads, it writes canonically and reads back.
+            if let Ok(m) = ryuplm::import::mapping::Mapping::read("fuzz", rest) {
+                let text = m.to_text();
+                assert!(ryuplm::canonical::is_canonical(&text));
+                assert_eq!(ryuplm::import::mapping::Mapping::read("fuzz", text.as_bytes()).unwrap(), m);
+            }
+        }
+        7 => {
+            // The CSV reader on any bytes, in a sniffed encoding and delimiter,
+            // and its table: never a panic.
+            let enc = ryuplm::import::text::sniff(rest);
+            if let Ok(s) = ryuplm::import::text::decode(rest, enc) {
+                let d = ryuplm::import::csv::sniff(&s);
+                if let Ok(raw) = ryuplm::import::csv::parse(&s, d) {
+                    let _ = ryuplm::import::rows::Table::from_raw(raw, 1);
+                }
+            }
+        }
+        8 => {
+            // The XLSX reader on any bytes.
+            let _ = ryuplm::import::xlsx::read(rest, None);
+            let _ = ryuplm::import::xlsx::sheets(rest);
+        }
+        _ => {
+            // A small source through the golden's mapping, planned against
+            // its catalogue: never a panic.
+            let (files, m, _, _) = ryuplm::testing::import_source("fuzz", 12);
+            if let Ok(s) = std::str::from_utf8(rest)
+                && let Ok(raw) = ryuplm::import::csv::parse(s, ',')
+                && let Ok(t) = ryuplm::import::rows::Table::from_raw(raw, 1)
+                && let Ok(cat) = ryuplm::load::Catalogue::load(&files)
+                && let Ok(config) = ryupdm::config::Config::read_in(&files, "ryuplm")
+                && let Ok((rows, _)) = ryuplm::import::records::map(&t, &m, &config, cat.manifest.default_unit)
+            {
+                let _ = ryuplm::import::run::plan(&files, &cat, &config, &m, &rows, None, 10);
             }
         }
     }

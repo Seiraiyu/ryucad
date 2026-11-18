@@ -1,0 +1,2 @@
+# Fixtures are bytes: line ends, a BOM's CRLF and Latin-1 kept as written.
+* -text

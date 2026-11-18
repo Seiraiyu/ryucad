@@ -402,6 +402,9 @@ class Code(str, Enum):
     BOM_UNLINKED = "bom_unlinked"
     BOM_LINE_TWICE = "bom_line_twice"
     BOM_CYCLE = "bom_cycle"
+    IMPORT_CONFLICT = "import_conflict"
+    IMPORT_MISSING = "import_missing"
+    IMPORT_MAPPING_INVALID = "import_mapping_invalid"
 
 
 #: Each code's exit class.
@@ -797,4 +800,7 @@ EXIT: dict[Code, int] = {
     Code.BOM_UNLINKED: 1,
     Code.BOM_LINE_TWICE: 1,
     Code.BOM_CYCLE: 1,
+    Code.IMPORT_CONFLICT: 1,
+    Code.IMPORT_MISSING: 1,
+    Code.IMPORT_MAPPING_INVALID: 1,
 }
