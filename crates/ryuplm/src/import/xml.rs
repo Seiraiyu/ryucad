@@ -6,7 +6,12 @@
 
 use super::rows::{Leaves, Refusal};
 use super::text::{self, Encoding};
-use roxmltree::Document;
+use roxmltree::{Document, Node};
+use std::collections::BTreeMap;
+
+/// The deepest element nesting read: deeper is refused, which bounds the
+/// recursion too.
+pub const MAX_DEPTH: usize = 128;
 
 /// Whether `p` is an element path: `/A/B` when absolute, `A/B` when not,
 /// each step a local name (no `@`, `[`, `]`, `:` or space).
@@ -23,11 +28,6 @@ pub fn path_ok(p: &str, absolute: bool) -> bool {
         && rest
             .split('/')
             .all(|s| !s.is_empty() && !s.contains(['@', '[', ']', ':', ' ']))
-}
-
-/// The records `bytes` hold (Task 7 of plan 8.A writes the reader).
-pub fn read(_bytes: &[u8], records: &str, _children: Option<&str>) -> Result<Vec<Leaves>, Refusal> {
-    Err(Refusal::file(format!("no records at {records}")))
 }
 
 /// The byte range of an XML declaration's `encoding="…"` at the start of
@@ -103,6 +103,136 @@ fn parse(text: &str) -> Result<Document<'_>, Refusal> {
     Document::parse(text).map_err(|e| Refusal::file(format!("not XML: {e}")))
 }
 
+/// The elements `steps` names below `from`, by local name, in document
+/// order.
+fn select<'a, 'i>(from: &[Node<'a, 'i>], steps: &[&str]) -> Vec<Node<'a, 'i>> {
+    let mut level = from.to_vec();
+    for &s in steps {
+        level = level
+            .iter()
+            .flat_map(|n| {
+                n.children()
+                    .filter(move |c| c.is_element() && c.tag_name().name() == s)
+            })
+            .collect();
+    }
+    level
+}
+
+/// The record elements at `records`, an absolute element path.
+fn records_at<'a, 'i>(doc: &'a Document<'i>, records: &str) -> Result<Vec<Node<'a, 'i>>, Refusal> {
+    let steps: Vec<&str> = records.trim_start_matches('/').split('/').collect();
+    let root = doc.root_element();
+    if root.tag_name().name() != steps[0] {
+        return Err(Refusal::file(format!(
+            "the root element is {:?}, not {:?} as records {records:?} says",
+            root.tag_name().name(),
+            steps[0]
+        )));
+    }
+    let found = select(&[root], &steps[1..]);
+    if found.is_empty() {
+        return Err(Refusal::file(format!("no records at {records}")));
+    }
+    Ok(found)
+}
+
+/// The records `bytes` hold, each its place and its leaves, children
+/// after their parent with `#level` when `children` is set.
+pub fn read(bytes: &[u8], records: &str, children: Option<&str>) -> Result<Vec<Leaves>, Refusal> {
+    let text = decode(bytes)?;
+    let doc = parse(&text)?;
+    let kids: Option<Vec<&str>> = children.map(|c| c.split('/').collect());
+    let depth = records.trim_start_matches('/').split('/').count();
+    let mut out = Vec::new();
+    for n in records_at(&doc, records)? {
+        record(&doc, n, kids.as_deref(), 0, depth, &mut out)?;
+    }
+    Ok(out)
+}
+
+/// Record `n`, pushed before its children so rows come in document order.
+fn record<'a, 'i>(
+    doc: &'a Document<'i>,
+    n: Node<'a, 'i>,
+    kids: Option<&[&str]>,
+    level: usize,
+    depth: usize,
+    out: &mut Vec<Leaves>,
+) -> Result<(), Refusal> {
+    let p = out.len();
+    let pos = doc.text_pos_at(n.range().start);
+    let place = format!("line {}, column {}", pos.row, pos.col);
+    out.push(Leaves {
+        place: place.clone(),
+        cells: Vec::new(),
+    });
+    let below = kids.map(|k| select(&[n], k)).unwrap_or_default();
+    let mut cells = Vec::new();
+    if kids.is_some() {
+        cells.push(("#level".to_owned(), level.to_string()));
+    }
+    flatten(n, "", &below, depth, &mut cells)
+        .map_err(|m| Refusal::at(p as u64 + 1, None, m).placed(Some(place.as_str())))?;
+    out[p].cells = cells;
+    let step = kids.map_or(0, <[&str]>::len);
+    for c in below {
+        record(doc, c, kids, level + 1, depth + step, out)?;
+    }
+    Ok(())
+}
+
+/// Element `n`'s leaves at `prefix`: its attributes, its own text, then
+/// each child element (`skip`, the child records, left out), a repeated
+/// name indexed from its second occurrence.
+fn flatten(
+    n: Node<'_, '_>,
+    prefix: &str,
+    skip: &[Node<'_, '_>],
+    depth: usize,
+    cells: &mut Vec<(String, String)>,
+) -> Result<(), String> {
+    if depth > MAX_DEPTH {
+        return Err("nested deeper than 128 levels".to_owned());
+    }
+    let join = |name: &str| {
+        if prefix.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{prefix}/{name}")
+        }
+    };
+    for a in n.attributes() {
+        cells.push((join(&format!("@{}", a.name())), a.value().to_owned()));
+    }
+    let text: String = n
+        .children()
+        .filter(|c| c.is_text())
+        .filter_map(|c| c.text())
+        .filter(|t| !t.trim().is_empty())
+        .collect();
+    if !text.is_empty() {
+        let at = if prefix.is_empty() { "." } else { prefix };
+        cells.push((at.to_owned(), text));
+    }
+    let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
+    for c in n.children().filter(|c| c.is_element()) {
+        if skip.contains(&c) {
+            continue;
+        }
+        let name = c.tag_name().name();
+        let k = seen.entry(name).or_insert(0);
+        *k += 1;
+        let step = if *k == 1 {
+            name.to_owned()
+        } else {
+            format!("{name}[{k}]")
+        };
+        flatten(c, &join(&step), skip, depth + 1, cells)?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,5 +283,86 @@ mod tests {
     fn a_dtd_is_refused() {
         let s = decode(b"<!DOCTYPE a [<!ENTITY x \"y\">]><a>&x;</a>").unwrap();
         assert!(parse(&s).is_err());
+    }
+
+    fn cells(l: &Leaves) -> Vec<(&str, &str)> {
+        l.cells
+            .iter()
+            .map(|(a, b)| (a.as_str(), b.as_str()))
+            .collect()
+    }
+
+    #[test]
+    fn records_flatten_to_attributes_and_element_text() {
+        let x = r#"<?xml version="1.0"?>
+<e:Export xmlns:e="urn:demo" xmlns:m="urn:mfr"><e:Items>
+  <e:Item id="1">
+    <e:Number>100-2</e:Number>
+    <e:Weight unit="kg">0.120</e:Weight>
+    <m:Alt><m:MPN>X1</m:MPN></m:Alt>
+    <m:Alt><m:MPN>X2</m:MPN></m:Alt>
+    <e:Note><![CDATA[a < b]]></e:Note>
+    <e:Empty/>
+  </e:Item>
+  <e:Item id="2">two</e:Item>
+</e:Items></e:Export>"#;
+        let r = read(x.as_bytes(), "/Export/Items/Item", None).unwrap();
+        assert_eq!(
+            cells(&r[0]),
+            [
+                ("@id", "1"),
+                ("Number", "100-2"),
+                ("Weight/@unit", "kg"),
+                ("Weight", "0.120"),
+                ("Alt/MPN", "X1"),
+                ("Alt[2]/MPN", "X2"),
+                ("Note", "a < b")
+            ]
+        );
+        assert_eq!(cells(&r[1]), [("@id", "2"), (".", "two")]);
+        assert_eq!(r[0].place, "line 3, column 3");
+    }
+
+    #[test]
+    fn children_follow_their_parent_with_a_level() {
+        let x = r#"<Parts><Part pn="A"><Uses><Part pn="B"><Uses><Part pn="C"/></Uses></Part><Part pn="D"/></Uses></Part><Part pn="E"/></Parts>"#;
+        let r = read(x.as_bytes(), "/Parts/Part", Some("Uses/Part")).unwrap();
+        let got: Vec<Vec<(&str, &str)>> = r.iter().map(cells).collect();
+        assert_eq!(
+            got,
+            vec![
+                vec![("#level", "0"), ("@pn", "A")],
+                vec![("#level", "1"), ("@pn", "B")],
+                vec![("#level", "2"), ("@pn", "C")],
+                vec![("#level", "1"), ("@pn", "D")],
+                vec![("#level", "0"), ("@pn", "E")],
+            ]
+        );
+    }
+
+    #[test]
+    fn xml_refusals_say_where() {
+        assert!(
+            read(b"<A><B/></A>", "/X/B", None)
+                .unwrap_err()
+                .message
+                .contains("root element")
+        );
+        assert!(
+            read(b"<A><B/></A>", "/A/C", None)
+                .unwrap_err()
+                .message
+                .contains("no records")
+        );
+        assert!(
+            read(b"<A><B>", "/A/B", None)
+                .unwrap_err()
+                .message
+                .contains("not XML")
+        );
+        let deep = format!("<A><B>{}x{}</B></A>", "<c>".repeat(130), "</c>".repeat(130));
+        let e = read(deep.as_bytes(), "/A/B", None).unwrap_err();
+        assert_eq!((e.row, e.place.as_deref()), (1, Some("line 1, column 4")));
+        assert!(e.message.contains("128"), "{}", e.message);
     }
 }
