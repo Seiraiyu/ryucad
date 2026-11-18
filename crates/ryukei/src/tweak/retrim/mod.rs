@@ -316,12 +316,10 @@ pub(crate) fn retrim_within(
         }
         .into()
     };
+    // Past the gap no build starts (`climb_within`, plan 23.B): a rung's
+    // working faces are unmetered, so a build past its cap could still
+    // take seconds.
     climb_within(narrow, &spent, fallback, |rung, which| {
-        // Past the gap no build starts (plan 23.B): a rung's working faces
-        // are unmetered, so a build past its cap could still take seconds.
-        if spent() {
-            return Some(Rung::Unchanged);
-        }
         if at.map(|a| a.0) != Some(rung) {
             // Polled, never charged: a rung's working faces and their
             // sheets are unmetered (13.D: NIST FTC 10's blends ran 17

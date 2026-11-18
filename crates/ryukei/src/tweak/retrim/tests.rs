@@ -756,6 +756,22 @@ fn a_ladder_stops_at_its_gap_with_its_last_finished_rungs_cause() {
     );
     assert_eq!(calls, [(0, Build::First), (1, Build::First)]);
     assert_eq!(at(&r), 10);
+    // A narrowed retry that spends the gap is discarded too, and so is a
+    // narrowed-only rung's build: nothing finished, `fallback`.
+    let spent = Cell::new(false);
+    let r = climb_within(Narrow::AfterUncertain, &|| spent.get(), fallback, |_, b| {
+        if b == Build::Retry {
+            spent.set(true);
+            return Some(walked(30));
+        }
+        Some(uncertain_rung())
+    });
+    assert_eq!(at(&r), 99);
+    // Spent before the ladder starts: no build at all.
+    let r = climb_within(Narrow::AfterUncertain, &|| true, fallback, |_, _| {
+        panic!("built past the gap")
+    });
+    assert_eq!(at(&r), 99);
     // Never spent: as `climb`, call for call and answer for answer.
     let script = |rung: usize, b: Build| {
         Some(match (rung, b) {
