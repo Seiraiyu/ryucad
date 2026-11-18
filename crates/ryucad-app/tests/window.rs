@@ -142,13 +142,23 @@ fn show_tab(h: &mut Harness<'static, App>, id: &str) {
 /// Runs frames until `done` holds. A timeout names the line that waited.
 #[track_caller]
 fn frames(h: &mut Harness<'static, App>, done: impl Fn(&App) -> bool) {
+    frames_for(h, 30, done);
+}
+
+/// [`frames`] with a bound of `secs`: for a wait on work that grows with
+/// what the tests before it left (the shared disk cache, #971).
+#[track_caller]
+fn frames_for(h: &mut Harness<'static, App>, secs: u64, done: impl Fn(&App) -> bool) {
     let t = Instant::now();
     loop {
         h.step();
         if done(h.state()) {
             return;
         }
-        assert!(t.elapsed() < Duration::from_secs(30), "timed out");
+        assert!(
+            t.elapsed() < Duration::from_secs(secs),
+            "timed out after {secs} s"
+        );
         std::thread::sleep(Duration::from_millis(20));
     }
 }
@@ -1054,12 +1064,23 @@ fn preferences_change_the_window_whoever_sets_them() {
         a.opened().dialogs.preferences && !a.opened().ws.session.settings.all.is_empty()
     });
     h.step();
-    // It says what the disk cache holds, and clears it.
-    frames(&mut h, |a| a.opened().ws.session.cache.is_some());
+    // It says what the disk cache holds, and clears it: the button is
+    // enabled only once the cache says it is (a click before that is
+    // lost, #971).
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .session
+            .cache
+            .as_ref()
+            .is_some_and(|c| c["enabled"] == true)
+    });
     h.step();
     h.get_by_role_and_label(egui::accesskit::Role::Button, "Clear cache")
         .click();
-    frames(&mut h, |a| {
+    // The cache is every earlier window test's (one folder for the test
+    // binary), so clearing it on a small runner can take a while.
+    frames_for(&mut h, 120, |a| {
         a.opened()
             .ws
             .session
