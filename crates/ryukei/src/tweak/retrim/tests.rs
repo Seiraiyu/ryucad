@@ -1697,6 +1697,94 @@ fn a_pin_that_must_grow_fails_its_walk() {
     assert!(matches!(r, Rung::Walked(_) | Rung::Next(_)), "{what}");
 }
 
+/// Design 919, plan 23.A: a wrong pin released. The raised block with its
+/// +y side pinned (21.A's wrong pin, on the side census VIII found the
+/// failing piece's arcs lie on): the narrowed build's walk fails
+/// `Clipped` at a working face and asks room first (Decision 3), never a
+/// release; built with the pin released, alone or with the room asked,
+/// the build builds the taller box, the side keeping its name. Here room
+/// never runs out (a flat face's near box doubles on its thin axis), so
+/// the narrowed rung answers as its first build did: the release through
+/// `narrowed_rung` is the twin's (`tests/retrim.rs`) and the
+/// `released_pin` golden's. In debug, as CI runs it.
+#[test]
+fn a_wrong_pin_released_builds_the_taller_box() {
+    use super::near::{Adjust, Adjusts};
+    use super::{Build, Rung, attempt_adjusted, narrowed_rung};
+    use std::collections::BTreeSet;
+    let b = block();
+    let changes = raised(&b, 0.2);
+    let changed = changes.motion.keys().copied().collect();
+    let whole = super::region::region(&b, &changed).grown(&b);
+    let bx = super::body::region_box(&b, &whole, super::reach(&b, &changes));
+    // unmetered: a unit test.
+    let m = crate::work::Meter::free();
+    let side = face_of(&b, FaceRole::PlusY);
+    let forced = BTreeSet::from([side]);
+    let build = |adjusts: &Adjusts| {
+        let mut ask = None;
+        let r = attempt_adjusted(
+            K,
+            &b,
+            &changes,
+            &whole,
+            &bx,
+            2,
+            Build::Only,
+            Some(&forced),
+            adjusts,
+            &mut ask,
+            &m,
+        );
+        (r, ask)
+    };
+    // The narrowed build alone: its walk fails, and room is asked first.
+    let (r, ask) = build(&Adjusts::new());
+    assert!(matches!(r, Rung::Walked(_)), "{}", what(&r));
+    let room = ask.expect("room asked");
+    assert!(!room.is_empty());
+    assert!(
+        room.values().all(|a| matches!(a, Adjust::Room(1))),
+        "{room:?}"
+    );
+    // Released alone, and released with the room asked kept: the build
+    // builds the taller box, and the side keeps its name.
+    let mut roomy = room.clone();
+    roomy.insert(side, Adjust::Released);
+    for adjusts in [Adjusts::from([(side, Adjust::Released)]), roomy] {
+        let (r, again) = build(&adjusts);
+        let Rung::Done(d) = r else {
+            panic!("{adjusts:?}: {}", what(&r));
+        };
+        let (o, _) = (*d).unwrap_or_else(|e| panic!("{adjusts:?}: {e:?}"));
+        assert!(again.is_none());
+        assert_eq!(crate::check::check(&o), []);
+        assert_eq!(crate::check::check_intersections(&o), []);
+        assert!(
+            (volume(&o) - 1.0 * 0.6 * 0.6).abs() < 1e-9,
+            "{}",
+            volume(&o)
+        );
+        assert!(
+            o.by_name(b.faces[side].name).is_some(),
+            "the side keeps its name"
+        );
+    }
+    // Room never runs out here: the narrowed rung's first answer stands.
+    let r = narrowed_rung(
+        K,
+        &b,
+        &changes,
+        &whole,
+        &bx,
+        2,
+        Build::Only,
+        Some(&forced),
+        &m,
+    );
+    assert!(matches!(r, Rung::Walked(_)), "{}", what(&r));
+}
+
 /// Plan 21.C: a walk that fails with no seed set in conflict reports its
 /// failure as before; the retry never runs. The raised block with its
 /// +x side wrongly pinned (21.A's test) fails its walk with no shortcut
