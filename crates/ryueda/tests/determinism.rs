@@ -119,7 +119,10 @@ fn ryueda_out(dir: &Path, threads: usize, args: &[&str], env: &[(&str, &str)]) -
 
 /// An exported file's hash with ryueda's version (which releases stamp
 /// in) written as `VERSION`; the manifest's without its revisions and
-/// version.
+/// version, nor each file's `blake3` and `bytes`: they hash the files as
+/// written, version and all, so a release's stamped version moved them
+/// (ryueda-release.yml's golden step, 5.D). Each file's own hash is a
+/// key of its own.
 fn export_hash(name: &str, bytes: &[u8]) -> String {
     let v = env!("CARGO_PKG_VERSION");
     let text = String::from_utf8_lossy(bytes).replace(&format!("ryueda,{v}"), "ryueda,VERSION");
@@ -127,6 +130,12 @@ fn export_hash(name: &str, bytes: &[u8]) -> String {
         let mut m: Value = serde_json::from_str(&text).unwrap();
         for k in ["board_revision", "project_revision", "ryueda"] {
             m.as_object_mut().unwrap().remove(k);
+        }
+        for f in m["files"].as_array_mut().into_iter().flatten() {
+            if let Some(f) = f.as_object_mut() {
+                f.remove("blake3");
+                f.remove("bytes");
+            }
         }
         ryueda::canonical::to_string(&m)
     } else {
