@@ -133,7 +133,7 @@ pub struct Track {
     pub points: Vec<Point>,
 }
 
-/// A plated through via.
+/// A plated via: through the board, or blind or buried over a span.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Via {
@@ -141,6 +141,22 @@ pub struct Via {
     pub at: Point,
     pub drill_nm: i64,
     pub diameter_nm: i64,
+    /// The first and last copper layers it joins; the top and the bottom
+    /// when absent (a through via).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<CopperLayer>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<CopperLayer>,
+}
+
+impl Via {
+    /// Its span as layer indices of `n`, if both layers exist and `from`
+    /// lies above `to`.
+    pub fn span(&self, n: usize) -> Option<(usize, usize)> {
+        let f = self.from.unwrap_or(CopperLayer::Top).index(n)?;
+        let t = self.to.unwrap_or(CopperLayer::Bottom).index(n)?;
+        (f < t).then_some((f, t))
+    }
 }
 
 /// An unplated drilled hole.

@@ -368,6 +368,8 @@ pub fn via_add(
             at,
             drill_nm: drill,
             diameter_nm: diameter,
+            from: None,
+            to: None,
         };
         w.put(route_path(&id, VIAS, &vid), &v, VIA_KIND);
         made.push(json!({"id": vid, "reference": format!("{id}:via/{vid}"), "via": super::file::value(&v, VIA_KIND)}));
