@@ -4,11 +4,12 @@
 #   scripts/stamp-version.sh v0.2.0          (ryucad's release tag)
 #   scripts/stamp-version.sh ryueda-v0.1.0   (ryueda's release tag)
 #   scripts/stamp-version.sh ryudfm-v0.1.0   (ryudfm's release tag)
+#   scripts/stamp-version.sh ryuplm-v0.1.0   (ryuplm's release tag)
 # ryucad's tags (v…) stamp the Python client's python/pyproject.toml too,
 # in PEP 440's form (design 697): vX.Y.Z as X.Y.Z, vX.Y.Z-pre.N as
 # X.Y.ZrcN, vX.Y.Z-dev (a dry run) as X.Y.Z.dev0; any other suffix is
-# refused before anything is written. A bare version and ryueda's and
-# ryudfm's tags leave it alone.
+# refused before anything is written. A bare version and ryueda's,
+# ryudfm's and ryuplm's tags leave it alone.
 # The version comes from the release tag, never from a file in the repo,
 # where the workspace version stays 0.0.0. Cargo.lock's workspace entries
 # are rewritten too, so `cargo build --locked` still works. Line endings
@@ -21,6 +22,7 @@ py=""
 case "$v" in
     ryueda-v*) v=${v#ryueda-v} ;;
     ryudfm-v*) v=${v#ryudfm-v} ;;
+    ryuplm-v*) v=${v#ryuplm-v} ;;
     v*) v=${v#v} ;;
 esac
 printf '%s\n' "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' ||

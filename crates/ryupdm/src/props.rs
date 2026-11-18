@@ -195,7 +195,9 @@ pub fn read_for<P: Product>(src: &dyn Source, part: &Id) -> Result<Properties> {
     let at = path_for::<P>(part);
     match crate::read_json_in(src, &at, P::NAME)? {
         None => Ok(Properties::default()),
-        Some(v) => Properties::from_json_in(&v, P::NAME).map_err(|e| e.with("path", &at)),
+        Some(v) => P::properties_from(&v)
+            .unwrap_or_else(|| Properties::from_json_in(&v, P::NAME))
+            .map_err(|e| e.with("path", &at)),
     }
 }
 

@@ -600,7 +600,7 @@ impl View {
     /// of where it landed when motion is reduced.
     pub fn turn(&mut self, ws: &mut Workspace, to: Camera) {
         self.framed = true;
-        ws.session.following = None;
+        ws.hand_moved();
         // From the next step, wherever it was asked for; with motion
         // reduced it is there now, and no step follows to share it (#603).
         if self.nav.turn_to(to, f64::NAN) {
@@ -784,7 +784,7 @@ impl View {
     fn frame_to(&mut self, ws: &mut Workspace, points: &[[f64; 3]]) {
         if !points.is_empty() {
             self.framed = true;
-            ws.session.following = None;
+            ws.hand_moved();
             // From the next frame's step: a menu or the toolbar runs this
             // before the viewport reads the frame's time.
             self.nav.fit_to(points, self.aspect(), f64::NAN);
@@ -816,12 +816,12 @@ impl View {
         self.frame_to(ws, points);
     }
 
-    /// The camera moved by this window's hand: following stops, and the
-    /// session hears of it.
+    /// The camera moved by this window's hand: following stops, following
+    /// the agents' work pauses, and the session hears of it.
     pub fn moved(&mut self, ws: &mut Workspace) {
         // The person's camera from now on, loaded or not.
         self.framed = true;
-        ws.session.following = None;
+        ws.hand_moved();
         ws.share_camera(&self.nav.camera);
     }
 
@@ -1577,6 +1577,38 @@ impl View {
                 ws.share_camera(&self.nav.camera);
             }
             ui.ctx().request_repaint();
+        }
+        // Following the agents' work (#812): what agents changed in the
+        // last 5 s kept in frame, eased out to and never in. A followed
+        // camera holds it, the first framing comes first, and a hand on
+        // the camera pauses it (`Workspace::hand_moved`).
+        if ws.follows_work() && self.framed && ws.view.work.pending() {
+            let now = std::time::Instant::now();
+            let picker = self.picker(ws);
+            let work = ws.view.work.bounds(now, &ws.model, picker);
+            let from = self
+                .nav
+                .turn
+                .as_ref()
+                .map_or(&self.nav.camera, |t| &t.to)
+                .clone();
+            let sight = crate::core::work::Sight {
+                camera: &from,
+                aspect: self.aspect(),
+                following: ws.session.following.is_some(),
+                every: ws.publish_every(),
+            };
+            if let Some(to) = ws.view.work.frame(now, &sight, work) {
+                // Eased there, as a turn to a view is.
+                if self.nav.turn_to(to, self.now) {
+                    ws.share_camera(&self.nav.camera);
+                }
+                ui.ctx().request_repaint();
+            }
+            // Look again when the pause or the last ease lapses.
+            if let Some(after) = ws.view.work.wake_in(now, sight.every) {
+                ui.ctx().request_repaint_after(after);
+            }
         }
         let aspect = f64::from(rect.width().max(1.0) / rect.height().max(1.0));
         let size = [f64::from(rect.width()), f64::from(rect.height())];

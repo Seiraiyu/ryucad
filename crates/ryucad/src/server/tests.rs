@@ -3613,7 +3613,8 @@ fn hello_registers_a_participant() {
         r["session"]["participants"],
         json!([{"id": id, "kind": "human", "name": "Dana", "status": null, "selection": [],
                 "camera": null, "highlights": [], "compare": null, "focus": null, "hidden": [],
-                "sections": [], "explode": null, "motion": null, "mode": "view"}])
+                "sections": [], "explode": null, "motion": null, "mode": "view",
+                "following": null}])
     );
     let list = call_live(&mut s, &mut live, Some(&id), "participant.list", json!({})).unwrap();
     assert_eq!(list, r["session"]);
@@ -4104,6 +4105,52 @@ fn an_agent_puts_the_human_into_a_compare() {
     assert_eq!(e.code, Code::NoLiveSession);
     let r = call(&mut s, "compare.get", json!({})).unwrap();
     assert_eq!(r, json!({"participant": null, "compare": null}));
+}
+
+/// `view.follow` (#812): an agent asks the one human's window to follow
+/// it; named, another; off stops it; nobody follows themselves; whoever
+/// leaves is let go; without a daemon there is no window.
+#[test]
+fn an_agent_asks_a_window_to_follow_it() {
+    let (_dir, mut s) = fresh();
+    let mut live = Live::new();
+    let agent = live.hello(live::Kind::Agent, None, None).unwrap();
+    let other = live
+        .hello(live::Kind::Agent, Some("reviewer"), None)
+        .unwrap();
+    let follow = |s: &mut Session, live: &mut Live, p: Value| {
+        call_live(s, live, Some(&agent), "view.follow", p)
+    };
+    // No human: the agent's own window, which can't follow itself.
+    let e = follow(&mut s, &mut live, json!({})).unwrap_err();
+    assert_eq!(e.code, Code::InvalidParam);
+    let human = live.hello(live::Kind::Human, Some("Dana"), None).unwrap();
+    let r = follow(&mut s, &mut live, json!({})).unwrap();
+    assert_eq!(r, json!({"participant": human, "following": agent}));
+    assert_eq!(
+        live.get(&human).unwrap().to_json()["following"],
+        json!(agent)
+    );
+    let r = follow(&mut s, &mut live, json!({"follow": "reviewer"})).unwrap();
+    assert_eq!(r["following"], json!(other));
+    let r = follow(&mut s, &mut live, json!({"off": true})).unwrap();
+    assert_eq!(r, json!({"participant": human, "following": null}));
+    for (p, code) in [
+        (json!({"follow": "nobody"}), Code::NotFound),
+        (json!({"follow": "reviewer", "off": true}), Code::Usage),
+        (json!({"follow": human}), Code::InvalidParam),
+        (json!({"participant": "p-ffffffff"}), Code::NotFound),
+    ] {
+        let e = follow(&mut s, &mut live, p.clone()).unwrap_err();
+        assert_eq!(e.code, code, "{p}");
+    }
+    // Whoever leaves is let go.
+    follow(&mut s, &mut live, json!({"follow": "reviewer"})).unwrap();
+    assert!(!live.goodbye(&other));
+    live.expire(std::time::Instant::now() + live::AGENT_EXPIRY);
+    assert_eq!(live.get(&human).unwrap().view.following, None);
+    let e = call(&mut s, "view.follow", json!({})).unwrap_err();
+    assert_eq!(e.code, Code::NoLiveSession);
 }
 
 #[test]

@@ -703,6 +703,21 @@ enum Command {
         #[arg(long = "of", value_name = "PARTICIPANT")]
         of: Option<String>,
     },
+    /// Ask a window to follow a participant's camera (#812): the one
+    /// human's window, or --for's, follows PARTICIPANT, else you; --off
+    /// stops it.
+    Follow {
+        #[arg(value_name = "PARTICIPANT", conflicts_with = "off")]
+        participant: Option<String>,
+        /// The window that follows: a participant's ID or name (the one
+        /// human's by default).
+        #[arg(long = "for", value_name = "PARTICIPANT")]
+        for_: Option<String>,
+        /// Stop following.
+        #[arg(long)]
+        off: bool,
+    },
+
     /// Wait for notifications from the project's daemon: what humans
     /// select, the model changing, and so on.
     Watch {
@@ -6125,6 +6140,16 @@ fn request(cmd: &Command) -> Option<Request> {
             project: *project,
             participant: of.clone(),
         },
+        Command::Follow {
+            participant,
+            for_,
+            off,
+        } => Request::ViewFollow {
+            follow: participant.clone(),
+            off: *off,
+            participant: for_.clone(),
+        },
+
         Command::Activity { limit, before } => Request::ActivityLog {
             limit: Some(*limit),
             before: *before,

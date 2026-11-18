@@ -683,6 +683,17 @@ fn boms_diffs_and_where_used_at_labels_and_in_checkouts() {
         release_board(&top, &board, &run, daemon);
         // The BOM: the passives line at A, with its number from the library.
         let bom = ok(&board, &run, daemon, &["bom"]);
+        // What ryuplm reads of this answer through `ryueda bom`
+        // (ryuplm::reps::eda_answer, design 734 plan 0.B): the schema,
+        // and each line's part, quantity, value, footprint and refdes.
+        // Changing them breaks ryuplm's BOMs of ryueda designs.
+        assert_eq!(bom["schema"], 1, "{bom}");
+        for l in bom["lines"].as_array().unwrap() {
+            assert!(l["part"].is_string() && l["quantity"].is_u64(), "{l}");
+            for k in ["value", "footprint", "refdes"] {
+                assert!(l[k].is_string(), "{k} in {l}");
+            }
+        }
         let line = bom["lines"]
             .as_array()
             .unwrap()

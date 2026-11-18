@@ -1,0 +1,48 @@
+//! Records the git commit and target triple for `ryuplm version`.
+
+use std::process::Command;
+
+fn git(args: &[&str]) -> Option<String> {
+    Command::new("git")
+        .args(args)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_owned())
+}
+
+fn main() {
+    // Release builds set RYUPLM_COMMIT; local builds ask git, and a build
+    // from a source archive reports `unknown`.
+    let commit = std::env::var("RYUPLM_COMMIT")
+        .ok()
+        .or_else(|| git(&["rev-parse", "--short=12", "HEAD"]))
+        .unwrap_or_else(|| "unknown".to_owned());
+    println!("cargo:rustc-env=RYUPLM_COMMIT={commit}");
+    println!(
+        "cargo:rustc-env=RYUPLM_TARGET={}",
+        std::env::var("TARGET").unwrap()
+    );
+    println!("cargo:rerun-if-env-changed=RYUPLM_COMMIT");
+    // Rerun when HEAD moves: a checkout changes HEAD, a commit changes the
+    // branch's ref (loose or packed).
+    if let Some(head) = git(&["rev-parse", "--git-path", "HEAD"]) {
+        println!("cargo:rerun-if-changed={head}");
+    }
+    if let Some(r) = git(&["symbolic-ref", "-q", "HEAD"])
+        && let Some(path) = git(&["rev-parse", "--git-path", &r])
+    {
+        println!("cargo:rerun-if-changed={path}");
+    }
+    // Only if it exists: Cargo reruns a build script whose watched file is
+    // missing on every build, and a fresh fetch (actions/checkout) has no
+    // packed-refs, so each fuzz job's run step rebuilt this crate, twice,
+    // after its build step had (9.5 minutes a job, plan 30.D). Packing a
+    // loose ref deletes it, which the watch above sees.
+    if let Some(packed) = git(&["rev-parse", "--git-path", "packed-refs"])
+        && std::path::Path::new(&packed).exists()
+    {
+        println!("cargo:rerun-if-changed={packed}");
+    }
+}

@@ -52,6 +52,10 @@ pub trait Product: Sized + Send + Sync + 'static {
     /// Adds a participant's view to its JSON, beside `id`, `kind`, `name`,
     /// `status`, `selection` and `highlights`.
     fn view_json(view: &Self::View, into: &mut Map<String, Value>);
+
+    /// Participant `gone` left the session: a view that names it lets it
+    /// go (ryucad's `following`, #812). Nothing by default.
+    fn left(_view: &mut Self::View, _gone: &str) {}
 }
 
 /// Work [`Serve::prepare`] found: run without the daemon's lock, it gives
@@ -199,6 +203,12 @@ pub(crate) mod testing {
 
         fn view_json(view: &Option<String>, into: &mut Map<String, Value>) {
             into.insert("camera".into(), json!(view));
+        }
+
+        fn left(view: &mut Option<String>, gone: &str) {
+            if view.as_deref() == Some(gone) {
+                *view = None;
+            }
         }
     }
 

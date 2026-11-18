@@ -11,7 +11,7 @@ use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 
 /// The protocol version. A CLI and a daemon talk only when theirs match.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// What `ryucad version` reports. Future cache keys are built from it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -2033,6 +2033,19 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         participant: Option<String>,
     },
+    /// Sets whom a participant's window follows (#812): `follow`, else
+    /// the caller; `off` stops it. Acts on `participant`, else the one
+    /// human, else the caller, as `view.focus` does.
+    #[serde(rename = "view.follow")]
+    ViewFollow {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        follow: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        off: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        participant: Option<String>,
+    },
+
     /// Sets the caller's own participant's mode: `view`, `annotate` or
     /// `edit`. No request sets another participant's.
     #[serde(rename = "participant.mode")]
@@ -2937,7 +2950,32 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(e.code, Code::InvalidDocument);
-        assert_eq!(PROTOCOL_VERSION, 3);
+        assert_eq!(PROTOCOL_VERSION, 4);
+    }
+
+    /// #812: whom a window follows, or off; no write, no mode needed. The
+    /// stage's one new method moves the protocol to 4.
+    #[test]
+    fn view_follow_names_whom_or_off() {
+        let r = Request::from_rpc(
+            "view.follow",
+            Some(json!({"follow": "agent", "participant": "p-1"})),
+        )
+        .unwrap();
+        assert_eq!(
+            r,
+            Request::ViewFollow {
+                follow: Some("agent".into()),
+                off: false,
+                participant: Some("p-1".into()),
+            }
+        );
+        assert_eq!(r.method(), "view.follow");
+        assert!(!r.mutates());
+        assert_eq!(r.needs(), None);
+        let off = Request::from_rpc("view.follow", Some(json!({"off": true}))).unwrap();
+        assert_eq!(off.params(), json!({"off": true}));
+        assert_eq!(PROTOCOL_VERSION, 4);
     }
 
     #[test]

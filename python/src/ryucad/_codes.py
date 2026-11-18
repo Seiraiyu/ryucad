@@ -392,6 +392,16 @@ class Code(str, Enum):
     DRC_COURTYARD_OVERLAP = "drc_courtyard_overlap"
     DRC_COURTYARD_OPEN = "drc_courtyard_open"
     DRC_FAILED = "drc_failed"
+    ITEM_NOT_FOUND = "item_not_found"
+    ITEM_CLASS_UNKNOWN = "item_class_unknown"
+    PART_NUMBER_UNSCHEMED = "part_number_unschemed"
+    PART_NUMBER_DUPLICATE_ELSEWHERE = "part_number_duplicate_elsewhere"
+    ITEM_LINK_DUPLICATE = "item_link_duplicate"
+    ITEM_LINK_UNRESOLVED = "item_link_unresolved"
+    ITEM_NUMBER_MISMATCH = "item_number_mismatch"
+    BOM_UNLINKED = "bom_unlinked"
+    BOM_LINE_TWICE = "bom_line_twice"
+    BOM_CYCLE = "bom_cycle"
 
 
 #: Each code's exit class.
@@ -777,4 +787,14 @@ EXIT: dict[Code, int] = {
     Code.DRC_COURTYARD_OVERLAP: 1,
     Code.DRC_COURTYARD_OPEN: 1,
     Code.DRC_FAILED: 1,
+    Code.ITEM_NOT_FOUND: 1,
+    Code.ITEM_CLASS_UNKNOWN: 1,
+    Code.PART_NUMBER_UNSCHEMED: 1,
+    Code.PART_NUMBER_DUPLICATE_ELSEWHERE: 1,
+    Code.ITEM_LINK_DUPLICATE: 1,
+    Code.ITEM_LINK_UNRESOLVED: 1,
+    Code.ITEM_NUMBER_MISMATCH: 1,
+    Code.BOM_UNLINKED: 1,
+    Code.BOM_LINE_TWICE: 1,
+    Code.BOM_CYCLE: 1,
 }

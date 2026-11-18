@@ -35,6 +35,9 @@ pub struct View {
     pub measure: Tool,
     /// Tools > Mass properties, once asked for.
     pub mass: Option<Mass>,
+    /// Following the agents' work (#812): their changes of the last 5 s,
+    /// a hand's pause and the last ease ([`crate::core::work`]).
+    pub work: crate::core::work::Work,
 }
 
 impl Workspace {

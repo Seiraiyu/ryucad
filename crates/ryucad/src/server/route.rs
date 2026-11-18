@@ -701,6 +701,12 @@ pub(crate) fn dispatch(
             project,
             participant,
         } => view::view_focus(session, live, me, part, project, participant),
+        Request::ViewFollow {
+            follow,
+            off,
+            participant,
+        } => view::view_follow(live, me, follow, off, participant),
+
         Request::VisibilitySet {
             hide,
             show,
