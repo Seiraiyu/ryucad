@@ -400,9 +400,14 @@ pub fn get(session: &mut crate::session::Session, ask: &Ask) -> crate::error::Re
     };
     let design = design_id(session.project(), ask.design)?;
     let (commit, then, config) = read_at(session, &design, ask.rev)?;
+    // The working netlist is the session's, flattened once per reading of
+    // the project (#976); a revision's is flattened here.
+    let n = match &then {
+        Some(t) => std::sync::Arc::new(crate::netlist::flatten(t, &design)?),
+        None => session.netlist(&design)?,
+    };
     let session: &crate::session::Session = session;
     let p: &Project = then.as_deref().unwrap_or(session.project());
-    let n = crate::netlist::flatten(p, &design)?;
     let build = if ask.build {
         crate::sourcing::config(p).build_quantity()
     } else {
