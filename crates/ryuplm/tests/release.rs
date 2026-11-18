@@ -321,3 +321,95 @@ fn next_skips_a_number_a_record_holds_after_its_item_is_deleted() {
     .unwrap();
     assert_eq!(next(&root), "MECH-00003");
 }
+
+#[test]
+fn a_first_release_continues_a_carried_legacy_label() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    git(&root, &["init", "-q", "-b", "main"]);
+    ryuplm::server::init(&root, None).unwrap();
+    for n in ["MECH-1", "MECH-2"] {
+        ask(
+            &root,
+            Request::ItemCreate {
+                fields: Default::default(),
+                number: Some(n.into()),
+                next: None,
+                expected_revision: None,
+            },
+        )
+        .unwrap();
+    }
+    std::fs::create_dir_all(root.join("imports")).unwrap();
+    std::fs::write(
+        root.join("imports/hist.json"),
+        ryuplm::canonical::to_string(&json!({"format": 2, "kind": "ryuplm.import",
+            "reader": {"type": "csv"}, "key": "PN", "fields": {"number": {"from": "PN"}},
+            "numbers": "keep", "history": {"revision": "Rev"}})),
+    )
+    .unwrap();
+    let csv = root.join("hist.csv");
+    std::fs::write(&csv, "PN,Rev\nMECH-1,A\nMECH-1,B\nMECH-1,C\nMECH-2,X3\n").unwrap();
+    let run = ask(
+        &root,
+        Request::ImportRun {
+            name: "hist".into(),
+            file: csv.display().to_string(),
+            dry_run: false,
+            prefer: None,
+            limit: None,
+            expected_revision: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(run["adopted"]["count"], 2, "{run}");
+    git(&root, &["add", "-A"]);
+    git(
+        &root,
+        &["commit", "-q", "-m", "items and their legacy history"],
+    );
+    git(&root, &["checkout", "-q", "-b", "rel"]);
+    let propose = |item: &str, dry_run: bool| {
+        ask(
+            &root,
+            Request::ReleasePropose {
+                items: vec![item.into()],
+                all: false,
+                dry_run,
+                note: None,
+                expected_revision: None,
+            },
+        )
+        .unwrap()
+    };
+    assert_eq!(propose("MECH-1", true)["items"][0]["label"], "D");
+    assert_eq!(propose("MECH-2", true)["items"][0]["label"], "A");
+    let p = propose("MECH-1", false);
+    assert_eq!(p["proposed"][0]["label"], "D");
+    assert!(
+        p["proposed"][0]["record"]
+            .get("supersedes")
+            .is_none_or(Value::is_null)
+    );
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-q", "-m", "MECH-1 at D"]);
+    let report = match ask(&root, Request::Check { within: vec![] }) {
+        Ok(v) => v,
+        Err(e) => e.details["report"].clone(),
+    };
+    let codes: Vec<&str> = report["faults"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["code"].as_str().unwrap())
+        .collect();
+    assert!(!codes.contains(&"release_sequence"), "{report}");
+    assert_eq!(
+        codes
+            .iter()
+            .filter(|c| **c == "item_history_label_foreign")
+            .count(),
+        1,
+        "MECH-2's X3, not MECH-1's C: {report}"
+    );
+}
