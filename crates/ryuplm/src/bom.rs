@@ -4,6 +4,8 @@
 //! and the diff build on it.
 
 use crate::error::{Code, Error, Result};
+use crate::fault::{Fault, Severity};
+use crate::reps::{At, Reps};
 use crate::ids::item_path;
 use crate::item::Line;
 use crate::session::Session;
@@ -340,6 +342,212 @@ pub fn remove(
     Ok(v)
 }
 
+/// Where a joined line comes from.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Origin {
+    /// The item's own line, by its line ID.
+    Own { line: Id },
+    /// A line of the item's representation `product` `project`:`part`,
+    /// by the representation's key, read at `rev`.
+    Rep {
+        product: String,
+        project: ProjectId,
+        part: Id,
+        key: String,
+        rev: String,
+    },
+}
+
+/// One line of an item's BOM, own or read.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Joined {
+    pub origin: Origin,
+    /// The child item: an own line's, or the item that links a
+    /// representation line's child; `None` when no item links it.
+    pub item: Option<ItemRef>,
+    /// A representation line's child: product, project (`None` for a
+    /// ryueda alias with no project) and part.
+    pub child: Option<(String, Option<ProjectId>, Id)>,
+    /// As written: an own line's text, a representation's count.
+    pub quantity: String,
+    pub unit: Option<String>,
+    pub find: Option<String>,
+    pub refdes: Option<String>,
+    pub notes: Option<String>,
+}
+
+impl Joined {
+    /// What tells it from the item's other lines, at any revision: an own
+    /// line's ID, a representation line's product, part and key.
+    pub fn key(&self) -> String {
+        match &self.origin {
+            Origin::Own { line } => format!("own:{line}"),
+            Origin::Rep {
+                product,
+                project,
+                part,
+                key,
+                ..
+            } => format!("{product}:{project}:{part}:{key}"),
+        }
+    }
+}
+
+/// The BOM of item `id` (design 734): its own lines, then each link's
+/// lines in product order, each child resolved to the item linking it
+/// (`linked`, from [`crate::links::linked`]). Faults, all warnings: a
+/// link whose lines can't be read (`item_link_unresolved`), the children
+/// no item links (`bom_unlinked`, one listing them), and each own line
+/// naming an item a representation places too (`bom_line_twice`).
+pub fn of(
+    cat: &Catalogue,
+    linked: &BTreeMap<crate::links::Key, Id>,
+    id: &Id,
+    reps: &mut dyn Reps,
+    at: &At,
+) -> (Vec<Joined>, Vec<Fault>) {
+    let item = &cat.items[id];
+    let own = &cat.manifest.project;
+    let mut lines: Vec<Joined> = item
+        .bom
+        .iter()
+        .map(|l| Joined {
+            origin: Origin::Own { line: l.line.clone() },
+            item: Some(l.item.clone()),
+            child: None,
+            quantity: l.quantity.clone(),
+            unit: l.unit.clone(),
+            find: l.find.clone(),
+            refdes: l.refdes.clone(),
+            notes: l.notes.clone(),
+        })
+        .collect();
+    let mut faults = Vec::new();
+    let mut unlinked = Vec::new();
+    let mut placed: BTreeSet<Id> = BTreeSet::new();
+    let mut links: Vec<&crate::item::Link> = item.links.iter().collect();
+    links.sort_by(|a, b| a.product.cmp(&b.product));
+    for link in links {
+        let read = match reps.lines(link, at) {
+            Ok(r) => r,
+            Err(e) => {
+                faults.push(Fault::of(Severity::Warning, e.with("item", id)));
+                continue;
+            }
+        };
+        for rl in read.lines {
+            let child_item = rl
+                .project
+                .as_ref()
+                .and_then(|p| linked.get(&(link.product.clone(), p.clone(), rl.part.clone())));
+            match child_item {
+                Some(c) => {
+                    placed.insert(c.clone());
+                }
+                None => unlinked.push(json!({
+                    "product": link.product, "project": rl.project, "part": rl.part, "key": rl.key,
+                })),
+            }
+            lines.push(Joined {
+                origin: Origin::Rep {
+                    product: link.product.clone(),
+                    project: link.project.clone(),
+                    part: link.part.clone(),
+                    key: rl.key.clone(),
+                    rev: read.rev.clone(),
+                },
+                item: child_item.map(|c| ItemRef {
+                    catalogue: None,
+                    item: c.clone(),
+                }),
+                child: Some((link.product.clone(), rl.project.clone(), rl.part.clone())),
+                quantity: rl.quantity.to_string(),
+                unit: None,
+                find: rl.find.clone(),
+                refdes: rl.refdes.clone(),
+                notes: None,
+            });
+        }
+    }
+    if !unlinked.is_empty() {
+        faults.push(Fault::of(
+            Severity::Warning,
+            Error::new(
+                Code::BomUnlinked,
+                format!(
+                    "item {id}: {} line(s) of its representations name parts no item links; link them to items",
+                    unlinked.len()
+                ),
+            )
+            .with("item", id)
+            .with("unlinked", unlinked),
+        ));
+    }
+    for (i, l) in item.bom.iter().enumerate() {
+        if let Some(c) = local(own, &l.item)
+            && placed.contains(c)
+        {
+            faults.push(Fault::of(
+                Severity::Warning,
+                Error::new(
+                    Code::BomLineTwice,
+                    format!(
+                        "item {id}: line {} names item {c}, which its representation places too; remove the line",
+                        l.line
+                    ),
+                )
+                .with("item", id)
+                .with("line", &l.line)
+                .with("child", c)
+                .with("pointer", format!("/bom/{i}")),
+            ));
+        }
+    }
+    (lines, faults)
+}
+
+/// A joined line as answers give it: `from` (`own`, `ryucad`, `ryueda`),
+/// its `line` ID or representation `key` and `rev`, the child `item`
+/// with its `number` and `name` when this catalogue holds it, the child
+/// `representation`, `quantity` and the line's optional fields.
+pub fn line_json(cat: &Catalogue, j: &Joined) -> Value {
+    let mut v = json!({"quantity": j.quantity});
+    match &j.origin {
+        Origin::Own { line } => {
+            v["from"] = json!("own");
+            v["line"] = json!(line);
+        }
+        Origin::Rep { product, key, rev, .. } => {
+            v["from"] = json!(product);
+            v["key"] = json!(key);
+            v["rev"] = json!(rev);
+        }
+    }
+    if let Some(r) = &j.item {
+        v["item"] = json!(r.text());
+        if let Some(c) = local(&cat.manifest.project, r).and_then(|c| cat.items.get(c)) {
+            v["number"] = json!(c.number);
+            if let Some(n) = &c.name {
+                v["name"] = json!(n);
+            }
+        }
+    }
+    if let Some((product, project, part)) = &j.child {
+        v["representation"] = json!({"product": product, "project": project, "part": part});
+    }
+    for (k, x) in [
+        ("unit", &j.unit),
+        ("find", &j.find),
+        ("refdes", &j.refdes),
+        ("notes", &j.notes),
+    ] {
+        if let Some(x) = x {
+            v[k] = json!(x);
+        }
+    }
+    v
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -530,5 +738,107 @@ pub(crate) mod tests {
         )
         .unwrap_err();
         assert_eq!(gone.code, Code::NotFound);
+    }
+
+    use crate::catalogue::tests::pid;
+    use crate::reps::{At, Fixed, RepLine};
+
+    pub(crate) fn link(product: &str, project: u8, part: &str) -> crate::item::Link {
+        crate::item::Link {
+            product: product.into(),
+            project: pid(project),
+            part: Id::parse(part, "part").unwrap(),
+        }
+    }
+
+    pub(crate) fn rep(project: Option<u8>, part: &str, quantity: u64) -> RepLine {
+        RepLine {
+            key: part.into(),
+            project: project.map(pid),
+            part: Id::parse(part, "part").unwrap(),
+            quantity,
+            find: None,
+            refdes: None,
+        }
+    }
+
+    /// A PCBA item 1 linked to a ryucad assembly `box` and a ryueda design
+    /// `main`, with own lines (glue, item 4; and the screw, item 2, which
+    /// the assembly places too); item 2 linked to ryucad `screw`, item 3
+    /// to ryueda `mcu` of library project 5.
+    pub(crate) fn pcba() -> (std::collections::BTreeMap<String, Vec<u8>>, Fixed) {
+        let mut a = Item::new("PCBA-1");
+        a.links = vec![link("ryucad", 3, "box"), link("ryueda", 4, "main")];
+        a.bom = vec![line(1, "0000000000004", "0.5"), line(2, "0000000000002", "4")];
+        a.bom[0].unit = Some("kg".into());
+        let mut screw = Item::new("SCREW-1");
+        screw.links = vec![link("ryucad", 3, "screw")];
+        let mut mcu = Item::new("MCU-1");
+        mcu.links = vec![link("ryueda", 5, "mcu")];
+        let f = files(
+            &[],
+            None,
+            &[
+                ("0000000000001", a),
+                ("0000000000002", screw),
+                ("0000000000003", mcu),
+                ("0000000000004", Item::new("GLUE-1")),
+            ],
+        );
+        let mut reps = Fixed::default();
+        reps.0.insert(
+            ("ryucad".into(), pid(3), Id::parse("box", "part").unwrap()),
+            vec![rep(Some(3), "screw", 4), rep(Some(3), "lid", 1)],
+        );
+        reps.0.insert(
+            ("ryueda".into(), pid(4), Id::parse("main", "part").unwrap()),
+            vec![rep(Some(5), "mcu", 1), rep(None, "c100n", 2)],
+        );
+        for (p, n) in [("ryucad", 3), ("ryueda", 5)] {
+            let part = if p == "ryucad" { "screw" } else { "mcu" };
+            reps.0.insert((p.into(), pid(n), Id::parse(part, "part").unwrap()), vec![]);
+        }
+        (f, reps)
+    }
+
+    #[test]
+    fn the_bom_is_own_lines_then_each_representations() {
+        let (f, mut reps) = pcba();
+        let cat = crate::load::Catalogue::load(&f).unwrap();
+        let linked = crate::links::linked(&cat);
+        let (lines, faults) = of(&cat, &linked, &id("0000000000001"), &mut reps, &At::Working);
+        let shown: Vec<serde_json::Value> = lines.iter().map(|j| line_json(&cat, j)).collect();
+        let got: Vec<(String, String, String)> = shown
+            .iter()
+            .map(|v| {
+                (
+                    v["from"].as_str().unwrap().to_owned(),
+                    v["number"].as_str().unwrap_or("-").to_owned(),
+                    v["quantity"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("own".into(), "GLUE-1".into(), "0.5".into()),
+                ("own".into(), "SCREW-1".into(), "4".into()),
+                ("ryucad".into(), "SCREW-1".into(), "4".into()),
+                ("ryucad".into(), "-".into(), "1".into()),
+                ("ryueda".into(), "MCU-1".into(), "1".into()),
+                ("ryueda".into(), "-".into(), "2".into()),
+            ]
+        );
+        assert_eq!(shown[0]["unit"], "kg");
+        assert_eq!(shown[2]["rev"], "working");
+        assert_eq!(shown[3]["representation"]["part"], "lid");
+        let codes: Vec<String> = faults
+            .iter()
+            .map(|f| serde_json::to_value(f.error.code).unwrap().as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(codes, ["bom_unlinked", "bom_line_twice"]);
+        assert_eq!(faults[0].error.details["unlinked"].as_array().unwrap().len(), 2);
+        assert_eq!(faults[1].error.details["pointer"], "/bom/1");
+        assert!(faults.iter().all(|f| !f.is_error()));
     }
 }
