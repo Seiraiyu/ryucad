@@ -239,6 +239,60 @@ pub(crate) fn adjusted(n: &Box3, x: &Box3, adjust: Option<Adjust>) -> Box3 {
     }
 }
 
+/// A released face's near box (design 919, plan 23.A): `own` (its
+/// [`near_box`]: its box grown by the reach floor, since it touches no
+/// change) joined with `near(g)` for each face `g` of `working` it shares
+/// an edge with, kept inside the rung's box `x`. It grows as far as the
+/// neighbours that push past it.
+pub(crate) fn released_box(
+    body: &Body,
+    f: FaceId,
+    own: &Box3,
+    x: &Box3,
+    working: &BTreeSet<FaceId>,
+    near: &dyn Fn(FaceId) -> Box3,
+) -> Box3 {
+    let b = super::region::edge_neighbours(body, f)
+        .into_iter()
+        .filter(|g| working.contains(g))
+        .fold(*own, |a, g| a.union(&near(g)));
+    within(&b, x).unwrap_or(*x)
+}
+
+/// Carried face `f`'s near box at `rung` as `adjusts` leave it: its
+/// [`near_box`] [`adjusted`], or where `adjusts` releases it, its
+/// [`released_box`] over the faces of `carried` (the build's working
+/// faces) that aren't released themselves (so no box waits on another's).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn near_of(
+    body: &Body,
+    changes: &Changes,
+    region: &Region,
+    f: FaceId,
+    x: &Box3,
+    rung: usize,
+    adjusts: &Adjusts,
+    carried: &BTreeSet<FaceId>,
+) -> Box3 {
+    let plain = |g: FaceId| {
+        adjusted(
+            &near_box(body, changes, region, g, x, rung),
+            x,
+            adjusts.get(&g).copied(),
+        )
+    };
+    if adjusts.get(&f) != Some(&Adjust::Released) {
+        return plain(f);
+    }
+    let working: BTreeSet<FaceId> = carried
+        .iter()
+        .copied()
+        .filter(|g| adjusts.get(g) != Some(&Adjust::Released))
+        .collect();
+    let own = near_box(body, changes, region, f, x, rung);
+    released_box(body, f, &own, x, &working, &plain)
+}
+
 /// Room for the working faces `clipped` (design 724, plan 22.A): those
 /// whose piece a narrowed build's walk found clipped, or whose clipped
 /// side that piece reached. `adjusts` with each of them and every face of
@@ -247,7 +301,8 @@ pub(crate) fn adjusted(n: &Box3, x: &Box3, adjust: Option<Adjust>) -> Box3 {
 /// where none of their near boxes would grow (each already the rung's
 /// box `x`): that build would repeat the last.
 /// `None` too where any of them is kept off a pin (a face is adjusted
-/// one way only).
+/// one way only). A released face is passed over: its neighbours' room
+/// carries it.
 pub(crate) fn room(
     body: &Body,
     working: &BTreeSet<FaceId>,
@@ -338,7 +393,8 @@ pub(crate) fn cut_short(n: &Box3, sheet: &Box3, must: &Box3, pin: &Box3, gap: f6
 /// Working face `f` kept off a pin (design 724, plan 22.B): `adjusts`
 /// with `f`'s near box, `now` as adjusted so far, cut back by
 /// [`cut_short`] (`sheet`, `must`, `pin` and `gap` as there). `None`
-/// where no side can be cut. `None` too where `f` was given room.
+/// where no side can be cut. `None` too where `f` was given room or
+/// released.
 pub(crate) fn kept_off(
     f: FaceId,
     now: &Box3,
@@ -348,8 +404,8 @@ pub(crate) fn kept_off(
     gap: f64,
     adjusts: &Adjusts,
 ) -> Option<Adjusts> {
-    // A face is adjusted one way only (design 724).
-    if matches!(adjusts.get(&f), Some(Adjust::Room(_))) {
+    // A face is adjusted one way only (design 724, plan 23.A).
+    if matches!(adjusts.get(&f), Some(Adjust::Room(_) | Adjust::Released)) {
         return None;
     }
     let cut = cut_short(now, sheet, must, pin, gap)?;
@@ -904,5 +960,92 @@ pub(crate) mod tests {
             let rest: BTreeSet<FaceId> = ring.faces.difference(&fewer).copied().collect();
             assert!(super::super::region::pinches(&r, &rest).is_empty(), "{p:?}");
         }
+    }
+
+    /// Design 919, plan 23.A: a released face's near box holds its own
+    /// near box and the near boxes, as adjusted, of the carried faces it
+    /// shares an edge with, inside the rung's box; other faces' boxes are
+    /// as `adjusted` leaves them. The raised block over the whole body,
+    /// its bottom released: it holds each side's near box, and a side's
+    /// room too.
+    #[test]
+    fn a_released_faces_near_box_holds_its_working_neighbours() {
+        use super::super::tests::{face_of, raised};
+        use crate::name::FaceRole;
+        let b = block();
+        let changes = raised(&b, 0.2);
+        let changed = changes.motion.keys().copied().collect();
+        let whole = region(&b, &changed).grown(&b);
+        let x = rung_box(&b, &changes, &whole);
+        let bottom = face_of(&b, FaceRole::MinusZ);
+        let px = face_of(&b, FaceRole::PlusX);
+        let carried: BTreeSet<FaceId> = b.faces().collect();
+        let plain = |g: FaceId, a: &Adjusts| {
+            adjusted(
+                &near_box(&b, &changes, &whole, g, &x, 2),
+                &x,
+                a.get(&g).copied(),
+            )
+        };
+        let a = Adjusts::from([(bottom, Adjust::Released)]);
+        let r = near_of(&b, &changes, &whole, bottom, &x, 2, &a, &carried);
+        assert!(holds(&x, &r));
+        assert!(holds(&r, &near_box(&b, &changes, &whole, bottom, &x, 2)));
+        let sides = super::super::region::edge_neighbours(&b, bottom);
+        assert_eq!(sides.len(), 4);
+        assert!(!sides.contains(&bottom));
+        for &s in &sides {
+            assert!(holds(&r, &plain(s, &a)), "{s:?}");
+        }
+        // Not released: `adjusted`'s box.
+        assert_eq!(
+            near_of(&b, &changes, &whole, px, &x, 2, &a, &carried),
+            plain(px, &a)
+        );
+        // A side given room: the released box holds the side's room.
+        let roomy = Adjusts::from([(bottom, Adjust::Released), (px, Adjust::Room(2))]);
+        let r2 = near_of(&b, &changes, &whole, bottom, &x, 2, &roomy, &carried);
+        assert!(holds(&r2, &plain(px, &roomy)));
+        // A neighbour that isn't carried (a pin, a deleted face) adds nothing.
+        let only_bottom: BTreeSet<FaceId> = BTreeSet::from([bottom]);
+        assert_eq!(
+            near_of(&b, &changes, &whole, bottom, &x, 2, &a, &only_bottom),
+            near_box(&b, &changes, &whole, bottom, &x, 2)
+        );
+    }
+
+    /// Plan 23.A: a released face is adjusted one way only. Room asked for
+    /// it never gives it room of its own (its neighbours' carries it); it
+    /// is never kept off a pin. The rounded block's low ball deleted, as
+    /// `a_face_is_adjusted_one_way_only` has it.
+    #[test]
+    fn a_released_face_takes_no_room_and_no_cut() {
+        let (r, low, _) = rounded();
+        let changes = Changes {
+            deleted: BTreeSet::from([low]),
+            ..Default::default()
+        };
+        let region = region(&r, &BTreeSet::from([low]));
+        let x = rung_box(&r, &changes, &region);
+        let working: BTreeSet<FaceId> =
+            region.faces.iter().copied().filter(|&f| f != low).collect();
+        let near = |g: FaceId| near_box(&r, &changes, &region, g, &x, 0);
+        let f = *working.iter().next().unwrap();
+        let clipped = BTreeSet::from([f]);
+        // Unreleased, it is given room (as in `a_face_is_adjusted_one_way_only`).
+        assert!(room(&r, &working, &clipped, &x, &Adjusts::new(), &near).is_some());
+        let a = Adjusts::from([(f, Adjust::Released)]);
+        let out = room(&r, &working, &clipped, &x, &a, &near);
+        assert!(
+            out.as_ref()
+                .is_none_or(|o| o.get(&f) == Some(&Adjust::Released)),
+            "{out:?}"
+        );
+        let n = cube([0.0; 3], [1.0; 3]);
+        let must = cube([0.1; 3], [0.4, 0.5, 0.5]);
+        let pin = cube([0.7, 0.2, 0.9], [1.2, 0.4, 1.2]);
+        assert_eq!(kept_off(f, &n, &n, &must, &pin, 1e-6, &a), None);
+        // Unreleased, the same cut is asked.
+        assert!(kept_off(f, &n, &n, &must, &pin, 1e-6, &Adjusts::new()).is_some());
     }
 }
