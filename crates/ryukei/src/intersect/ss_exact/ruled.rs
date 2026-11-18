@@ -41,11 +41,12 @@
 //!   grows each branch's tolerance to its certified pcurve bounds.
 //!
 //! Not one of [`super::exact`]'s pairs: `ss::meet` tries it only after a
-//! trace fails, or after a trace's fit fails (FTC 07 AP242's pin traces
-//! in chains no fit certifies; census VII, a departure from design 724's
-//! "after a failed trace"), never inside a re-trim rung's first build
+//! trace's fit fails (FTC 07 AP242's pin traces in chains no fit
+//! certifies; census VII), never inside a re-trim rung's first build
 //! (the tube contact's gate), so every pair that traces and fits keeps
-//! its result. A unit a chart, a root and a span.
+//! its result. Design 724 placed it after a failed trace, but no input
+//! fails the trace (the suites and 3,000 seeded grazes), so a failed
+//! trace refuses as before. A unit a chart, a root and a span.
 
 use super::Out;
 use crate::geom::bernstein::{Bernstein, Root};

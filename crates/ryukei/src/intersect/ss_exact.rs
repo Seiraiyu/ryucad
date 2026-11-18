@@ -1465,9 +1465,9 @@ mod tests {
         }
     }
 
-    /// Plan 22.D: the ruled form is tried only where a trace fails. A
-    /// pair that traces (crossing cylinders of unequal radii, as in
-    /// `cylinders`) never reaches it, and its result is the trace's.
+    /// Plan 22.D: the ruled form is tried only where a trace's fit fails.
+    /// A pair that traces and fits (crossing cylinders of unequal radii,
+    /// as in `cylinders`) never reaches it, and its result is the trace's.
     #[test]
     fn a_pair_that_traces_never_tries_the_ruled_form() {
         let a = cylinder((0.0, 0.0, 0.0), (0.0, 0.0, 1.0), 1.0);
@@ -1476,5 +1476,50 @@ mod tests {
         let (branches, _) = meet(&a, &b);
         assert_eq!(kinds(&branches), [("nurbs", false), ("nurbs", false)]);
         assert_eq!(RULED_TRIED.with(|n| n.get()), 0);
+    }
+
+    /// Plan 22.D: small cylinders grazing a cone, or a cylinder, from
+    /// outside, whose traces certify but whose fits don't (three of the
+    /// seven a seeded search over 3,000 grazes found; none failed its
+    /// trace). Once the fit fails the ruled form answers: one loop, on
+    /// both surfaces within its tolerance (`meet` checks it).
+    #[test]
+    fn a_graze_whose_fit_fails_meets_in_closed_form() {
+        for (half, r, h, gap, dir) in [
+            (
+                0.03997378512510262,
+                0.2083099176328494,
+                0.11155690126174012,
+                0.0,
+                (-0.06688168831964553, 1.0, -0.09095731954698788),
+            ),
+            (
+                0.1494292570451618,
+                0.1205958919920377,
+                0.2918175410011643,
+                -1.4598346116141462e-7,
+                (-0.07226776152543693, 1.0, -0.026671110624478467),
+            ),
+            (
+                0.0,
+                0.029670074142890857,
+                0.18184593127466941,
+                -5.496106689363508e-7,
+                (-0.09825026828096414, 1.0, -0.2542895544595207),
+            ),
+        ] {
+            let other = if half == 0.0 {
+                cylinder((0.0, 0.0, 0.0), (0.0, 0.0, 1.0), 1.0)
+            } else {
+                cone((0.0, 0.0, 0.0), (0.0, 0.0, 1.0), 1.0, half)
+            };
+            let wall = 1.0 + h * math::tan(half);
+            let pin = cylinder((wall + (r + gap), 0.0, h), dir, r);
+            RULED_TRIED.with(|n| n.set(0));
+            let (branches, points) = meet(&pin, &other);
+            assert!(RULED_TRIED.with(|n| n.get()) > 0, "{half} {r}");
+            assert_eq!((branches.len(), points.len()), (1, 0), "{half} {r}");
+            assert!(!branches[0].tangent);
+        }
     }
 }

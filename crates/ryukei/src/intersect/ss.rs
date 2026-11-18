@@ -2,8 +2,8 @@
 //!
 //! A coincident pair is reported as such; a pair with a closed form
 //! ([`super::ss_exact`]) gets exact curves; a cylinder against a cone or
-//! cylinder whose trace or its fit fails gets the closed form through
-//! its rulings ([`super::ss_exact::ruled`], plan 22.D); any other
+//! cylinder whose trace certifies but whose fit fails gets the closed
+//! form through its rulings ([`super::ss_exact::ruled`], plan 22.D); any other
 //! analytic pair is
 //! traced ([`super::ss_trace`]) and fitted ([`super::fit`]), and any other
 //! surface (a pipe, a NURBS, a swept surface) and an analytic one are
@@ -140,18 +140,13 @@ pub(crate) fn meet(
     let topo = match trace(a, b, region, m) {
         Ok(t) => t,
         // A cylinder continuing a torus's tube is tangent to it all along
-        // a circle, where no trace certifies (#652, FTC 10; plan 20.B),
-        // and a cylinder grazing a cone (#658, FTC 07 AP242; plan 22.D)
-        // or a cylinder of another radius or on a skew axis is settled by
-        // its rulings: closed forms tried only once the trace has failed,
-        // so every pair that traces keeps its result; and never in a
-        // re-trim rung's first build, whose `Uncertain` the narrowed
-        // retry answers today (19.A's bent rod), so it keeps its bits.
+        // a circle, where no trace certifies (#652, FTC 10; plan 20.B):
+        // its closed form, tried only once the trace has failed, so every
+        // pair that traces keeps its result; and never in a re-trim
+        // rung's first build, whose `Uncertain` the narrowed retry
+        // answers today (19.A's bent rod), so it keeps its bits.
         Err(Failure::Uncertain) if !m.in_first_build() => {
-            if let Some((raws, points)) = ss_exact::tube(a, b, region) {
-                return exact_hit(raws, points, [a, b], m);
-            }
-            return match ss_exact::ruled(a, b, region, m)? {
+            return match ss_exact::tube(a, b, region) {
                 Some((raws, points)) => exact_hit(raws, points, [a, b], m),
                 None => Err(Failure::Uncertain),
             };
@@ -172,11 +167,16 @@ pub(crate) fn meet(
     let mut points = topo.points;
     let branches = match fitted(&chains, order, swapped, &mut points, m) {
         Ok(branches) => branches,
-        // A cylinder against a cone or cylinder can trace and still fail
-        // its fit: FTC 07 AP242's pin through its bore's wall (#658, plan
-        // 22.D, census VII) traces in three chains no fit certifies. Its
-        // rulings settle it, behind the same gate: only once the fit has
-        // failed, and never in a re-trim rung's first build.
+        // A cylinder grazing a cone (#658, FTC 07 AP242's pin through its
+        // bore's wall; plan 22.D, census VII) or a cylinder of another
+        // radius or on a skew axis can trace and still fail its fit: its
+        // rulings settle it in closed form, tried only once the fit has
+        // failed, so every pair that traces and fits keeps its result,
+        // and never in a re-trim rung's first build (the tube contact's
+        // gate). Design 724 placed it after a failed trace; no input
+        // fails the trace (the suites, 3,000 seeded grazes), so it is
+        // tried at the fit's failure, and a failed trace refuses as
+        // before.
         Err(Failure::Uncertain) if !m.in_first_build() => {
             return match ss_exact::ruled(a, b, region, m)? {
                 Some((raws, points)) => exact_hit(raws, points, [a, b], m),
