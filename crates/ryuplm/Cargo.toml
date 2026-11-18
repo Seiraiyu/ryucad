@@ -1,0 +1,40 @@
+[package]
+name = "ryuplm"
+description = "Product lifecycle management: a catalogue of items, part numbers and BOMs in Git, independent of any authoring tool, and the agent CLI"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+# Content hashes and revisions: Rust only.
+blake3 = { version = "1", features = ["pure"] }
+clap = { version = "4", features = ["derive"] }
+# Item IDs and project IDs.
+getrandom = "0.3"
+# Release history and tags, read through ryupdm's own gix.
+gix = { version = "0.89", default-features = false, features = ["sha1", "revision"] }
+ryu-doc = { path = "../ryu-doc" }
+ryu-git = { path = "../ryu-git" }
+ryu-session = { path = "../ryu-session" }
+# AML names and lifecycles, shared with ryueda's part data (no project).
+ryueda-parts = { path = "../ryueda-parts" }
+# Revisions, releases, states, the commit guard: ryupdm's core only. Its
+# `cad` feature would pull ryucad-doc.
+ryupdm = { path = "../ryupdm", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+
+[features]
+# Seeded catalogues for this crate's tests and the fuzz target.
+testing = []
+
+[dev-dependencies]
+assert_cmd = "2"
+ryuplm = { path = ".", features = ["testing"] }
+tempfile = "3"
+
+# musl's allocator is slow under multithreaded allocation, as for ryucad,
+# ryueda and ryudfm.
+[target.'cfg(target_env = "musl")'.dependencies]
+mimalloc = "0.1"

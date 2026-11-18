@@ -239,10 +239,14 @@ pub fn install(here: &Path, local: bool, d: &Drivers, isolated: bool) -> Result<
 
 /// Every ryu product that writes a line in the shared hook: a line of
 /// someone's own hook whose program is one of them is that product's.
-pub const PRODUCTS: [&str; 2] = ["ryucad", "ryueda"];
+pub const PRODUCTS: [&str; 3] = ["ryucad", "ryueda", "ryuplm"];
 
 /// The line that marks the shared hook.
-const HEADER: &str = "# ryu: refuse a merge commit while a ryu project's merge is unresolved (`ryucad git install`, `ryueda git install`)";
+const HEADER: &str = "# ryu: refuse a merge commit while a ryu project's merge is unresolved (`ryucad git install`, `ryueda git install`, `ryuplm git install`)";
+
+/// The line that marked the shared hook before ryuplm joined it: a clone
+/// installed then still has its hook read as the shared one.
+const TWO_HEADER: &str = "# ryu: refuse a merge commit while a ryu project's merge is unresolved (`ryucad git install`, `ryueda git install`)";
 
 /// The line that marked ryucad's own hook before the shared one.
 const RYUCAD_HEADER: &str = "# ryucad: refuse a merge commit while a ryucad project's merge is unresolved (`ryucad git install`)";
@@ -286,7 +290,7 @@ fn managed(text: &str) -> Option<BTreeMap<String, String>> {
         let l = l.strip_suffix(" || exit 1").unwrap_or(l);
         l.strip_suffix(&format!(" {HOOK_CHECK}")).map(str::to_owned)
     };
-    if lines.contains(&HEADER) {
+    if lines.contains(&HEADER) || lines.contains(&TWO_HEADER) {
         let mut out = BTreeMap::new();
         for w in lines.windows(2) {
             if let Some(p) = w[0].strip_prefix("# ")
@@ -551,6 +555,28 @@ mod tests {
         // Installing again changes nothing.
         install(r, true, &cad, true).unwrap();
         assert_eq!(std::fs::read_to_string(hook_at(r)).unwrap(), both);
+    }
+
+    #[test]
+    fn a_hook_from_before_ryuplm_is_still_the_shared_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = dir.path();
+        git(r, &["init", "-q"]);
+        std::fs::create_dir_all(r.join(".git/hooks")).unwrap();
+        let old = format!(
+            "#!/bin/sh\n{TWO_HEADER}\n# ryucad\n'/opt/ryucad' merge status --hook || exit 1\n# ryueda\nexec '/opt/ryueda' merge status --hook\n"
+        );
+        std::fs::write(hook_at(r), &old).unwrap();
+        let (cad, eda) = (cad(), eda());
+        for d in [&cad, &eda] {
+            assert!(matches!(
+                setup(r, d, true).unwrap().hooks[0].1,
+                Hook::Installed(_)
+            ));
+        }
+        let lines = managed(&old).unwrap();
+        assert_eq!(lines["ryueda"], "'/opt/ryueda'");
+        assert!(PRODUCTS.contains(&"ryuplm"));
     }
 
     #[test]

@@ -2,9 +2,9 @@ ryucad
 Copyright 2026 Seiraiyu
 
 This product is licensed under the Apache License, Version 2.0 (see
-LICENSE). It covers the ryucad, ryukei, ryupdm, ryueda and ryudfm crates
-and everything else in this repository unless a file or its folder says
-otherwise.
+LICENSE). It covers the ryucad, ryukei, ryupdm, ryueda, ryudfm and
+ryuplm crates and everything else in this repository unless a file or its
+folder says otherwise.
 
 Third-party material kept under its own licence:
 

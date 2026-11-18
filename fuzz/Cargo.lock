@@ -2646,6 +2646,7 @@ dependencies = [
  "ryukei-testkit",
  "ryumate",
  "ryupdm",
+ "ryuplm",
  "ryusch",
  "ryusketch",
  "ryustep",
@@ -2690,6 +2691,24 @@ dependencies = [
  "serde",
  "serde_json",
  "ureq",
+]
+
+[[package]]
+name = "ryuplm"
+version = "0.0.0"
+dependencies = [
+ "blake3",
+ "clap",
+ "getrandom 0.3.4",
+ "gix",
+ "mimalloc",
+ "ryu-doc",
+ "ryu-git",
+ "ryu-session",
+ "ryueda-parts",
+ "ryupdm",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

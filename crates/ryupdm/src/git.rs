@@ -44,6 +44,27 @@ pub fn textconv(
 ) -> bool {
     match kind {
         crate::config::KIND => {
+            // Numbering schemes (format 5), a line each; a format 1
+            // `{pattern}` stays with the generic flattener.
+            if rest
+                .get("part_number")
+                .is_some_and(|p| p.get("schemes").is_some())
+                && let Some(Value::Object(mut pn)) = rest.remove("part_number")
+            {
+                if let Some(Value::Array(schemes)) = pn.remove("schemes") {
+                    for s in &schemes {
+                        let name = s["name"].as_str().unwrap_or("?");
+                        let mut rest = s.clone();
+                        if let Some(o) = rest.as_object_mut() {
+                            o.remove("name");
+                        }
+                        lines.push(format!("part_number.schemes.{name} = {rest}"));
+                    }
+                }
+                for (k, v) in pn {
+                    lines.push(format!("part_number.{k} = {v}"));
+                }
+            }
             if let Some(Value::Object(decls)) = rest.remove("properties") {
                 for (name, d) in &decls {
                     lines.push(format!("properties.{name} = {}", declaration(d)));
@@ -183,6 +204,25 @@ mod tests {
             ]
         );
         assert_eq!(rest.keys().collect::<Vec<_>>(), ["release_branch"]);
+        let mut rest: Map<String, Value> = json!({
+            "part_number": {"schemes": [{"name": "mech", "pattern": "M-\\d+", "next": "M-{seq:3}"}]}
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let (mut lines, mut last) = (Vec::new(), Vec::new());
+        assert!(textconv(
+            crate::config::KIND,
+            &mut rest,
+            &mut lines,
+            &mut last,
+            &flat
+        ));
+        assert_eq!(
+            lines,
+            [r#"part_number.schemes.mech = {"next":"M-{seq:3}","pattern":"M-\\d+"}"#]
+        );
+        assert!(rest.is_empty());
         let mut rest: Map<String, Value> = json!({
             "released_by": {"name": "Ada", "email": "ada@example.com", "participant": "agent"},
             "results": {"pad": "c0ffee"}
