@@ -97,6 +97,17 @@ pub(crate) fn pins(
     pinned(body, region, still, absorbing)
 }
 
+/// Working face `f`'s own box: its box joined with the boxes of the
+/// changed faces it touches ([`touched`]). Its near box is this grown by
+/// their reach ([`near_box`]); a cut keeping it off a pin must leave this
+/// inside (design 724, plan 22.B).
+pub(crate) fn own_box(body: &Body, region: &Region, f: FaceId) -> Box3 {
+    touched(body, region, f)
+        .iter()
+        .map(|&g| face_box(body, g))
+        .fold(face_box(body, f), |a, b| a.union(&b))
+}
+
 /// Working face `f`'s near box at `rung` (design 669, plan 20.B): `f`'s
 /// box joined with the boxes of the changed faces it touches
 /// ([`touched`]), grown by their reach (`reach_of` over them alone;
@@ -113,10 +124,7 @@ pub(crate) fn near_box(
     rung: usize,
 ) -> Box3 {
     let near = touched(body, region, f);
-    let b = near
-        .iter()
-        .map(|&g| face_box(body, g))
-        .fold(face_box(body, f), |a, b| a.union(&b));
+    let b = own_box(body, region, f);
     let r = super::reach_of(body, changes, &|g| near.contains(&g));
     let mut n = b.grow(r);
     if rung == 1 {
@@ -338,6 +346,34 @@ pub(crate) mod tests {
             }
         }
         assert!(beside >= 3, "{beside}");
+    }
+
+    /// Plan 22.B: a near box is the face's own box (its box and its
+    /// changes' boxes) grown by those changes' reach, inside the rung's
+    /// box; the own box holds the face's box and every change it touches.
+    #[test]
+    fn a_near_box_is_its_own_box_grown_by_its_reach() {
+        let (r, low, high) = rounded();
+        let changes = Changes {
+            deleted: BTreeSet::from([low, high]),
+            ..Default::default()
+        };
+        let region = region(&r, &BTreeSet::from([low, high]));
+        let x = rung_box(&r, &changes, &region);
+        for &f in region.faces.iter().filter(|f| !changes.deleted.contains(f)) {
+            let own = own_box(&r, &region, f);
+            let near = touched(&r, &region, f);
+            let reach = super::super::reach_of(&r, &changes, &|g| near.contains(&g));
+            assert_eq!(
+                near_box(&r, &changes, &region, f, &x, 0),
+                within(&own.grow(reach), &x).unwrap_or(x),
+                "{f:?}"
+            );
+            assert!(holds(&own, &crate::intersect::face_box(&r, f)));
+            for g in near {
+                assert!(holds(&own, &crate::intersect::face_box(&r, g)));
+            }
+        }
     }
 
     #[test]
