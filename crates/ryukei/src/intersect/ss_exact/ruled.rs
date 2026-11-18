@@ -1137,4 +1137,96 @@ mod tests {
         );
         agrees(&pipe, &wall, 1);
     }
+
+    /// A cone of radius 1 about z (10°), and a cylinder of radius 0.25
+    /// along y, tangent to it at (1, 0, 0) from outside (`out = 1`) or
+    /// inside (`out = −1`), moved `gap` further out along the normal.
+    fn grazing(out: f64, gap: f64) -> (Surface, Surface) {
+        let a = 10f64.to_radians();
+        let (s, c) = math::sin_cos(a);
+        let n = Vector3::new(c, 0.0, -s);
+        let p = Point3::new(1.0, 0.0, 0.0) + n * (out * 0.25 + gap);
+        let cyl = Surface::Cylinder(
+            Cylinder::new(Frame::new(p, Vector3::new(0.0, 1.0, 0.0), n).unwrap(), 0.25).unwrap(),
+        );
+        (cyl, cone((0.0, 0.0, 0.0), (0.0, 0.0, 1.0), 1.0, a))
+    }
+
+    #[test]
+    fn an_outside_graze_is_a_touch() {
+        let (cyl, bore) = grazing(1.0, 0.0);
+        let (raws, points) = ruled(&cyl, &bore, &region(), &Meter::free())
+            .unwrap()
+            .expect("a touch");
+        assert!(raws.is_empty(), "{raws:?}");
+        assert_eq!(points.len(), 1);
+        assert!(
+            points[0].distance(Point3::new(1.0, 0.0, 0.0)) <= 1e-8,
+            "{:?}",
+            points[0]
+        );
+    }
+
+    #[test]
+    fn a_pair_kept_apart_meets_nowhere() {
+        let (cyl, bore) = grazing(1.0, 0.1);
+        assert_eq!(
+            ruled(&cyl, &bore, &region(), &Meter::free()),
+            Ok(Some((vec![], vec![])))
+        );
+    }
+
+    /// Kept apart by less than the resolution: a touch or `None`, never
+    /// nothing.
+    #[test]
+    fn a_near_miss_within_the_resolution_is_never_nothing() {
+        let (cyl, bore) = grazing(1.0, 5e-9);
+        match ruled(&cyl, &bore, &region(), &Meter::free()).unwrap() {
+            None => {}
+            Some((raws, points)) => {
+                assert!(raws.is_empty());
+                assert_eq!(points.len(), 1, "a touch");
+            }
+        }
+    }
+
+    /// Inside the bore, tangent: the two branches cross at the touch (a
+    /// pinch), which the form refuses.
+    #[test]
+    fn an_inside_graze_is_a_pinch_and_refused() {
+        let (cyl, bore) = grazing(-1.0, 0.0);
+        assert_eq!(ruled(&cyl, &bore, &region(), &Meter::free()), Ok(None));
+    }
+
+    /// `A = 0`: the cylinder's axis along one of the cone's rulings, or
+    /// two parallel cylinders.
+    #[test]
+    fn an_axis_along_a_ruling_is_not_this_forms() {
+        let a = 20f64.to_radians();
+        let (s, c) = math::sin_cos(a);
+        let bore = cone((0.0, 0.0, 0.0), (0.0, 0.0, 1.0), 1.0, a);
+        let along = cylinder((3.0, 0.0, 0.0), (s, 0.0, c), 0.2);
+        assert_eq!(ruled(&along, &bore, &region(), &Meter::free()), Ok(None));
+        let one = cylinder((0.0, 0.0, 0.0), (0.0, 0.0, 1.0), 1.0);
+        let two = cylinder((0.5, 0.0, 0.0), (0.0, 0.0, 1.0), 0.3);
+        assert_eq!(ruled(&two, &one, &region(), &Meter::free()), Ok(None));
+    }
+
+    /// Below the apex the rulings cross only the other nappe, which the
+    /// cone doesn't have: nothing. Above, the cone itself: two curves.
+    #[test]
+    fn the_cones_other_nappe_is_left_out() {
+        // Radius 1 at z = 0, 45°: the apex at z = −1, the cone above it.
+        let bore = cone((0.0, 0.0, 0.0), (0.0, 0.0, 1.0), 1.0, FRAC_PI_4);
+        let below = cylinder((0.0, 0.0, -3.0), (1.0, 0.0, 0.0), 0.3);
+        assert_eq!(
+            ruled(&below, &bore, &region(), &Meter::free()),
+            Ok(Some((vec![], vec![])))
+        );
+        let above = cylinder((0.0, 0.0, 1.0), (1.0, 0.0, 0.0), 0.3);
+        agrees(&above, &bore, 2);
+        // Through the apex: not this form's.
+        let apex = cylinder((0.0, 0.3, -1.0), (1.0, 0.0, 0.0), 0.3);
+        assert_eq!(ruled(&apex, &bore, &region(), &Meter::free()), Ok(None));
+    }
 }
