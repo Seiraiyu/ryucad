@@ -250,6 +250,7 @@ pub fn answer(
     sheet: Option<String>,
     delimiter: Option<String>,
     encoding: Option<String>,
+    records: Option<String>,
     save: Option<String>,
 ) -> Result<Value> {
     let bytes = super::read_file(file)?;
@@ -258,12 +259,22 @@ pub fn answer(
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
-    let kind = if ext == "xlsx" {
-        ReaderKind::Xlsx
-    } else {
-        ReaderKind::Csv
+    let (kind, lines) = match ext.as_str() {
+        "xlsx" => (ReaderKind::Xlsx, false),
+        "json" => (ReaderKind::Json, false),
+        "jsonl" | "ndjson" => (ReaderKind::Json, true),
+        "xml" => (ReaderKind::Xml, false),
+        _ => (ReaderKind::Csv, false),
     };
     let usage = |m: &str| Error::new(Code::Usage, m);
+    if kind.tree() && (sheet.is_some() || delimiter.is_some() || encoding.is_some()) {
+        return Err(usage(
+            "--sheet, --delimiter and --encoding are for CSV and XLSX files",
+        ));
+    }
+    if !kind.tree() && records.is_some() {
+        return Err(usage("--records is for JSON and XML files"));
+    }
     let encoding = encoding
         .map(|e| {
             Encoding::parse(&e).ok_or_else(|| {
@@ -297,13 +308,28 @@ pub fn answer(
         lines: false,
     };
     let mut sheets = Value::Null;
-    if kind == ReaderKind::Csv {
-        let enc = encoding.unwrap_or_else(|| super::text::sniff(&bytes));
-        let text = super::text::decode(&bytes, enc).map_err(Error::from)?;
-        reader.encoding = Some(enc);
-        reader.delimiter = Some(delimiter.unwrap_or_else(|| super::csv::sniff(&text)));
-    } else {
-        sheets = json!(super::xlsx::sheets(&bytes).map_err(Error::from)?);
+    match kind {
+        ReaderKind::Csv => {
+            let enc = encoding.unwrap_or_else(|| super::text::sniff(&bytes));
+            let text = super::text::decode(&bytes, enc).map_err(Error::from)?;
+            reader.encoding = Some(enc);
+            reader.delimiter = Some(delimiter.unwrap_or_else(|| super::csv::sniff(&text)));
+        }
+        ReaderKind::Xlsx => {
+            sheets = json!(super::xlsx::sheets(&bytes).map_err(Error::from)?);
+        }
+        ReaderKind::Json => {
+            let (r, c) =
+                super::json::survey(&bytes, lines, records.as_deref()).map_err(Error::from)?;
+            reader.records = (!lines).then_some(r);
+            reader.children = c;
+            reader.lines = lines;
+        }
+        ReaderKind::Xml => {
+            let (r, c) = super::xml::survey(&bytes, records.as_deref()).map_err(Error::from)?;
+            reader.records = Some(r);
+            reader.children = c;
+        }
     }
     let table = super::read_table(&bytes, &reader).map_err(Error::from)?;
     let config = Config::read_in(&session.snapshot(), crate::catalogue::NAME)?;
@@ -505,5 +531,68 @@ mod tests {
         );
         assert_eq!(m.bom.clone().unwrap().level.as_deref(), Some("#level"));
         Mapping::read("t", m.to_text().as_bytes()).unwrap();
+    }
+
+    #[test]
+    fn json_and_xml_files_get_tree_proposals() {
+        use crate::proto::Request;
+        use crate::server::tests::{ask, catalogue};
+        let (_d, root) = catalogue();
+        let guess = |file: &std::path::Path, records: Option<&str>, sheet: Option<&str>| {
+            ask(
+                &root,
+                Request::ImportGuess {
+                    file: file.display().to_string(),
+                    sheet: sheet.map(str::to_owned),
+                    delimiter: None,
+                    encoding: None,
+                    records: records.map(str::to_owned),
+                    save: None,
+                },
+            )
+        };
+        let j = root.join("export.json");
+        std::fs::write(
+            &j,
+            r#"{"items": [{"id": "1", "pn": "A", "sources": [{"mpn": "M1"}, {"mpn": "M2"}]}, {"id": "2", "pn": "B"}]}"#,
+        )
+        .unwrap();
+        let v = guess(&j, None, None).unwrap();
+        assert_eq!(v["mapping"]["format"], 2);
+        assert_eq!(
+            v["mapping"]["reader"],
+            json!({"type": "json", "file": "*.json", "records": "/items"})
+        );
+        assert_eq!(v["mapping"]["key"], "/id");
+        assert_eq!(
+            v["mapping"]["fields"]["aml.1.mpn"]["from"],
+            "/sources/1/mpn"
+        );
+        let l = root.join("dump.jsonl");
+        std::fs::write(&l, "{\"id\": \"1\", \"pn\": \"A\"}\n").unwrap();
+        assert_eq!(
+            guess(&l, None, None).unwrap()["mapping"]["reader"],
+            json!({"type": "json", "file": "*.jsonl", "lines": true})
+        );
+        let x = root.join("export.xml");
+        std::fs::write(
+            &x,
+            r#"<E><I id="1"><PN>A</PN></I><I id="2"><PN>B</PN></I></E>"#,
+        )
+        .unwrap();
+        let v = guess(&x, None, None).unwrap();
+        assert_eq!(
+            v["mapping"]["reader"],
+            json!({"type": "xml", "file": "*.xml", "records": "/E/I"})
+        );
+        assert_eq!(v["mapping"]["key"], "@id");
+        assert_eq!(
+            guess(&x, Some("/E"), None).unwrap()["mapping"]["reader"]["records"],
+            "/E"
+        );
+        assert_eq!(guess(&x, None, Some("S")).unwrap_err().code, Code::Usage);
+        let c = root.join("items.csv");
+        std::fs::write(&c, "ID,PN\n1,A\n").unwrap();
+        assert_eq!(guess(&c, Some("/x"), None).unwrap_err().code, Code::Usage);
     }
 }
