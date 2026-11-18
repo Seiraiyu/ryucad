@@ -85,12 +85,82 @@ pub fn commit(session: &mut Session, what: &str, writes: Writes) -> Result<()> {
     if !added.is_empty() {
         return Err(refused(what, &added));
     }
-    for (p, t) in &writes.0 {
-        let at = path_of(session.root(), p);
-        match t {
-            Some(t) => crate::source::write_atomic(&at, t)?,
-            None => remove_file(session.root(), &at)?,
-        }
-    }
+    write_all(session.root(), &writes)?;
     session.reload()
+}
+
+/// Writes at or above this many files go out on threads, synced once.
+const PARALLEL_FROM: usize = 64;
+
+/// Writes `writes` under `root`: deletes one by one (each may remove the
+/// folders it empties), files on up to eight threads once there are many,
+/// with syncs deferred and all waited for before returning (#270), so a
+/// 100,000-item import waits on the journal once.
+fn write_all(root: &std::path::Path, writes: &Writes) -> Result<()> {
+    let (files, deletes): (Vec<_>, Vec<_>) = writes.0.iter().partition(|(_, t)| t.is_some());
+    if files.len() < PARALLEL_FROM {
+        for (p, t) in &files {
+            crate::source::write_atomic(&path_of(root, p), t.as_deref().expect("a file"))?;
+        }
+    } else {
+        crate::source::defer_syncs();
+        let threads = std::thread::available_parallelism()
+            .map_or(4, |n| n.get())
+            .min(8);
+        let per = files.len().div_ceil(threads);
+        let results: Vec<Result<()>> = std::thread::scope(|s| {
+            let handles: Vec<_> = files
+                .chunks(per)
+                .map(|chunk| {
+                    s.spawn(move || -> Result<()> {
+                        for (p, t) in chunk {
+                            crate::source::write_atomic(
+                                &path_of(root, p),
+                                t.as_deref().expect("a file"),
+                            )?;
+                        }
+                        Ok(())
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("a writer thread doesn't panic"))
+                .collect()
+        });
+        crate::source::flush_syncs();
+        results.into_iter().collect::<Result<()>>()?;
+    }
+    for (p, _) in &deletes {
+        remove_file(root, &path_of(root, p))?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::item::Item;
+
+    #[test]
+    fn a_large_write_lands_whole_and_synced() {
+        let (_d, root) = crate::server::tests::catalogue();
+        let mut session = Session::open(&root).unwrap();
+        let writes: Vec<(String, Option<String>)> = (0..300u64)
+            .map(|k| {
+                let id = crate::id::Id::parse(&crate::ids::text(k << 8), "item").unwrap();
+                (
+                    crate::ids::item_path(&id),
+                    Some(Item::new(&format!("BULK-{k:04}")).to_text()),
+                )
+            })
+            .collect();
+        commit(&mut session, "bulk", Writes(writes)).unwrap();
+        assert_eq!(session.catalogue().items.len(), 300);
+        assert_eq!(
+            ryu_doc::source::pending_syncs(),
+            0,
+            "every file synced before the answer"
+        );
+    }
 }
