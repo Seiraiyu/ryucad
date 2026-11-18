@@ -132,6 +132,76 @@ pub fn judge(src: &dyn Source, cat: &Catalogue, config: Option<&Config>) -> Vec<
     out
 }
 
+/// What `import check` and `import run` start from: the mapping (judged
+/// against the catalogue's declarations), its file guard, the settings,
+/// and the source's rows through the mapping, refusals apart.
+pub struct Prepared {
+    pub mapping: Mapping,
+    pub config: Config,
+    pub table: rows::Table,
+    pub rows: Vec<records::Mapped>,
+    pub refusals: Vec<rows::Refusal>,
+}
+
+pub fn prepare(session: &crate::session::Session, name: &str, file: &Path) -> Result<Prepared> {
+    let src = session.snapshot();
+    let mapping = load(&src, name)?;
+    let config = Config::read_in(&src, crate::catalogue::NAME)?;
+    if let Some(e) = mapping
+        .validate(&config, &session.catalogue().manifest)
+        .into_iter()
+        .next()
+    {
+        return Err(e);
+    }
+    if let Some(p) = &mapping.reader.file {
+        let base = file.file_name().and_then(|f| f.to_str()).unwrap_or("");
+        if !mapping::file_matches(p, base) {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!("{base:?} doesn't match the mapping's file pattern {p:?}"),
+            )
+            .with("import", name)
+            .with("path", file));
+        }
+    }
+    let bytes = read_file(file)?;
+    let table = read_table(&bytes, &mapping.reader).map_err(|r| refused(name, file, vec![r]))?;
+    let (rows, refusals) = records::map(
+        &table,
+        &mapping,
+        &config,
+        session.catalogue().manifest.default_unit,
+    )?;
+    Ok(Prepared {
+        mapping,
+        config,
+        table,
+        rows,
+        refusals,
+    })
+}
+
+/// The error for rows that don't read: `invalid_document`, every refusal
+/// in `details.refusals`.
+pub fn refused(name: &str, file: &Path, refusals: Vec<rows::Refusal>) -> Error {
+    let first = refusals
+        .first()
+        .map(|r| r.message.clone())
+        .unwrap_or_default();
+    Error::new(
+        Code::InvalidDocument,
+        format!(
+            "{} row(s) of {} don't read through {name}: {first}",
+            refusals.len(),
+            file.display()
+        ),
+    )
+    .with("import", name)
+    .with("path", file)
+    .with("refusals", &refusals)
+}
+
 #[cfg(test)]
 mod tests {
     use crate::proto::Request;

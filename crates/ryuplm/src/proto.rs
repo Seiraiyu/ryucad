@@ -178,6 +178,13 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         working: bool,
     },
+    #[serde(rename = "import.check")]
+    ImportCheck {
+        name: String,
+        file: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
+    },
     #[serde(rename = "settings.show")]
     SettingsShow {},
     #[serde(rename = "settings.edit")]

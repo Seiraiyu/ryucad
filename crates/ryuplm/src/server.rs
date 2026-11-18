@@ -251,6 +251,9 @@ fn dispatch(
                 working,
             },
         )?,
+        Request::ImportCheck { name, file, limit } => {
+            crate::import::preview::check(session, &name, std::path::Path::new(&file), limit)?
+        }
         Request::SettingsShow {} => settings::show(session)?,
         Request::SettingsEdit {
             change,
