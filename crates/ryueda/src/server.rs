@@ -1217,6 +1217,7 @@ fn dispatch(
             design,
             rect,
             outline,
+            layers,
             id,
             expected_revision,
         } => crate::board::cmd::create(
@@ -1225,6 +1226,7 @@ fn dispatch(
             &design,
             rect.as_ref(),
             outline.as_ref(),
+            layers,
             id.as_deref(),
             expected_revision.as_deref(),
         ),
@@ -1233,6 +1235,8 @@ fn dispatch(
             name,
             outline,
             cutouts,
+            layers,
+            stackup,
             expected_revision,
         } => crate::board::cmd::edit(
             session,
@@ -1240,6 +1244,8 @@ fn dispatch(
             name.as_deref(),
             outline.as_ref(),
             cutouts.as_ref(),
+            layers,
+            stackup.as_ref(),
             expected_revision.as_deref(),
         ),
         Request::BoardDelete {
@@ -1320,11 +1326,13 @@ fn dispatch(
             at,
             drill,
             diameter,
+            from,
+            to,
             id,
             ops,
             expected_revision,
         } => {
-            let one = json!({"net": net, "at": at, "drill": drill, "diameter": diameter, "id": id});
+            let one = json!({"net": net, "at": at, "drill": drill, "diameter": diameter, "from": from, "to": to, "id": id});
             crate::board::route::via_add(
                 session,
                 &board,

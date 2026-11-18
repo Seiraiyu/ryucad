@@ -593,6 +593,9 @@ pub enum Request {
         /// An outline as `board::file::Contour`, its coordinates lengths.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         outline: Option<Value>,
+        /// Copper layers: 2 (the default) or an even stackup of `n`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        layers: Option<u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
         /// The project's revision.
@@ -609,6 +612,12 @@ pub enum Request {
         /// A list of contours; `[]` clears them.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cutouts: Option<Value>,
+        /// Copper layers: 2 drops the stackup, more writes an even one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        layers: Option<u32>,
+        /// A stackup as `board::stackup::Stackup`, its thicknesses lengths.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stackup: Option<Value>,
         /// The board's revision.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
@@ -740,6 +749,12 @@ pub enum Request {
         drill: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         diameter: Option<String>,
+        /// The first and last copper layers it joins (top and bottom when
+        /// absent).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1724,6 +1739,7 @@ mod tests {
                 design: "board".into(),
                 rect: Some(["30 mm".into(), "20 mm".into()]),
                 outline: None,
+                layers: Some(4),
                 id: Some("main".into()),
                 expected_revision: None,
             },

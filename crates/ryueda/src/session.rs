@@ -420,6 +420,7 @@ mod tests {
             &design,
             Some(&["30".into(), "20".into()]),
             None,
+            None,
             Some("b"),
             None,
         )
@@ -428,7 +429,7 @@ mod tests {
         let a = s.board_check(&id).unwrap();
         let b = s.board_check(&id).unwrap();
         assert!(std::sync::Arc::ptr_eq(&a, &b), "kept");
-        crate::board::cmd::edit(&mut s, "b", Some("C"), None, None, None).unwrap();
+        crate::board::cmd::edit(&mut s, "b", Some("C"), None, None, None, None, None).unwrap();
         let c = s.board_check(&id).unwrap();
         assert!(
             !std::sync::Arc::ptr_eq(&a, &c),

@@ -108,6 +108,7 @@ pub fn create(
     design: &str,
     rect: Option<&[String; 2]>,
     outline: Option<&Value>,
+    layers: Option<u32>,
     id: Option<&str>,
     expected: Option<&str>,
 ) -> Result<Value> {
@@ -144,6 +145,10 @@ pub fn create(
             ));
         }
     };
+    let stackup = match layers {
+        None | Some(2) => None,
+        Some(n) => Some(super::stackup::even(super::preset::DEFAULT, n as usize)?),
+    };
     let id = new_id(id, "board", |s| {
         Id::parse(s, "board").is_ok_and(|i| p.boards.contains_key(&i))
     })?;
@@ -153,7 +158,7 @@ pub fn create(
         preset: super::preset::DEFAULT.name.into(),
         outline,
         cutouts: Vec::new(),
-        stackup: None,
+        stackup,
     };
     let mut w = Writes::default();
     w.put(board_path(&id), &board, BOARD_KIND);
@@ -169,6 +174,8 @@ pub fn edit(
     name: Option<&str>,
     outline: Option<&Value>,
     cutouts: Option<&Value>,
+    layers: Option<u32>,
+    stackup: Option<&Value>,
     expected: Option<&str>,
 ) -> Result<Value> {
     let p = session.project();
@@ -198,6 +205,15 @@ pub fn edit(
             .map(|v| contour_from(v, unit))
             .collect::<Result<_>>()?;
     }
+    if let Some(n) = layers {
+        let preset = super::preset::by_name(&file.preset).unwrap_or(super::preset::DEFAULT);
+        file.stackup = (n != 2)
+            .then(|| super::stackup::even(preset, n as usize))
+            .transpose()?;
+    }
+    if let Some(v) = stackup {
+        file.stackup = Some(stackup_from(v, unit)?);
+    }
     let mut w = Writes::default();
     w.put(board_path(&id), &file, BOARD_KIND);
     let before = super::drc::now(session, &id);
@@ -205,6 +221,30 @@ pub fn edit(
     let mut v = answer(session.project(), &id);
     v["drc"] = super::drc::delta(session, &id, before);
     Ok(v)
+}
+
+/// A stackup from a request: thicknesses as `coord` reads lengths.
+pub fn stackup_from(v: &Value, unit: Unit) -> Result<super::stackup::Stackup> {
+    let mut v = v.clone();
+    let layers = v
+        .get_mut("layers")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| {
+            Error::new(Code::InvalidParam, "a stackup is {layers: [...]}").with("param", "stackup")
+        })?;
+    for l in layers {
+        if let Some(t) = l.get("thickness_nm").cloned() {
+            l["thickness_nm"] = json!(coord::nm(&t, unit)?);
+        }
+    }
+    let s: super::stackup::Stackup = serde_json::from_value(v).map_err(|e| {
+        Error::new(Code::InvalidParam, format!("the stackup doesn't read: {e}"))
+            .with("param", "stackup")
+    })?;
+    if let Some(f) = super::stackup::judge(&s).into_iter().next() {
+        return Err(f.error);
+    }
+    Ok(s)
 }
 
 pub fn delete(session: &mut Session, board: &str, expected: Option<&str>) -> Result<Value> {
@@ -474,6 +514,14 @@ pub fn show(p: &Project, board: &str, pads: bool) -> Result<Value> {
     let Ok(file) = board_of(b) else {
         return Ok(v);
     };
+    if file.stackup.is_some() {
+        let n = super::stackup::copper_count(file);
+        v["layers"] = json!(
+            (0..n)
+                .map(|i| CopperLayer::at(i, n).short())
+                .collect::<Vec<_>>()
+        );
+    }
     match occ::occurrences(p, &file.design) {
         Err(e) => v["design_error"] = json!(e),
         Ok((_, occs)) => {
