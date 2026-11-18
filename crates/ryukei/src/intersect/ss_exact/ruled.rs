@@ -428,6 +428,109 @@ fn turn(charts: Charts, m: &Meter) -> Result<Option<Turn>, Failure> {
     Ok(None)
 }
 
+/// Where the rulings cross: arcs `[θ0, θ1]` (`θ0 < θ1 < θ0 + 2π`) and
+/// touches at `θ`, or every ruling (`round`).
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Crossings {
+    arcs: Vec<[f64; 2]>,
+    touches: Vec<f64>,
+    round: bool,
+}
+
+/// What `Δ`'s roots say, with `N`'s holding the near misses to account.
+/// `None` where a gap's sign can't be certified, the signs don't
+/// alternate, a root is unsure but for a touch (`Δ < 0` either side), or
+/// a stretch where `Δ < 0` doesn't hold exactly one simple root of `N`
+/// beside each root of `Δ` bounding it (none in a whole turn).
+fn crossings(t: &Turn) -> Option<Crossings> {
+    let ev = &t.delta;
+    let n = ev.len();
+    let mid = |b: [f64; 2]| (b[0] + b[1]) / 2.0;
+    if n == 0 {
+        let at = t.start + FRAC_PI_2;
+        return match t.sign_at(&t.charts.delta, at)? {
+            Sign::Positive if t.near.is_empty() => Some(Crossings {
+                round: true,
+                ..Crossings::default()
+            }),
+            Sign::Negative
+                if t.near.is_empty() && t.sign_at(&t.charts.near, at) == Some(Sign::Negative) =>
+            {
+                Some(Crossings::default())
+            }
+            _ => None,
+        };
+    }
+    // The gap after event `i` runs to event `i + 1` (round the turn).
+    let gap = |i: usize| {
+        let lo = ev[i].at()[1];
+        let mut hi = ev[(i + 1) % n].at()[0];
+        if i + 1 == n {
+            hi += TAU;
+        }
+        [lo, hi]
+    };
+    let signs: Vec<Sign> = (0..n)
+        .map(|i| {
+            let [lo, hi] = gap(i);
+            t.sign_at(&t.charts.delta, (lo + hi) / 2.0)
+        })
+        .collect::<Option<_>>()?;
+    let mut out = Crossings::default();
+    for i in 0..n {
+        let (before, after) = (signs[(i + n - 1) % n], signs[i]);
+        match ev[i] {
+            Event::Rise(_) if before == Sign::Negative && after == Sign::Positive => {}
+            Event::Fall(_) if before == Sign::Positive && after == Sign::Negative => {}
+            Event::Unsure(b) if before == Sign::Negative && after == Sign::Negative => {
+                out.touches.push(mid(b));
+            }
+            _ => return None,
+        }
+    }
+    for i in 0..n {
+        if let Event::Rise(b) = ev[i] {
+            let Event::Fall(e) = ev[(i + 1) % n] else {
+                return None;
+            };
+            let (t0, mut t1) = (mid(b), mid(e));
+            if t1 <= t0 {
+                t1 += TAU;
+            }
+            out.arcs.push([t0, t1]);
+        }
+    }
+    // Near misses: each root of N simple, inside a gap where Δ < 0, two
+    // to each such gap.
+    let mut count = vec![0usize; n];
+    for e in &t.near {
+        let (Event::Rise(b) | Event::Fall(b)) = *e else {
+            return None;
+        };
+        let k = (0..n).find(|&i| {
+            let [lo, hi] = gap(i);
+            let mut x = b[0];
+            while x < lo {
+                x += TAU;
+            }
+            while x >= lo + TAU {
+                x -= TAU;
+            }
+            x > lo && x + (b[1] - b[0]) < hi
+        })?;
+        if signs[k] != Sign::Negative {
+            return None;
+        }
+        count[k] += 1;
+    }
+    for i in 0..n {
+        if signs[i] == Sign::Negative && count[i] != 2 {
+            return None;
+        }
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -546,5 +649,39 @@ mod tests {
                 Event::Unsure(_) => panic!("{e:?}"),
             }
         }
+    }
+
+    /// Hand-made turns: events and charts whose signs are known.
+    fn turn_of(delta: Vec<Event>, near: Vec<Event>, d: [f64; 3], n: [f64; 3]) -> Turn {
+        // Constant-sign charts are enough where the test's gaps are read.
+        let quad = |c: [f64; 3]| Bernstein::from_f64(&c);
+        Turn {
+            start: -FRAC_PI_2,
+            delta,
+            near,
+            charts: Charts {
+                delta: [quad(d), quad(d)],
+                near: [quad(n), quad(n)],
+            },
+        }
+    }
+
+    #[test]
+    fn signs_round_the_turn_make_arcs_touches_or_nothing() {
+        let b = |x: f64| [x - 1e-12, x + 1e-12];
+        // Every ruling crosses: Δ > 0 all round, no roots.
+        let all = turn_of(vec![], vec![], [1.0; 3], [1.0; 3]);
+        assert!(crossings(&all).unwrap().round);
+        // None crosses, and none comes near: Δ < 0, N < 0, no roots.
+        let none = turn_of(vec![], vec![], [-1.0; 3], [-1.0; 3]);
+        assert_eq!(crossings(&none), Some(Crossings::default()));
+        // None crosses, but N has roots: a near touch somewhere.
+        let close = turn_of(
+            vec![],
+            vec![Event::Rise(b(0.1)), Event::Fall(b(0.2))],
+            [-1.0; 3],
+            [-1.0; 3],
+        );
+        assert_eq!(crossings(&close), None);
     }
 }
