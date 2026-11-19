@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="windows-1252"?>
+<bom:Export xmlns:bom="urn:example:demo-bom" generated="2026-11-18">
+  <bom:Item number="ASM-2000">
+    <bom:Description>Pumpe, komplett</bom:Description>
+    <bom:Components>
+      <bom:Component number="ASM-2100" qty="1" find="10">
+        <bom:Description>Laufrad – Baugruppe</bom:Description>
+        <bom:Components>
+          <bom:Component number="PRT-2110" qty="1" find="10"><bom:Description>Laufrad</bom:Description></bom:Component>
+          <bom:Component number="PRT-2120" qty="6" find="20"><bom:Description>Schraube M4 × 10</bom:Description></bom:Component>
+        </bom:Components>
+      </bom:Component>
+      <bom:Component number="PRT-2200" qty="1" find="20"><bom:Description>Gehäuse</bom:Description></bom:Component>
+    </bom:Components>
+  </bom:Item>
+</bom:Export>

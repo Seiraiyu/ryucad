@@ -1,0 +1,4 @@
+"Id";"Designator";"Footprint";"Quantity";"Designation";"Supplier and ref";"MPN"
+1;"R1,R2";"Resistor_SMD:R_0603";2;"4k7";;"OD-0603-4K7"
+2;"C1";"Capacitor_SMD:C_0402";1;"1u";;"FD-0402-105"
+3;"J1";"Connector:USB_C";1;"USB-C";;"CN-USBC-16"

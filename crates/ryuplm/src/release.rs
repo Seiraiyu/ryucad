@@ -299,13 +299,20 @@ pub fn list(session: &mut Session, item: Option<&str>) -> Result<Value> {
             v
         })
         .collect();
-    Ok(json!({
+    let mut v = json!({
         "repository": has_repo,
         "release_branch": config.release_branch,
         "records": shown,
         "items": items,
         "revision": session.revision(),
-    }))
+    });
+    if let Some(item) = id.as_ref().and_then(|i| session.catalogue().items.get(i)) {
+        let legacy = crate::import::history::legacy(item);
+        if !legacy.is_empty() {
+            v["legacy"] = json!(legacy);
+        }
+    }
+    Ok(v)
 }
 
 /// ryupdm's release findings (`source: release`).

@@ -1,0 +1,23 @@
+{
+  "bom": {
+    "find": "Find",
+    "level": "Level",
+    "quantity": "Qty"
+  },
+  "class": "machined",
+  "fields": {
+    "description": {
+      "from": "Description"
+    },
+    "number": {
+      "from": "Part Number"
+    }
+  },
+  "format": 1,
+  "key": "Part Number",
+  "kind": "ryuplm.import",
+  "reader": {
+    "file": "indented*.csv",
+    "type": "csv"
+  }
+}

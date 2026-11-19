@@ -15,7 +15,7 @@ use ryupdm::{PDM_CONFIG, RELEASES};
 use serde_json::Value;
 
 pub const ROOT_FILES: [&str; 3] = [MANIFEST, PDM_CONFIG, ".gitattributes"];
-pub const FOLDERS: [&str; 2] = [ITEMS, RELEASES];
+pub const FOLDERS: [&str; 3] = [ITEMS, RELEASES, crate::import::IMPORTS];
 
 impl ryu_git::Layout for Plm {
     const NAME: &'static str = crate::catalogue::NAME;
@@ -28,6 +28,7 @@ impl ryu_git::Layout for Plm {
             || rel
                 .strip_prefix("releases/")
                 .is_some_and(|f| f.matches('/').count() == 1)
+            || crate::import::name_of(rel).is_some()
     }
 }
 
@@ -126,6 +127,19 @@ impl Product for Plm {
 
     fn properties_from(v: &Value) -> Option<Result<Properties>> {
         (v["kind"] == crate::item::KIND).then(|| Item::from_json(v).map(|i| properties(&i)))
+    }
+
+    /// An item whose legacy history carried a label of the scheme
+    /// continues it (design 935); any other starts at the scheme's first.
+    fn first_label(src: &dyn Source, part: &Id, scheme: ryupdm::config::Scheme) -> String {
+        src.read(&item_path(part))
+            .ok()
+            .flatten()
+            .and_then(|b| Item::read(part, &b).ok())
+            .and_then(|i| {
+                crate::import::history::carried(&i).and_then(|c| ryupdm::label::next(scheme, c))
+            })
+            .unwrap_or_else(|| ryupdm::label::first(scheme))
     }
 }
 

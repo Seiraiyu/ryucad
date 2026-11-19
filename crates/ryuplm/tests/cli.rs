@@ -272,6 +272,12 @@ fn every_protocol_method_has_a_command() {
         ("bom.get", &["bom", "show"]),
         ("bom.diff", &["bom", "diff"]),
         ("bom.where_used", &["where-used"]),
+        ("import.guess", &["import", "guess"]),
+        ("import.check", &["import", "check"]),
+        ("import.run", &["import", "run"]),
+        ("import.list", &["import", "list"]),
+        // Read by the CLI before it asks the ledger (ryuplm 2.B).
+        ("number.local", &["number", "next"]),
         ("settings.show", &["settings", "show"]),
         ("settings.edit", &["settings", "edit"]),
         ("check", &["check"]),
@@ -404,6 +410,10 @@ fn mech(p: &Pair) -> &'static str {
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "cad"),
+    ignore = "needs ryucad's lines: the `cad` feature"
+)]
 fn links_boms_and_where_used_from_the_cli() {
     let p = Pair::project();
     let pid = mech(&p);
@@ -470,4 +480,93 @@ fn links_boms_and_where_used_from_the_cli() {
         .collect();
     assert_eq!(via, ["ryucad"], "{used}");
     p.ok(&["item", "unlink", "GLUE-1", "ryueda"]);
+}
+
+#[test]
+fn imports_from_the_cli() {
+    let p = Pair::project();
+    p.ok(&["settings", "edit", "--class", "machined"]);
+    let csv = "Item ID,Part No.,Descripton\n1,100-0001,Bracket\n2,100-0002,Screw\n";
+    for top in [&p.direct, &p.daemon] {
+        fs::write(top.join("p/items.csv"), csv).unwrap();
+    }
+    let g = p.ok(&["import", "guess", "items.csv", "--save", "erp"]);
+    assert_eq!(g["saved"], "imports/erp.json");
+    assert_eq!(g["mapping"]["key"], "Item ID");
+    assert_eq!(g["mapping"]["fields"]["description"]["from"], "Descripton");
+    p.fails(
+        &["import", "guess", "items.csv", "--save", "erp"],
+        "conflict",
+        1,
+    );
+    let c = p.ok(&["import", "check", "erp", "items.csv"]);
+    assert_eq!(c["rows"], 2);
+    let dry = p.ok(&["import", "run", "erp", "items.csv", "--dry-run"]);
+    assert_eq!(
+        (dry["created"]["count"].clone(), dry["written"].clone()),
+        (json!(2), json!(0))
+    );
+    let r = p.ok(&["import", "run", "erp", "items.csv"]);
+    assert_eq!(r["written"], 2);
+    let again = p.ok(&["import", "run", "erp", "items.csv"]);
+    assert_eq!(
+        (again["unchanged"].clone(), again["written"].clone()),
+        (json!(2), json!(0))
+    );
+    let l = p.ok(&["import", "list"]);
+    assert_eq!(l["imports"][0]["items"], 2);
+    p.fails(&["import", "run", "nope", "items.csv"], "not_found", 1);
+    p.fails(
+        &["import", "run", "erp", "items.csv", "--prefer", "both"],
+        "usage",
+        2,
+    );
+    assert_eq!(p.files(&p.direct), p.files(&p.daemon));
+    // A quantity column alone: a BOM with no parent, level or root. The
+    // proposal says what to finish, and refuses to be saved unfinished.
+    for top in [&p.direct, &p.daemon] {
+        fs::write(top.join("p/bom.csv"), "MPN,Qty\nX-1,2\n").unwrap();
+    }
+    let g = p.ok(&["import", "guess", "bom.csv"]);
+    assert_eq!(g["todo"].as_array().unwrap().len(), 1);
+    p.fails(
+        &["import", "guess", "bom.csv", "--save", "bom"],
+        "invalid_param",
+        1,
+    );
+}
+
+#[test]
+fn a_history_imports_and_shows_from_the_cli() {
+    let p = Pair::project();
+    let mapping = ryuplm::canonical::to_string(&json!({"format": 2, "kind": "ryuplm.import",
+        "reader": {"type": "csv"}, "key": "PN", "fields": {"number": {"from": "PN"}},
+        "history": {"revision": "Rev", "date": {"from": "Date", "date": ["DD/MM/YYYY"]}}}));
+    let csv = "PN,Rev,Date\n100-0001,A,07/03/2019\n100-0001,B,02/11/2020\n";
+    for top in [&p.direct, &p.daemon] {
+        fs::create_dir_all(top.join("p/imports")).unwrap();
+        fs::write(top.join("p/imports/hist.json"), &mapping).unwrap();
+        fs::write(top.join("p/hist.csv"), csv).unwrap();
+    }
+    let c = p.ok(&["import", "check", "hist", "hist.csv"]);
+    assert_eq!(c["rows"], 1, "one row per key: {c}");
+    let r = p.ok(&["import", "run", "hist", "hist.csv"]);
+    assert_eq!(r["created"]["count"], 1);
+    // Item answers may carry the item's own warnings (its number matches
+    // no scheme), so these two compare both ways without `ok`'s check.
+    let shown = |args: &[&str]| {
+        let (code, v) = p.both(args);
+        assert_eq!(code, 0, "{args:?}: {v}");
+        v["result"].clone()
+    };
+    let s = shown(&["item", "show", "100-0001"]);
+    assert_eq!(
+        s["legacy"][1],
+        json!({"label": "B", "date": "2020-11-02", "values": {"number": "100-0001"},
+               "import": "hist", "carried": true})
+    );
+    assert_eq!(s["state"]["next"], "C");
+    let l = shown(&["release", "list", "100-0001"]);
+    assert_eq!(l["legacy"], s["legacy"]);
+    assert_eq!(p.files(&p.direct), p.files(&p.daemon));
 }

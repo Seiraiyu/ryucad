@@ -1,0 +1,26 @@
+{
+  "bom": {
+    "quantity": "Quantity",
+    "refdes": "Designator",
+    "root": "PCBA-200"
+  },
+  "class": "electronic",
+  "fields": {
+    "description": {
+      "from": "Footprint"
+    },
+    "name": {
+      "from": "Designation"
+    }
+  },
+  "format": 1,
+  "key": "MPN",
+  "kind": "ryuplm.import",
+  "numbers": "assign",
+  "reader": {
+    "delimiter": ";",
+    "file": "kicad*.csv",
+    "type": "csv"
+  },
+  "scheme": "elec"
+}

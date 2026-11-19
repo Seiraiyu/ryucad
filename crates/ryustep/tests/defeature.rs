@@ -771,6 +771,15 @@ fn ftc_07s_and_ftc_10s_blends_are_deleted() {
 /// STC 10 and CTC 02 with PMI stay out as 22.A left them (moved to
 /// ryukei 23). SolidWorks 2026 deletes CTC 02 with PMI in one operation,
 /// and refuses STC 10 and FTC 07 AP242.
+///
+/// Plan 23.A releases a pin a narrowed build's walk failed at (design
+/// 919): CTC 02 with PMI #295's rung 3 asks its pinned cylinder
+/// `e153cd0e` released once `1294043e`, given room twice, fails there.
+/// The released build's walk finds two closures (planes `06252748` and
+/// `ad25abb3`, or the cylinder and `1294043e`; census VIII, #658), so it
+/// still refuses `GapNotHealed` and stays out, one capped build later
+/// (moved to ryukei 24).
+/// The 18 defeature as on main.
 const PINNED_DEFEATURED: &[(&str, u64)] = &[
     ("nist_ctc_01_asme1_ap203.stp", 148),
     ("nist_ctc_01_asme1_rd.stp", 13),

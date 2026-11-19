@@ -1556,12 +1556,16 @@ enum BoardCmd {
         /// lengths ("10 mm", or "10" in the project's unit).
         #[arg(long, value_name = "OPS")]
         outline: Option<String>,
+        /// Copper layers (2 by default): N of the preset's copper with equal
+        /// FR-4 between, filling its board thickness.
+        #[arg(long, value_name = "N")]
+        layers: Option<u32>,
         #[arg(long)]
         id: Option<String>,
         #[command(flatten)]
         expect: Expect,
     },
-    /// Change a board's name, outline or cutouts.
+    /// Change a board's name, outline, cutouts or stackup.
     Edit {
         board: String,
         #[arg(long)]
@@ -1572,6 +1576,15 @@ enum BoardCmd {
         /// A JSON list of contours; [] clears them.
         #[arg(long, value_name = "OPS")]
         cutouts: Option<String>,
+        /// Copper layers: N of the preset's copper with equal FR-4 between,
+        /// filling its board thickness; 2 drops the board's own stackup.
+        #[arg(long, value_name = "N", conflicts_with = "stackup")]
+        layers: Option<u32>,
+        /// The stackup as JSON: {layers: [{kind: copper, thickness_nm} | {kind:
+        /// dielectric, thickness_nm, material?, er_ppm?, loss_ppm?}]}, top to
+        /// bottom; integers are nanometres, strings lengths.
+        #[arg(long, value_name = "JSON")]
+        stackup: Option<String>,
         #[command(flatten)]
         expect: Expect,
     },
@@ -1581,11 +1594,11 @@ enum BoardCmd {
         #[command(flatten)]
         expect: Expect,
     },
-    /// Place parts: REF --at X,Y [--rotation A], or --ops for several (all or nothing).
+    /// Place parts: REF --at X,Y [--rotation A] [--side bottom], or --ops for several (all or nothing).
     ///
     /// The board's frame is the outline's: x right, y up (a --rect board's
     /// lower left corner at 0,0). A placement puts the footprint's origin at
-    /// X,Y and turns it counterclockwise about it.
+    /// X,Y and turns it counterclockwise about it, as seen from the top.
     Place {
         board: String,
         /// An occurrence reference (s1/u1) or a designator.
@@ -1602,9 +1615,14 @@ enum BoardCmd {
         /// Degrees counterclockwise.
         #[arg(long, allow_hyphen_values = true)]
         rotation: Option<String>,
-        /// JSON: [{ref, at: [x, y], rotation?}]; integers are nanometres (a
+        /// The side: top (the default) or bottom. A bottom part is its
+        /// footprint mirrored about its own y axis, then turned by --rotation
+        /// counterclockwise as seen from the top.
+        #[arg(long)]
+        side: Option<String>,
+        /// JSON: [{ref, at: [x, y], rotation?, side?}]; integers are nanometres (a
         /// rotation millidegrees), strings lengths (a rotation degrees): "90", not 90.
-        #[arg(long, value_name = "OPS", conflicts_with_all = ["ref", "at", "rotation"])]
+        #[arg(long, value_name = "OPS", conflicts_with_all = ["ref", "at", "rotation", "side"])]
         ops: Option<String>,
         #[command(flatten)]
         expect: Expect,
@@ -1615,7 +1633,8 @@ enum BoardCmd {
         #[arg(long)]
         out: PathBuf,
         /// Layers bottom first: copper.top, mask.top, paste.top, silk.top, fab.top,
-        /// courtyard.top, their .bottom, drill, outline.
+        /// courtyard.top, their .bottom, drill, outline; and copper.in1 … on a
+        /// board with inner layers.
         #[arg(long = "layer")]
         layers: Vec<String>,
         /// top (the default) or bottom, seen from below.
@@ -1680,7 +1699,9 @@ enum BoardCmd {
     /// --allow-errors, which the manifest records.
     ///
     /// Pick and place rotations are the placements' own: no fabricator's
-    /// per-package offsets are applied, so confirm them in its preview.
+    /// per-package offsets are applied, so confirm them in its preview. A
+    /// bottom part's row says bottom; X and Y are as seen from the top and
+    /// its rotation is the placement's.
     Export {
         board: String,
         /// A new or empty folder, or one an earlier export wrote (its
@@ -1700,7 +1721,7 @@ enum TrackCmd {
         /// The net: sda, s1/<net>, rail:gnd (`board show --pads` gives each pad's).
         #[arg(long)]
         net: Option<String>,
-        /// top or bottom.
+        /// top, in1 … or bottom (`board show` lists the board's layers).
         #[arg(long)]
         layer: Option<String>,
         /// A length; the preset's default when left out.
@@ -1752,7 +1773,7 @@ enum TrackCmd {
 
 #[derive(Subcommand)]
 enum ViaCmd {
-    /// A through via: --net and --at, or --ops for several (all or nothing).
+    /// A via: --net and --at (through the board unless --from or --to), or --ops for several (all or nothing).
     Add {
         board: String,
         #[arg(long)]
@@ -1764,11 +1785,17 @@ enum ViaCmd {
         drill: Option<String>,
         #[arg(long)]
         diameter: Option<String>,
+        /// The first copper layer it joins (top by default): top, in1 …
+        #[arg(long)]
+        from: Option<String>,
+        /// The last (bottom by default).
+        #[arg(long)]
+        to: Option<String>,
         #[arg(long)]
         id: Option<String>,
-        /// JSON: [{net, at, drill?, diameter?, id?}]; integers are nanometres,
-        /// strings lengths.
-        #[arg(long, value_name = "OPS", conflicts_with_all = ["net", "at", "drill", "diameter", "id"])]
+        /// JSON: [{net, at, drill?, diameter?, from?, to?, id?}]; integers are
+        /// nanometres, strings lengths.
+        #[arg(long, value_name = "OPS", conflicts_with_all = ["net", "at", "drill", "diameter", "from", "to", "id"])]
         ops: Option<String>,
         #[command(flatten)]
         expect: Expect,
@@ -3777,6 +3804,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             design,
             rect,
             outline,
+            layers,
             id,
             expect,
         }) => Request::BoardCreate {
@@ -3787,6 +3815,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
                 .as_deref()
                 .map(|o| json_arg("--outline", o))
                 .transpose()?,
+            layers: *layers,
             id: id.clone(),
             expected_revision: expect.expect.clone(),
         },
@@ -3795,6 +3824,8 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             name,
             outline,
             cutouts,
+            layers,
+            stackup,
             expect,
         }) => Request::BoardEdit {
             board: board.clone(),
@@ -3807,6 +3838,11 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
                 .as_deref()
                 .map(|c| json_arg("--cutouts", c))
                 .transpose()?,
+            layers: *layers,
+            stackup: stackup
+                .as_deref()
+                .map(|s| json_arg("--stackup", s))
+                .transpose()?,
             expected_revision: expect.expect.clone(),
         },
         Command::Board(BoardCmd::Delete { board, expect }) => Request::BoardDelete {
@@ -3818,6 +3854,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             r#ref,
             at,
             rotation,
+            side,
             ops,
             expect,
         }) => Request::BoardPlace {
@@ -3825,6 +3862,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             r#ref: r#ref.clone(),
             at: at.as_deref().map(|a| pair_arg("--at", a)).transpose()?,
             rotation: rotation.clone(),
+            side: side.clone(),
             ops: ops.as_deref().map(|o| json_arg("--ops", o)).transpose()?,
             expected_revision: expect.expect.clone(),
         },
@@ -3914,12 +3952,14 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             tracks: tracks.clone(),
             expected_revision: expect.expect.clone(),
         },
-        Command::Board(BoardCmd::Via(ViaCmd::Add { board, net, at, drill, diameter, id, ops, expect })) => Request::BoardViaAdd {
+        Command::Board(BoardCmd::Via(ViaCmd::Add { board, net, at, drill, diameter, from, to, id, ops, expect })) => Request::BoardViaAdd {
             board: board.clone(),
             net: net.clone(),
             at: at.as_deref().map(|a| point_arg("--at", a)).transpose()?,
             drill: drill.clone(),
             diameter: diameter.clone(),
+            from: from.clone(),
+            to: to.clone(),
             id: id.clone(),
             ops: ops.as_deref().map(|o| json_arg("--ops", o)).transpose()?,
             expected_revision: expect.expect.clone(),

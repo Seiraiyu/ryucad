@@ -178,6 +178,61 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         working: bool,
     },
+    #[serde(rename = "import.guess")]
+    ImportGuess {
+        /// An absolute path: the CLI makes it one.
+        file: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sheet: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        delimiter: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        encoding: Option<String>,
+        /// JSON and XML: where the records are, instead of the proposal.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        records: Option<String>,
+        /// Save the proposal as `imports/<save>.json`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        save: Option<String>,
+    },
+    #[serde(rename = "import.check")]
+    ImportCheck {
+        name: String,
+        file: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
+    },
+    #[serde(rename = "import.run")]
+    ImportRun {
+        name: String,
+        file: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        dry_run: bool,
+        /// `source` or `catalogue`: how a conflict is settled.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prefer: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
+        /// Numbers the ledger handed out, by scheme, taken in order by the
+        /// items an `assign` import creates (the CLI fills it, ryuplm 2.B).
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        numbers: std::collections::BTreeMap<String, Vec<String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "import.list")]
+    ImportList {},
+    /// What the CLI reads before it asks the ledger (ryuplm 2.B): see
+    /// `numbers::local`. Reads only.
+    #[serde(rename = "number.local")]
+    NumberLocal {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        next: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        class: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        item: Option<String>,
+    },
     #[serde(rename = "settings.show")]
     SettingsShow {},
     #[serde(rename = "settings.edit")]
@@ -312,6 +367,8 @@ impl Request {
                 | Request::BomEdit { .. }
                 | Request::BomRemove { .. }
                 | Request::SettingsEdit { .. }
+                | Request::ImportGuess { .. }
+                | Request::ImportRun { .. }
                 | Request::ReleasePropose { .. }
                 | Request::ReleaseObsolete { .. }
                 | Request::Undo { .. }
@@ -394,6 +451,34 @@ mod tests {
                 expected_revision: None,
             },
             Request::Undo { entry: None },
+            Request::ImportGuess {
+                file: "/x/items.csv".into(),
+                sheet: None,
+                delimiter: Some(";".into()),
+                encoding: None,
+                records: None,
+                save: Some("erp".into()),
+            },
+            Request::ImportCheck {
+                name: "erp".into(),
+                file: "/x/items.csv".into(),
+                limit: Some(5),
+            },
+            Request::ImportRun {
+                name: "erp".into(),
+                file: "/x/items.csv".into(),
+                dry_run: true,
+                prefer: Some("source".into()),
+                limit: None,
+                numbers: Default::default(),
+                expected_revision: None,
+            },
+            Request::ImportList {},
+            Request::NumberLocal {
+                next: Some(String::new()),
+                class: Some("machined".into()),
+                item: None,
+            },
         ];
         for r in reqs {
             assert_eq!(Request::from_rpc(&r.method(), Some(r.params())).unwrap(), r);

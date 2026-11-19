@@ -1146,6 +1146,18 @@ pub enum Code {
     /// ryueda DRC finding (a warning): a courtyard whose graphics don't
     /// close, judged by its box.
     DrcCourtyardOpen,
+    /// A board's stackup doesn't start and end with copper, doesn't
+    /// alternate copper and dielectric, has fewer than 2 or more than 32
+    /// copper layers, or has a thickness that isn't positive.
+    BoardStackupInvalid,
+    /// A track or via names a copper layer its board's stackup lacks.
+    BoardLayerNotFound,
+    /// ryueda DRC finding (an error): a blind or buried via on a board
+    /// whose preset makes only through vias.
+    DrcViaSpan,
+    /// ryueda DRC finding (an error): copper closer to a hole's wall than
+    /// the preset allows, on a layer where the hole doesn't join it.
+    DrcHoleClearance,
     /// `board export` refused: the board has DRC errors (its report in
     /// `details.report`); fix them, or export with `--allow-errors`,
     /// which the manifest records.
@@ -1181,6 +1193,35 @@ pub enum Code {
     BomLineTwice,
     /// Items whose BOM lines name each other in a loop (an error).
     BomCycle,
+    /// ryuplm import finding (a warning): a mapped field changed both in
+    /// the source and in the catalogue since the last import, to different
+    /// values. `details` has `item`, `key`, `row`, `field`, `base`,
+    /// `catalogue` and `source`; the field is left alone until
+    /// `--prefer source|catalogue` or an edit settles it.
+    ImportConflict,
+    /// ryuplm import finding (a warning): an item or a BOM line an import
+    /// made before is no longer in its source. Nothing is deleted.
+    ImportMissing,
+    /// An import mapping (`imports/<name>.json`) that doesn't read, names
+    /// a column the source hasn't, or a property, class or scheme the
+    /// catalogue doesn't declare (an error).
+    ImportMappingInvalid,
+    /// ryuplm check finding (a warning): the label an item's legacy
+    /// history carried isn't one of the catalogue's revision scheme, so its
+    /// first release takes the scheme's first label (design 935).
+    ItemHistoryLabelForeign,
+    /// A part number the organization's ledger holds for another
+    /// catalogue or item (ryuplm 2, design 936): `details.service.taken`
+    /// names each number's holders as the service answers them. Also the
+    /// hosted `ryuplm / check`'s finding.
+    PartNumberTaken,
+    /// The ledger can't be asked (design 936): the service is unreachable,
+    /// the organization isn't on it, there is no token or no GitHub
+    /// remote, or the catalogue's `part_number.ledger` is off.
+    /// `details.why` is the cause's code (`ledger_off` for the last).
+    /// `--next` and imports fall back to the local next number with this
+    /// as a warning; `ryuplm number` fails with it.
+    LedgerUnavailable,
 }
 
 impl Code {
@@ -1569,6 +1610,10 @@ impl Code {
         Code::DrcEdgeClearance,
         Code::DrcCourtyardOverlap,
         Code::DrcCourtyardOpen,
+        Code::BoardStackupInvalid,
+        Code::BoardLayerNotFound,
+        Code::DrcViaSpan,
+        Code::DrcHoleClearance,
         Code::DrcFailed,
         Code::ItemNotFound,
         Code::ItemClassUnknown,
@@ -1580,6 +1625,12 @@ impl Code {
         Code::BomUnlinked,
         Code::BomLineTwice,
         Code::BomCycle,
+        Code::ImportConflict,
+        Code::ImportMissing,
+        Code::ImportMappingInvalid,
+        Code::ItemHistoryLabelForeign,
+        Code::PartNumberTaken,
+        Code::LedgerUnavailable,
     ];
 
     /// The CLI's exit code: 1 the agent can fix it, 2 usage, 3 not a
@@ -1599,7 +1650,8 @@ impl Code {
             | Code::DependencyFetchFailed
             | Code::PartsSourceUnreachable
             | Code::PartsRateLimited
-            | Code::Cancelled => 4,
+            | Code::Cancelled
+            | Code::LedgerUnavailable => 4,
             _ => 1,
         }
     }
@@ -1687,6 +1739,18 @@ mod tests {
     }
 
     #[test]
+    fn ledger_codes() {
+        assert_eq!(json!(Code::PartNumberTaken), json!("part_number_taken"));
+        assert_eq!(json!(Code::LedgerUnavailable), json!("ledger_unavailable"));
+        assert_eq!(Code::PartNumberTaken.exit_code(), 1);
+        assert_eq!(Code::LedgerUnavailable.exit_code(), 4);
+        assert_eq!(
+            &Code::ALL[Code::ALL.len() - 2..],
+            &[Code::PartNumberTaken, Code::LedgerUnavailable]
+        );
+    }
+
+    #[test]
     fn catalogue_codes() {
         for (c, s) in [
             (Code::ItemNotFound, "item_not_found"),
@@ -1702,6 +1766,10 @@ mod tests {
             (Code::BomUnlinked, "bom_unlinked"),
             (Code::BomLineTwice, "bom_line_twice"),
             (Code::BomCycle, "bom_cycle"),
+            (Code::ImportConflict, "import_conflict"),
+            (Code::ImportMissing, "import_missing"),
+            (Code::ImportMappingInvalid, "import_mapping_invalid"),
+            (Code::ItemHistoryLabelForeign, "item_history_label_foreign"),
             (Code::BomItemMissing, "bom_item_missing"),
         ] {
             assert_eq!(json!(c), json!(s));
@@ -1725,6 +1793,20 @@ mod tests {
             (Code::DrcEdgeClearance, "drc_edge_clearance"),
             (Code::DrcCourtyardOverlap, "drc_courtyard_overlap"),
             (Code::DrcCourtyardOpen, "drc_courtyard_open"),
+        ] {
+            assert_eq!(json!(c), json!(s));
+            assert_eq!(c.exit_code(), 1);
+            assert!(Code::ALL.contains(&c), "{c:?} in ALL");
+        }
+    }
+
+    #[test]
+    fn stackup_and_hole_codes() {
+        for (c, s) in [
+            (Code::BoardStackupInvalid, "board_stackup_invalid"),
+            (Code::BoardLayerNotFound, "board_layer_not_found"),
+            (Code::DrcViaSpan, "drc_via_span"),
+            (Code::DrcHoleClearance, "drc_hole_clearance"),
         ] {
             assert_eq!(json!(c), json!(s));
             assert_eq!(c.exit_code(), 1);

@@ -2,6 +2,8 @@ connect.clearance.1 128d6eb776247a49
 connect.clearance.8 128d6eb776247a49
 connect.contacts.1 cbf29ce484222325
 connect.contacts.8 cbf29ce484222325
+connect.hole_clearance.1 6e9563b332f25674
+connect.hole_clearance.8 6e9563b332f25674
 connect.islands.1 a32ce4e50c24ea52
 connect.islands.8 a32ce4e50c24ea52
 connect.uncertain.1 37959b289744654a

@@ -1,0 +1,10 @@
+json_columns 246480b6afb686bd
+json_items 8d70d973b97b046f
+json_mapping 994e69b28fd5f599
+json_refusals 9c3ddcd3288c214b
+json_report 958e45c7a2990ecb
+xml_columns 7d5c01e700b71bbb
+xml_items 7a09258f009fb520
+xml_mapping 447a17b707b94369
+xml_refusals 9c3ddcd3288c214b
+xml_report 958e45c7a2990ecb

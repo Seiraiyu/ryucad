@@ -129,10 +129,12 @@ impl Broke {
     }
 }
 
-/// What a faulty file depends on: a file, or every file under a folder.
+/// What a faulty file depends on: a file, every file under a folder, or
+/// a set of files shared by several faults (a number's holders, #989).
 enum Dep {
     File(String),
     Under(String),
+    Files(std::sync::Arc<[String]>),
 }
 
 /// One fault on one side, before blame.
@@ -168,17 +170,37 @@ fn faults<P: Product>(src: &dyn Source, releases: &Releases) -> BTreeMap<Key, Fa
             crate::product::part_ids::<P>(src).unwrap_or_default(),
             unit,
         );
+        // Each number's holders once, shared by every holder's fault: a
+        // fault names at most ten of them (#989).
+        let mut holders: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for (part, pp) in &pdm.parts {
+            for e in pp
+                .faults
+                .iter()
+                .filter(|e| e.code == Code::PartNumberDuplicate)
+            {
+                if let Some(n) = e.details["value"].as_str() {
+                    holders
+                        .entry(n.to_owned())
+                        .or_default()
+                        .push(crate::props::path_for::<P>(part));
+                }
+            }
+        }
+        let holders: BTreeMap<String, std::sync::Arc<[String]>> =
+            holders.into_iter().map(|(n, v)| (n, v.into())).collect();
         for (part, pp) in &pdm.parts {
             for e in &pp.faults {
                 let property = e.details["property"].as_str().unwrap_or_default();
                 let code = json!(e.code).as_str().unwrap_or_default().to_owned();
                 let depends = if e.code == Code::PartNumberDuplicate {
-                    e.details["parts"]
-                        .as_array()
+                    // The fault's own file is among them; `changed` skips it.
+                    e.details["value"]
+                        .as_str()
+                        .and_then(|n| holders.get(n))
+                        .cloned()
+                        .map(Dep::Files)
                         .into_iter()
-                        .flatten()
-                        .filter_map(|p| Id::parse(p.as_str()?, "part").ok())
-                        .map(|p| Dep::File(crate::props::path_for::<P>(&p)))
                         .collect()
                 } else {
                     vec![
@@ -213,7 +235,12 @@ fn faults<P: Product>(src: &dyn Source, releases: &Releases) -> BTreeMap<Key, Fa
             .filter_map(|e| Some((e, e.record.as_ref().ok()?)))
             .collect();
         let others = join(RELEASES, part.as_str());
-        for f in sequence(&config, &part, &entries) {
+        for f in sequence(
+            &config,
+            &part,
+            &P::first_label(src, &part, config.revisions),
+            &entries,
+        ) {
             let path = f.details["path"].as_str().unwrap_or_default().to_owned();
             let label = f.label.clone().unwrap_or_default();
             out.insert(
@@ -302,6 +329,13 @@ fn changed(side: &dyn Source, base: &dyn Source, deps: &[Dep], skip: &str) -> Ve
             Dep::File(p) => {
                 if p != skip && side.read(p).ok().flatten() != base.read(p).ok().flatten() {
                     out.push(p.clone());
+                }
+            }
+            Dep::Files(ps) => {
+                for p in ps.iter() {
+                    if p != skip && side.read(p).ok().flatten() != base.read(p).ok().flatten() {
+                        out.push(p.clone());
+                    }
                 }
             }
             Dep::Under(dir) => {
@@ -480,6 +514,39 @@ mod tests {
         // A collision a side already had isn't the merge's.
         let b = validate(&base, &merged, &theirs, &merged, &none);
         assert_eq!(b, []);
+    }
+
+    #[test]
+    fn a_large_group_blames_every_holder_not_ten() {
+        // #989: a fault names at most ten other holders; blame reads all.
+        let mut base = project();
+        let names: Vec<String> = (0..12).map(|k| format!("n{k:02}")).collect();
+        for n in &names {
+            put(
+                &mut base,
+                &format!("parts/{n}/part.json"),
+                json!({"features": [], "format": 1, "kind": "ryucad.part"}),
+            );
+        }
+        let (mut ours, mut theirs) = (base.clone(), base.clone());
+        props(&mut ours, "n00", json!({"number": "TBD"}));
+        for n in &names[1..] {
+            props(&mut theirs, n, json!({"number": "TBD"}));
+        }
+        let mut merged = theirs.clone();
+        props(&mut merged, "n00", json!({"number": "TBD"}));
+        let b = validate(&base, &ours, &theirs, &merged, &Releases::default());
+        let n00 = b
+            .iter()
+            .find(|b| b.part.as_str() == "n00")
+            .expect("n00's collision is the merge's");
+        assert_eq!(n00.cause.as_str(), "theirs");
+        // Its own file, then all eleven files theirs numbered.
+        assert_eq!(n00.files.len(), 12, "{:?}", n00.files);
+        assert_eq!(n00.details["parts"].as_array().unwrap().len(), 10);
+        assert_eq!(n00.details["count"], 11);
+        // The others' collisions were theirs already.
+        assert_eq!(b.len(), 1, "{:?}", summary(&b));
     }
 
     #[test]

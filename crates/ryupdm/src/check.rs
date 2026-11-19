@@ -209,7 +209,12 @@ pub fn run_for<P: Product>(
                 );
             }
         }
-        out.extend(sequence(&config, &part, &entries));
+        out.extend(sequence(
+            &config,
+            &part,
+            &P::first_label(src, &part, config.revisions),
+            &entries,
+        ));
         let ordered = state::ordered(config.revisions, &records, &part).ok();
         let releases_of: Vec<(&Entry, &crate::record::Release)> = entries
             .iter()
@@ -588,8 +593,14 @@ fn approval_finding(
 
 /// `release_sequence` for a part's readable records: releases follow one
 /// another in the scheme, each superseding the one before, and an
-/// obsolete record names a release.
-pub(crate) fn sequence(config: &Config, part: &Id, entries: &[(&Entry, &Record)]) -> Vec<Finding> {
+/// obsolete record names a release. `first` is the label the part's
+/// first release takes ([`Product::first_label`]).
+pub(crate) fn sequence(
+    config: &Config,
+    part: &Id,
+    first: &str,
+    entries: &[(&Entry, &Record)],
+) -> Vec<Finding> {
     let scheme = config.revisions;
     let mut out = Vec::new();
     let mut placed: Vec<(u64, &Entry, &Record)> = Vec::new();
@@ -613,7 +624,7 @@ pub(crate) fn sequence(config: &Config, part: &Id, entries: &[(&Entry, &Record)]
         match r {
             Record::Release(rel) => {
                 let want_label = match previous {
-                    None => label::first(scheme),
+                    None => first.to_owned(),
                     Some(p) => label::next(scheme, p).expect("placed"),
                 };
                 let ok = rel.supersedes.as_deref() == previous && e.label == want_label;
@@ -862,11 +873,20 @@ pub fn staged_for<P: Product>(repo: &gix::Repository, prefix: &str) -> Result<Ve
                 );
             }
         }
-        out.extend(sequence(&config, part, &entries).into_iter().filter(|f| {
-            f.details["path"]
-                .as_str()
-                .is_some_and(|p| records_changed.iter().any(|c| c == p))
-        }));
+        out.extend(
+            sequence(
+                &config,
+                part,
+                &P::first_label(&src, part, config.revisions),
+                &entries,
+            )
+            .into_iter()
+            .filter(|f| {
+                f.details["path"]
+                    .as_str()
+                    .is_some_and(|p| records_changed.iter().any(|c| c == p))
+            }),
+        );
         let content = P::content(&src, part);
         let working = props::read_for::<P>(&src, part);
         for (e, r) in &entries {

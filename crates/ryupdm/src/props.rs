@@ -365,34 +365,55 @@ pub fn missing(config: &Config, props: &Properties) -> Vec<String> {
     out
 }
 
-/// `part_number_duplicate` for each part whose number another part has
-/// too, naming the others.
+/// How many other holders a `part_number_duplicate` names (#989). A
+/// number on thousands of parts (a placeholder such as `TBD` in an
+/// imported item master) gave each of them a list of every other one,
+/// quadratic in the group: gigabytes at 100,000 items.
+pub const DUPLICATE_LISTED: usize = 10;
+
+/// `part_number_duplicate` for every part sharing a number with another:
+/// each names up to [`DUPLICATE_LISTED`] of the others in ID order, in its
+/// message and `details.parts`, and, when there are more, how many in
+/// all (`details.count`).
 pub fn duplicates<'a>(numbers: impl IntoIterator<Item = (&'a Id, &'a str)>) -> BTreeMap<Id, Error> {
     let mut by_number: BTreeMap<&str, Vec<&Id>> = BTreeMap::new();
     for (part, n) in numbers {
         by_number.entry(n).or_default().push(part);
     }
     let mut out = BTreeMap::new();
-    for (n, parts) in by_number.into_iter().filter(|(_, p)| p.len() > 1) {
+    for (n, mut parts) in by_number.into_iter().filter(|(_, p)| p.len() > 1) {
+        parts.sort();
+        let count = parts.len() - 1;
         for part in &parts {
-            let others: Vec<&Id> = parts.iter().copied().filter(|p| p != part).collect();
+            let others: Vec<&Id> = parts
+                .iter()
+                .copied()
+                .filter(|p| p != part)
+                .take(DUPLICATE_LISTED)
+                .collect();
             let list = others
                 .iter()
                 .map(|p| p.as_str())
                 .collect::<Vec<_>>()
                 .join(", ");
-            out.insert(
-                (*part).clone(),
-                Error::new(
-                    Code::PartNumberDuplicate,
-                    format!("part {part}: number {n:?} is also part {list}'s"),
+            let capped = count > others.len();
+            let message = if capped {
+                format!(
+                    "part {part}: number {n:?} is also held by {count} other parts, among them {list}"
                 )
+            } else {
+                format!("part {part}: number {n:?} is also part {list}'s")
+            };
+            let mut e = Error::new(Code::PartNumberDuplicate, message)
                 .with("part", part)
                 .with("property", "number")
                 .with("pointer", "/number")
                 .with("value", n)
-                .with("parts", &others),
-            );
+                .with("parts", &others);
+            if capped {
+                e = e.with("count", count);
+            }
+            out.insert((*part).clone(), e);
         }
     }
     out
@@ -683,6 +704,46 @@ mod tests {
         assert_eq!(dups.keys().collect::<Vec<_>>(), [&a, &c, &d]);
         assert_eq!(dups[&a].details["parts"], json!(["c", "d"]));
         assert_eq!(dups[&c].code, Code::PartNumberDuplicate);
+    }
+
+    #[test]
+    fn a_large_group_names_ten_others_and_a_count() {
+        // #989: 3,000 parts on one number (a placeholder such as TBD in an
+        // imported item master) once listed 2,999 others in each fault.
+        let ids: Vec<Id> = (0..3000).map(|k| id(&format!("p{k:04}"))).collect();
+        let dups = duplicates(ids.iter().map(|i| (i, "TBD")));
+        assert_eq!(dups.len(), 3000);
+        let first = &dups[&ids[0]];
+        assert_eq!(first.code, Code::PartNumberDuplicate);
+        let listed = first.details["parts"].as_array().unwrap();
+        assert_eq!(listed.len(), DUPLICATE_LISTED);
+        assert_eq!(listed[0], "p0001");
+        assert_eq!(listed[9], "p0010");
+        assert_eq!(first.details["count"], 2999);
+        assert!(
+            first.message.contains("2999 other parts"),
+            "{}",
+            first.message
+        );
+        // Linear: ten names a fault, never the group.
+        let total: usize = dups
+            .values()
+            .map(|e| e.details["parts"].as_array().unwrap().len())
+            .sum();
+        assert_eq!(total, 3000 * DUPLICATE_LISTED);
+    }
+
+    #[test]
+    fn a_group_of_eleven_is_listed_whole() {
+        let ids: Vec<Id> = (0..11).map(|k| id(&format!("p{k:02}"))).collect();
+        let dups = duplicates(ids.iter().map(|i| (i, "1")));
+        let e = &dups[&ids[0]];
+        assert_eq!(e.details["parts"].as_array().unwrap().len(), 10);
+        assert!(e.details.get("count").is_none(), "{}", e.details);
+        assert_eq!(
+            e.message,
+            "part p00: number \"1\" is also part p01, p02, p03, p04, p05, p06, p07, p08, p09, p10's"
+        );
     }
 
     #[cfg(feature = "cad")]

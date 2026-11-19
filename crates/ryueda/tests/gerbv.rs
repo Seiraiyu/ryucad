@@ -396,7 +396,7 @@ fn check_package(root: &Path, board: &str, out: &Path) {
         let shapes: Vec<&Shape> = lf.layer.items.iter().map(|i| &i.shape).collect();
         check(&file, &shapes, out);
     }
-    for (d, function) in ryueda::board::fab::drills(&s).iter().zip(["pth", "npth"]) {
+    for (function, d) in ryueda::board::fab::drills(&s) {
         if d.holes.is_empty() {
             continue;
         }
@@ -508,6 +508,58 @@ fn gerbv_reads_a_generated_boards_package() {
         &["board", "export", "main", "--out", "fab", "--allow-errors"],
     );
     check_package(&root, "main", &root.join("fab"));
+}
+
+/// A generated board on four copper layers with parts on the bottom and
+/// one via cut short at `in1` (ryueda 7.A): every copper file, the inner
+/// ones too, and the blind span's drill file read by gerbv.
+#[test]
+#[ignore = "needs gerbv: the devcontainer, full.yml"]
+fn gerbv_reads_a_four_layer_package() {
+    if !have_gerbv() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("board");
+    std::fs::create_dir_all(&root).unwrap();
+    // The first seed whose board has inner connections, bottom parts and
+    // a connection by the bottom.
+    let spec = (0..64u64)
+        .map(|seed| board_gen::Spec {
+            layers: 4,
+            bottom_every: 3,
+            ..board_gen::seeded(seed)
+        })
+        .find(|s| {
+            // Tracks wide enough that edges aren't most of the picture.
+            s.width >= 200 * board_gen::UM
+                && s.cols >= 4
+                && (0..s.count()).any(|n| s.bottom(n))
+                && (0..s.count() - 1).any(|n| s.inner(n))
+                && (0..s.count() - 1).any(|n| s.by_vias(n))
+        })
+        .unwrap();
+    let blind = (0..spec.count() - 1).find(|&n| spec.by_vias(n)).unwrap();
+    let spec = board_gen::Spec {
+        fault: Some(board_gen::Fault::ViaToIn1(blind)),
+        ..spec
+    };
+    assert!((0..spec.count()).any(|n| spec.bottom(n)));
+    assert!((0..spec.count() - 1).any(|n| spec.inner(n)));
+    board_gen::write(&root, &spec);
+    ryueda(
+        &root,
+        &["board", "export", "main", "--out", "fab", "--allow-errors"],
+    );
+    let fab = root.join("fab");
+    for name in [
+        "main-copper-in1.g2",
+        "main-copper-in2.g3",
+        "main-pth-l1-l2.drl",
+    ] {
+        assert!(fab.join(name).is_file(), "{name}");
+    }
+    check_package(&root, "main", &fab);
 }
 
 #[test]

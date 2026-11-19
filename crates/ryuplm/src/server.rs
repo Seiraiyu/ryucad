@@ -79,7 +79,11 @@ fn guarded<T>(
 ) -> Result<T> {
     let session = match slot {
         Some(s) => s,
-        None => slot.insert(Session::open(root)?),
+        None => {
+            let s = slot.insert(Session::open(root)?);
+            s.opened_now();
+            s
+        }
     };
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(session))) {
         Ok(r) => r,
@@ -251,6 +255,53 @@ fn dispatch(
                 working,
             },
         )?,
+        Request::ImportGuess {
+            file,
+            sheet,
+            delimiter,
+            encoding,
+            records,
+            save,
+        } => crate::import::guess::answer(
+            session,
+            std::path::Path::new(&file),
+            sheet,
+            delimiter,
+            encoding,
+            records,
+            save,
+        )?,
+        Request::ImportList {} => crate::import::list(session)?,
+        Request::NumberLocal { next, class, item } => {
+            crate::numbers::local(session, next.as_deref(), class.as_deref(), item.as_deref())?
+        }
+        Request::ImportCheck { name, file, limit } => {
+            crate::import::preview::check(session, &name, std::path::Path::new(&file), limit)?
+        }
+        Request::ImportRun {
+            name,
+            file,
+            dry_run,
+            prefer,
+            limit,
+            numbers,
+            expected_revision,
+        } => {
+            let prefer = prefer
+                .as_deref()
+                .map(crate::import::run::Prefer::parse)
+                .transpose()?;
+            crate::import::run::run(
+                session,
+                &name,
+                std::path::Path::new(&file),
+                dry_run,
+                prefer,
+                limit,
+                &numbers,
+                expected_revision.as_deref(),
+            )?
+        }
         Request::SettingsShow {} => settings::show(session)?,
         Request::SettingsEdit {
             change,

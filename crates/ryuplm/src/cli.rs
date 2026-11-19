@@ -95,6 +95,15 @@ enum Command {
     /// its own lines edited (add, edit, remove), and what changed (diff).
     #[command(subcommand)]
     Bom(BomCmd),
+    /// Items from other systems' files (CSV, XLSX), through a committed
+    /// mapping (imports/<name>.json) the user or agent writes.
+    #[command(subcommand)]
+    Import(ImportCmd),
+    /// The organization's ledger of part numbers (design 936), for a
+    /// catalogue whose ledger is on: reserve numbers, reserve by hand, who
+    /// holds a number, the live reservations.
+    #[command(subcommand)]
+    Number(NumberCmd),
     /// Every item whose own lines or representations' lines use ITEM:
     /// here, in other catalogues' checkouts, and in their releases.
     WhereUsed {
@@ -198,6 +207,92 @@ impl FieldArgs {
 }
 
 #[derive(Subcommand)]
+enum ImportCmd {
+    /// Propose a mapping for FILE from its header and first rows.
+    Guess {
+        file: PathBuf,
+        #[arg(long)]
+        sheet: Option<String>,
+        /// One character, or `tab`.
+        #[arg(long)]
+        delimiter: Option<String>,
+        /// utf-8, utf-16le, utf-16be, latin1 or windows-1252.
+        #[arg(long)]
+        encoding: Option<String>,
+        /// JSON and XML: where the records are (a JSON Pointer such as
+        /// /data/items, or an element path such as /Export/Items/Item),
+        /// instead of the proposed one.
+        #[arg(long)]
+        records: Option<String>,
+        /// Save the proposal as imports/NAME.json.
+        #[arg(long, value_name = "NAME")]
+        save: Option<String>,
+    },
+    /// What mapping NAME reads from FILE, row by row; every refusal at its
+    /// row and column. Writes nothing.
+    Check {
+        name: String,
+        file: PathBuf,
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+    /// Import FILE through mapping NAME: new keys become items, changed
+    /// rows are settled field by field, nothing is ever deleted.
+    Run {
+        name: String,
+        file: PathBuf,
+        #[arg(long)]
+        dry_run: bool,
+        /// Settle conflicts: source or catalogue.
+        #[arg(long)]
+        prefer: Option<String>,
+        #[arg(long)]
+        limit: Option<usize>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// The mapping files, and how many items each has made.
+    List,
+}
+
+#[derive(Subcommand)]
+enum NumberCmd {
+    /// Reserve the next COUNT numbers of SCHEME (or of the one that
+    /// applies) without creating items.
+    Next {
+        scheme: Option<String>,
+        #[arg(long)]
+        class: Option<String>,
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u64).range(1..=100_000))]
+        count: u64,
+        /// Days each stays reserved, 1 to 365 (30 by default).
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=365))]
+        days: Option<u64>,
+    },
+    /// Reserve numbers typed by hand to this catalogue, all or none.
+    Reserve {
+        #[arg(required = true)]
+        numbers: Vec<String>,
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=365))]
+        days: Option<u64>,
+    },
+    /// Who holds NUMBER in the organization.
+    Who { number: String },
+    /// This catalogue's live reservations, 1,000 a page.
+    List {
+        /// Only the ones you reserved.
+        #[arg(long)]
+        mine: bool,
+        /// The whole organization's, not just this catalogue's.
+        #[arg(long)]
+        all: bool,
+        /// The page after this number (the last page's `after`).
+        #[arg(long)]
+        after: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 enum BomCmd {
     /// The item's BOM: own lines, then its representations' lines, each
     /// child resolved to an item; --depth follows child items deeper.
@@ -276,7 +371,8 @@ enum ItemCmd {
     /// A new item, with a number or the next of a scheme.
     Create {
         number: Option<String>,
-        /// Take the next number of SCHEME (or of the one that applies).
+        /// Take the next number of SCHEME (or of the one that applies): from
+        /// the organization's ledger when the catalogue's is on.
         #[arg(long, num_args = 0..=1, default_missing_value = "")]
         next: Option<String>,
         #[command(flatten)]
@@ -365,6 +461,10 @@ enum SettingsCmd {
         declaration: Option<String>,
         #[arg(long)]
         remove: bool,
+        /// The organization's ledger hands out and holds this catalogue's
+        /// numbers: on or off.
+        #[arg(long, value_parser = on_off)]
+        ledger: Option<bool>,
         #[command(flatten)]
         expect: Expect,
     },
@@ -451,6 +551,20 @@ fn absolute(here: &Path, dirs: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// `file` from `here`, absolute, so a daemon reads the same file.
+fn abs_file(here: &Path, file: &Path) -> String {
+    let p = here.join(file);
+    p.canonicalize().unwrap_or(p).display().to_string()
+}
+
+fn on_off(s: &str) -> core::result::Result<bool, String> {
+    match s {
+        "on" | "true" => Ok(true),
+        "off" | "false" => Ok(false),
+        _ => Err(format!("{s:?}: on or off")),
+    }
+}
+
 fn unit(s: &str) -> core::result::Result<Unit, String> {
     Unit::parse(s).ok_or_else(|| format!("unknown unit {s:?}: m, cm, mm, um, in or ft"))
 }
@@ -460,6 +574,52 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
     let exp = |e: &Expect| e.expect.clone();
     Ok(Some(match cmd {
         Command::Info => (root()?, Request::ProjectInfo {}),
+        Command::Import(ImportCmd::Guess {
+            file,
+            sheet,
+            delimiter,
+            encoding,
+            records,
+            save,
+        }) => (
+            root()?,
+            Request::ImportGuess {
+                file: abs_file(here, file),
+                sheet: sheet.clone(),
+                delimiter: delimiter.clone(),
+                encoding: encoding.clone(),
+                records: records.clone(),
+                save: save.clone(),
+            },
+        ),
+        Command::Import(ImportCmd::Check { name, file, limit }) => (
+            root()?,
+            Request::ImportCheck {
+                name: name.clone(),
+                file: abs_file(here, file),
+                limit: *limit,
+            },
+        ),
+        Command::Import(ImportCmd::Run {
+            name,
+            file,
+            dry_run,
+            prefer,
+            limit,
+            expect,
+        }) => (
+            root()?,
+            Request::ImportRun {
+                name: name.clone(),
+                file: abs_file(here, file),
+                dry_run: *dry_run,
+                prefer: prefer.clone(),
+                limit: *limit,
+                numbers: Default::default(),
+                expected_revision: exp(expect),
+            },
+        ),
+        Command::Import(ImportCmd::List) => (root()?, Request::ImportList {}),
         Command::Item(ItemCmd::Create {
             number,
             next,
@@ -671,6 +831,7 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
             property,
             declaration,
             remove,
+            ledger,
             expect,
         }) => {
             let declaration = declaration
@@ -690,6 +851,7 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
                         property: property.clone(),
                         declaration,
                         remove: *remove,
+                        ledger: *ledger,
                     },
                     expected_revision: exp(expect),
                 },
@@ -753,14 +915,16 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
         Command::Participants => (root()?, Request::ParticipantList {}),
         Command::Undo { entry } => (root()?, Request::Undo { entry: *entry }),
         Command::Redo { entry } => (root()?, Request::Redo { entry: *entry }),
-        // Version, Init, Watch, Daemon, Git and Merge are not requests.
+        // Version, Init, Watch, Daemon, Git, Merge and Number are not
+        // requests.
         Command::Version
         | Command::Errors { .. }
         | Command::Init { .. }
         | Command::Watch { .. }
         | Command::Daemon(_)
         | Command::Git(_)
-        | Command::Merge(_) => return Ok(None),
+        | Command::Merge(_)
+        | Command::Number(_) => return Ok(None),
     }))
 }
 
@@ -773,6 +937,20 @@ fn participant(cli: &Cli) -> Option<String> {
     cli.as_name
         .clone()
         .or_else(|| std::env::var("RYUPLM_PARTICIPANT").ok())
+}
+
+/// Sends `req` to the catalogue's daemon, or answers it in process when
+/// none can be reached (or with --no-daemon), as every request goes.
+fn send(cli: &Cli, root: &Path, req: Request, warnings: &mut Vec<String>) -> Result<Value> {
+    if !no_daemon(cli) {
+        match client::request(root, &req, participant(cli).as_deref()) {
+            Ok(answer) => return answer.map(|a| a.result),
+            // Never delivered, so running it here is safe.
+            Err(e) => warnings.push(format!("{}; ran in process", e.message)),
+        }
+    }
+    let me = participant(cli);
+    server::handle_safely(&mut None, None, me.as_deref(), root, req).map(|a| a.result)
 }
 
 /// Runs the command, collecting warnings for the output.
@@ -823,19 +1001,66 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
                 Duration::from_secs(*timeout),
             )
         }
+        Command::Number(cmd) => {
+            let root = find_root(&here)?;
+            let ask = match cmd {
+                NumberCmd::Next {
+                    scheme,
+                    class,
+                    count,
+                    days,
+                } => ryuplm::ledger::Ask::Next {
+                    scheme: scheme.clone(),
+                    class: class.clone(),
+                    count: *count,
+                    days: *days,
+                },
+                NumberCmd::Reserve { numbers, days } => ryuplm::ledger::Ask::Reserve {
+                    numbers: numbers.clone(),
+                    days: *days,
+                },
+                NumberCmd::Who { number } => ryuplm::ledger::Ask::Who {
+                    number: number.clone(),
+                },
+                NumberCmd::List { mine, all, after } => ryuplm::ledger::Ask::List {
+                    mine: *mine,
+                    all: *all,
+                    after: after.clone(),
+                },
+            };
+            let mut sent = Vec::new();
+            let out = {
+                let mut send_one = |r: Request| send(cli, &root, r, &mut sent);
+                let open = || ryuplm::ledger::Ledger::open(&root);
+                ryuplm::ledger::number(&mut send_one, &open, ask)
+            };
+            warnings.extend(sent);
+            out
+        }
         cmd => {
             let Some((root, req)) = request(cmd, &here)? else {
                 return Err(Error::new(Code::Internal, "a command that is no request"));
             };
-            if !no_daemon(cli) {
-                match client::request(&root, &req, participant(cli).as_deref()) {
-                    Ok(answer) => return answer.map(|a| a.result),
-                    // Never delivered, so running it here is safe.
-                    Err(e) => warnings.push(format!("{}; ran in process", e.message)),
+            // The ledger is asked here, in the CLI's process, never by
+            // the daemon (design 936); what the daemon gets is an
+            // ordinary request carrying the numbers.
+            let mut sent = Vec::new();
+            let out = {
+                let mut send_one = |r: Request| send(cli, &root, r, &mut sent);
+                let open = || ryuplm::ledger::Ledger::open(&root);
+                match &req {
+                    Request::ItemCreate { .. } | Request::ItemRenumber { .. } => {
+                        ryuplm::ledger::numbered(&mut send_one, &open, req, warnings)
+                    }
+                    Request::ImportRun { .. } => {
+                        ryuplm::ledger::import_run(&mut send_one, &open, req, warnings)
+                    }
+                    _ => send_one(req),
                 }
-            }
-            let me = participant(cli);
-            server::handle_safely(&mut None, None, me.as_deref(), &root, req).map(|a| a.result)
+            };
+            sent.dedup();
+            warnings.extend(sent);
+            out
         }
     }
 }

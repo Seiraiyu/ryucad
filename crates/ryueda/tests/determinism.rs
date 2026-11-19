@@ -412,6 +412,136 @@ fn boards(golden: &mut Golden, at: &Path) {
     }
 }
 
+/// The breakout's board on four copper layers (ryueda 7.A): the same
+/// round replayed, its stackup made four layers, a track on `in1`
+/// between two of its through vias; its pads, DRC, copper, an `in1`
+/// render and package, alike on one thread and eight.
+fn four_layers(golden: &mut Golden, at: &Path) {
+    type Got = (Value, String, Value, Value, Value, BTreeMap<String, String>);
+    let id = breakout_board::BOARD;
+    let mut first: Option<Got> = None;
+    for threads in [1, 8] {
+        let board = at.join(format!("t{threads}")).join("board");
+        std::fs::create_dir_all(&board).unwrap();
+        ryueda(&board, 1, &["init"]);
+        breakout_at(&board);
+        for args in breakout_board::script() {
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            ryueda(&board, threads, &args);
+        }
+        for args in FOUR {
+            ryueda(&board, threads, args);
+        }
+        let mut show = ryueda(&board, threads, &["board", "show", id, "--pads"]);
+        if let Some(o) = show.as_object_mut() {
+            o.remove("revision");
+            o.remove("schema");
+        }
+        ryueda(
+            &board,
+            threads,
+            &[
+                "board",
+                "render",
+                id,
+                "--out",
+                "in1.svg",
+                "--layer",
+                "copper.in1",
+                "--layer",
+                "drill",
+                "--layer",
+                "outline",
+            ],
+        );
+        let hash = |name: &str| {
+            blake3::hash(&std::fs::read(board.join(name)).unwrap()).to_hex()[..32].to_owned()
+        };
+        let mut drc = ryueda(&board, threads, &["board", "drc", id]);
+        assert_eq!(drc["findings"], serde_json::json!([]), "{drc}");
+        if let Some(o) = drc.as_object_mut() {
+            o.remove("revision");
+        }
+        ryueda(&board, threads, &["board", "export", id, "--out", "fab"]);
+        let mut exported = BTreeMap::new();
+        for e in std::fs::read_dir(board.join("fab")).unwrap().flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            exported.insert(
+                name.clone(),
+                export_hash(&name, &std::fs::read(e.path()).unwrap()),
+            );
+        }
+        assert!(
+            exported.keys().any(|k| k.ends_with("-copper-in1.g2")),
+            "{exported:?}"
+        );
+        assert!(
+            exported.keys().any(|k| k.ends_with("-copper-in2.g3")),
+            "{exported:?}"
+        );
+        let p = ryueda::project::Project::load(&board).unwrap();
+        let bid = ryueda::id::Id::parse(id, "board").unwrap();
+        let c = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+            .install(|| ryueda::board::drc::check(&p, &p.boards[&bid]).unwrap());
+        let layout = serde_json::json!({
+            "items": c.conn.built.layout.items.iter().map(|(k, it)| serde_json::json!([c.conn.built.reference(k), it.layer, it.net])).collect::<Vec<_>>(),
+            "holes": c.conn.built.layout.holes.iter().map(|(k, h)| serde_json::json!([c.conn.built.reference(k), h.plated, [h.span.0, h.span.1]])).collect::<Vec<_>>(),
+        });
+        let islands: Vec<Vec<String>> = c
+            .conn
+            .copper
+            .islands()
+            .iter()
+            .map(|i| i.items.iter().map(|k| c.conn.built.reference(k)).collect())
+            .collect();
+        let got = (
+            show,
+            hash("in1.svg"),
+            drc,
+            layout,
+            serde_json::json!(islands),
+            exported,
+        );
+        match &first {
+            None => first = Some(got),
+            Some(one) => assert_eq!(&got, one, "one thread and eight"),
+        }
+    }
+    let (show, svg, drc, layout, islands, exported) = first.unwrap();
+    golden.json("board.four.show", &show);
+    golden.got.insert("board.four.in1.svg".into(), svg);
+    golden.json("board.four.drc", &drc);
+    golden.json("board.four.layout", &layout);
+    golden.json("board.four.islands", &islands);
+    for (name, hash) in exported {
+        golden.got.insert(format!("board.four.export.{name}"), hash);
+    }
+}
+
+/// What makes the breakout's board four layers: the stackup, and a track
+/// on `in1` between two of its ground vias.
+const FOUR: &[&[&str]] = &[
+    &["board", "edit", breakout_board::BOARD, "--layers", "4"],
+    &[
+        "board",
+        "track",
+        "add",
+        breakout_board::BOARD,
+        "--net",
+        "rail:gnd",
+        "--layer",
+        "in1",
+        "--path",
+        "via/g_u2",
+        "via/g_c3",
+        "--id",
+        "gnd_in1",
+    ],
+];
+
 #[test]
 fn netlists_and_erc_are_bit_exact() {
     let mut golden = Golden::new(concat!(
@@ -687,6 +817,7 @@ fn netlists_and_erc_are_bit_exact() {
     assert_eq!(kicad_lint(8), one);
     golden.json("symbols.lint", &one);
     boards(&mut golden, &dir.path().join("boards"));
+    four_layers(&mut golden, &dir.path().join("four"));
     golden.finish();
 }
 

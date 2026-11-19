@@ -26,6 +26,11 @@
 //! vertex with, the rung may be built again with the working face's near
 //! box cut back short of the pin (`kept_off`, `cut_short`). A face is
 //! adjusted one way only.
+//!
+//! Released pins (design 919, plan 23.A): after a narrowed build's walk
+//! fails at a pinned face, the rung may be built again with that pin
+//! released, a working face again, its near box its own joined with its
+//! working edge-neighbours' (`released_box`, `near_of`).
 
 use super::region::{Region, face_vertices};
 use crate::geom::Box3;
@@ -59,18 +64,49 @@ pub(crate) fn touched(body: &Body, region: &Region, f: FaceId) -> BTreeSet<FaceI
 /// that touches no change ([`touched`] is empty). A pin round a vertex
 /// where the region less the pins would pinch stays working, until none
 /// does: the input region has none, so each new one is at a pin's vertex.
+/// [`pinned_but`] releasing nothing; the builds use that.
+#[cfg(test)]
 pub(crate) fn pinned(
     body: &Body,
     region: &Region,
     still: &dyn Fn(FaceId) -> bool,
     absorbing: &BTreeSet<FaceId>,
 ) -> BTreeSet<FaceId> {
-    let mut pins: BTreeSet<FaceId> = region
+    pinned_but(body, region, still, absorbing, &BTreeSet::new())
+}
+
+/// [`pinned`] with the faces `released` never pinned (design 919, plan
+/// 23.A); a pin round a pinch the release opens stays working too
+/// ([`unpinched`]). [`pinned`]'s, bit for bit, where `released` is empty.
+pub(crate) fn pinned_but(
+    body: &Body,
+    region: &Region,
+    still: &dyn Fn(FaceId) -> bool,
+    absorbing: &BTreeSet<FaceId>,
+    released: &BTreeSet<FaceId>,
+) -> BTreeSet<FaceId> {
+    let pins: BTreeSet<FaceId> = region
         .faces
         .iter()
         .copied()
-        .filter(|&f| still(f) && !absorbing.contains(&f) && touched(body, region, f).is_empty())
+        .filter(|&f| {
+            still(f)
+                && !absorbing.contains(&f)
+                && !released.contains(&f)
+                && touched(body, region, f).is_empty()
+        })
         .collect();
+    unpinched(body, region, pins)
+}
+
+/// `pins` less each pin round a vertex where the region less them would
+/// pinch, until none does (plan 21.A's rule: the working body is a sheet,
+/// whose boundary can't touch itself at a vertex).
+pub(crate) fn unpinched(
+    body: &Body,
+    region: &Region,
+    mut pins: BTreeSet<FaceId>,
+) -> BTreeSet<FaceId> {
     loop {
         if pins.is_empty() {
             return pins;
@@ -88,19 +124,30 @@ pub(crate) fn pinned(
     }
 }
 
+/// The faces `adjusts` releases (plan 23.A).
+pub(crate) fn released(adjusts: &Adjusts) -> BTreeSet<FaceId> {
+    adjusts
+        .iter()
+        .filter(|(_, a)| **a == Adjust::Released)
+        .map(|(&f, _)| f)
+        .collect()
+}
+
 /// The faces build `which` pins: none in a first build, so it is as
-/// before, bit for bit; [`pinned`] in a narrowed one.
+/// before, bit for bit; [`pinned_but`] less the faces `released` in a
+/// narrowed one.
 pub(crate) fn pins(
     body: &Body,
     region: &Region,
     still: &dyn Fn(FaceId) -> bool,
     absorbing: &BTreeSet<FaceId>,
     which: super::Build,
+    released: &BTreeSet<FaceId>,
 ) -> BTreeSet<FaceId> {
     if !which.narrowed() {
         return BTreeSet::new();
     }
-    pinned(body, region, still, absorbing)
+    pinned_but(body, region, still, absorbing, released)
 }
 
 /// Working face `f`'s own box: its box joined with the boxes of the
@@ -149,6 +196,11 @@ pub(crate) enum Adjust {
     /// Kept off a pin (plan 22.B): the near box cut back to this box, its
     /// corners as bits (low x, y, z, then high), so it compares exactly.
     Off([u64; 6]),
+    /// Released (design 919, plan 23.A): a pin a narrowed build's walk
+    /// failed at, built as a working face again. Its near box is
+    /// [`released_box`] ([`near_of`]); it is never pinned again in the
+    /// rung, given room or kept off a pin.
+    Released,
 }
 
 impl Adjust {
@@ -173,7 +225,8 @@ pub(crate) type Adjusts = BTreeMap<FaceId, Adjust>;
 /// Near box `n`, inside the rung's box `x`, as `adjust` leaves it: as it
 /// is with none; with `Room(k)`, doubled about its middle and kept inside
 /// `x`, `k` times (`body::doubled`, then [`within`], as rung 1 does for
-/// every face); with `Off`, the stored box kept inside `x`.
+/// every face); with `Off`, the stored box kept inside `x`; with
+/// `Released`, as it is: [`near_of`] gives a released face its box.
 pub(crate) fn adjusted(n: &Box3, x: &Box3, adjust: Option<Adjust>) -> Box3 {
     match adjust {
         None => *n,
@@ -184,7 +237,62 @@ pub(crate) fn adjusted(n: &Box3, x: &Box3, adjust: Option<Adjust>) -> Box3 {
             let b = unbits(&c);
             within(&b, x).unwrap_or(b)
         }
+        Some(Adjust::Released) => *n,
     }
+}
+
+/// A released face's near box (design 919, plan 23.A): `own` (its
+/// [`near_box`]: its box grown by the reach floor, since it touches no
+/// change) joined with `near(g)` for each face `g` of `working` it shares
+/// an edge with, kept inside the rung's box `x`. It grows as far as the
+/// neighbours that push past it.
+pub(crate) fn released_box(
+    body: &Body,
+    f: FaceId,
+    own: &Box3,
+    x: &Box3,
+    working: &BTreeSet<FaceId>,
+    near: &dyn Fn(FaceId) -> Box3,
+) -> Box3 {
+    let b = super::region::edge_neighbours(body, f)
+        .into_iter()
+        .filter(|g| working.contains(g))
+        .fold(*own, |a, g| a.union(&near(g)));
+    within(&b, x).unwrap_or(*x)
+}
+
+/// Carried face `f`'s near box at `rung` as `adjusts` leave it: its
+/// [`near_box`] [`adjusted`], or where `adjusts` releases it, its
+/// [`released_box`] over the faces of `carried` (the build's working
+/// faces) that aren't released themselves (so no box waits on another's).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn near_of(
+    body: &Body,
+    changes: &Changes,
+    region: &Region,
+    f: FaceId,
+    x: &Box3,
+    rung: usize,
+    adjusts: &Adjusts,
+    carried: &BTreeSet<FaceId>,
+) -> Box3 {
+    let plain = |g: FaceId| {
+        adjusted(
+            &near_box(body, changes, region, g, x, rung),
+            x,
+            adjusts.get(&g).copied(),
+        )
+    };
+    if adjusts.get(&f) != Some(&Adjust::Released) {
+        return plain(f);
+    }
+    let working: BTreeSet<FaceId> = carried
+        .iter()
+        .copied()
+        .filter(|g| adjusts.get(g) != Some(&Adjust::Released))
+        .collect();
+    let own = near_box(body, changes, region, f, x, rung);
+    released_box(body, f, &own, x, &working, &plain)
 }
 
 /// Room for the working faces `clipped` (design 724, plan 22.A): those
@@ -195,7 +303,8 @@ pub(crate) fn adjusted(n: &Box3, x: &Box3, adjust: Option<Adjust>) -> Box3 {
 /// where none of their near boxes would grow (each already the rung's
 /// box `x`): that build would repeat the last.
 /// `None` too where any of them is kept off a pin (a face is adjusted
-/// one way only).
+/// one way only). A released face is passed over: its neighbours' room
+/// carries it.
 pub(crate) fn room(
     body: &Body,
     working: &BTreeSet<FaceId>,
@@ -222,6 +331,9 @@ pub(crate) fn room(
             // A face is adjusted one way only (design 724): room asked
             // for a face kept off a pin ends the adjustments.
             Some(Adjust::Off(_)) => return None,
+            // A released face's box follows its neighbours' (plan 23.A):
+            // it is given no room of its own.
+            Some(Adjust::Released) => continue,
             None => 0,
         };
         let n = near(g);
@@ -283,7 +395,8 @@ pub(crate) fn cut_short(n: &Box3, sheet: &Box3, must: &Box3, pin: &Box3, gap: f6
 /// Working face `f` kept off a pin (design 724, plan 22.B): `adjusts`
 /// with `f`'s near box, `now` as adjusted so far, cut back by
 /// [`cut_short`] (`sheet`, `must`, `pin` and `gap` as there). `None`
-/// where no side can be cut. `None` too where `f` was given room.
+/// where no side can be cut. `None` too where `f` was given room or
+/// released.
 pub(crate) fn kept_off(
     f: FaceId,
     now: &Box3,
@@ -293,8 +406,8 @@ pub(crate) fn kept_off(
     gap: f64,
     adjusts: &Adjusts,
 ) -> Option<Adjusts> {
-    // A face is adjusted one way only (design 724).
-    if matches!(adjusts.get(&f), Some(Adjust::Room(_))) {
+    // A face is adjusted one way only (design 724, plan 23.A).
+    if matches!(adjusts.get(&f), Some(Adjust::Room(_) | Adjust::Released)) {
         return None;
     }
     let cut = cut_short(now, sheet, must, pin, gap)?;
@@ -788,10 +901,153 @@ pub(crate) mod tests {
         let ring = region(&r, &BTreeSet::from([low])).grown(&r);
         let still = |f: FaceId| ring.faces.contains(&f) && f != low;
         let none = BTreeSet::new();
-        assert!(pins(&r, &ring, &still, &none, Build::First).is_empty());
+        assert!(pins(&r, &ring, &still, &none, Build::First, &none).is_empty());
         let want = pinned(&r, &ring, &still, &none);
         for which in [Build::Retry, Build::Only] {
-            assert_eq!(pins(&r, &ring, &still, &none, which), want);
+            assert_eq!(pins(&r, &ring, &still, &none, which, &none), want);
         }
+    }
+
+    /// Design 919, plan 23.A: a released face is never pinned, and a
+    /// first build pins nothing whatever is released. Released nothing,
+    /// the pins are `pinned`'s, bit for bit.
+    #[test]
+    fn a_released_face_is_never_pinned() {
+        use super::super::Build;
+        use super::super::tests::{face_of, raised};
+        use crate::name::FaceRole;
+        let b = block();
+        let changes = raised(&b, 0.2);
+        let changed = changes.motion.keys().copied().collect();
+        let whole = region(&b, &changed).grown(&b);
+        let still = |f: FaceId| whole.faces.contains(&f) && !changes.motion.contains_key(&f);
+        let none = BTreeSet::new();
+        let bottom = face_of(&b, FaceRole::MinusZ);
+        let pins = pinned(&b, &whole, &still, &none);
+        assert_eq!(pins, BTreeSet::from([bottom]));
+        assert_eq!(pinned_but(&b, &whole, &still, &none, &none), pins);
+        let released = BTreeSet::from([bottom]);
+        assert!(pinned_but(&b, &whole, &still, &none, &released).is_empty());
+        assert!(super::pins(&b, &whole, &still, &none, Build::First, &none).is_empty());
+        assert!(super::pins(&b, &whole, &still, &none, Build::First, &released).is_empty());
+        assert_eq!(
+            super::pins(&b, &whole, &still, &none, Build::Only, &none),
+            pins
+        );
+        assert!(super::pins(&b, &whole, &still, &none, Build::Only, &released).is_empty());
+        // `unpinched` keeps pins that pinch nothing.
+        assert_eq!(unpinched(&b, &whole, pins.clone()), pins);
+        // `released` reads the released faces off the adjustments.
+        let a = Adjusts::from([
+            (bottom, Adjust::Released),
+            (face_of(&b, FaceRole::PlusX), Adjust::Room(1)),
+        ]);
+        assert_eq!(super::released(&a), BTreeSet::from([bottom]));
+    }
+
+    /// `unpinched` releases the pins round a pinch the release opens: the
+    /// rounded block's ring less one pin, every pin it leaves pinching
+    /// nothing.
+    #[test]
+    fn a_release_unpinches_its_neighbours() {
+        let (r, low, _) = rounded();
+        let ring = region(&r, &BTreeSet::from([low])).grown(&r);
+        let still = |f: FaceId| ring.faces.contains(&f) && f != low;
+        let none = BTreeSet::new();
+        let pins = pinned(&r, &ring, &still, &none);
+        for &p in &pins {
+            let fewer = pinned_but(&r, &ring, &still, &none, &BTreeSet::from([p]));
+            assert!(!fewer.contains(&p), "{p:?} pinned though released");
+            assert!(fewer.is_subset(&pins));
+            let rest: BTreeSet<FaceId> = ring.faces.difference(&fewer).copied().collect();
+            assert!(super::super::region::pinches(&r, &rest).is_empty(), "{p:?}");
+        }
+    }
+
+    /// Design 919, plan 23.A: a released face's near box holds its own
+    /// near box and the near boxes, as adjusted, of the carried faces it
+    /// shares an edge with, inside the rung's box; other faces' boxes are
+    /// as `adjusted` leaves them. The raised block over the whole body,
+    /// its bottom released: it holds each side's near box, and a side's
+    /// room too.
+    #[test]
+    fn a_released_faces_near_box_holds_its_working_neighbours() {
+        use super::super::tests::{face_of, raised};
+        use crate::name::FaceRole;
+        let b = block();
+        let changes = raised(&b, 0.2);
+        let changed = changes.motion.keys().copied().collect();
+        let whole = region(&b, &changed).grown(&b);
+        let x = rung_box(&b, &changes, &whole);
+        let bottom = face_of(&b, FaceRole::MinusZ);
+        let px = face_of(&b, FaceRole::PlusX);
+        let carried: BTreeSet<FaceId> = b.faces().collect();
+        let plain = |g: FaceId, a: &Adjusts| {
+            adjusted(
+                &near_box(&b, &changes, &whole, g, &x, 2),
+                &x,
+                a.get(&g).copied(),
+            )
+        };
+        let a = Adjusts::from([(bottom, Adjust::Released)]);
+        let r = near_of(&b, &changes, &whole, bottom, &x, 2, &a, &carried);
+        assert!(holds(&x, &r));
+        assert!(holds(&r, &near_box(&b, &changes, &whole, bottom, &x, 2)));
+        let sides = super::super::region::edge_neighbours(&b, bottom);
+        assert_eq!(sides.len(), 4);
+        assert!(!sides.contains(&bottom));
+        for &s in &sides {
+            assert!(holds(&r, &plain(s, &a)), "{s:?}");
+        }
+        // Not released: `adjusted`'s box.
+        assert_eq!(
+            near_of(&b, &changes, &whole, px, &x, 2, &a, &carried),
+            plain(px, &a)
+        );
+        // A side given room: the released box holds the side's room.
+        let roomy = Adjusts::from([(bottom, Adjust::Released), (px, Adjust::Room(2))]);
+        let r2 = near_of(&b, &changes, &whole, bottom, &x, 2, &roomy, &carried);
+        assert!(holds(&r2, &plain(px, &roomy)));
+        // A neighbour that isn't carried (a pin, a deleted face) adds nothing.
+        let only_bottom: BTreeSet<FaceId> = BTreeSet::from([bottom]);
+        assert_eq!(
+            near_of(&b, &changes, &whole, bottom, &x, 2, &a, &only_bottom),
+            near_box(&b, &changes, &whole, bottom, &x, 2)
+        );
+    }
+
+    /// Plan 23.A: a released face is adjusted one way only. Room asked for
+    /// it never gives it room of its own (its neighbours' carries it); it
+    /// is never kept off a pin. The rounded block's low ball deleted, as
+    /// `a_face_is_adjusted_one_way_only` has it.
+    #[test]
+    fn a_released_face_takes_no_room_and_no_cut() {
+        let (r, low, _) = rounded();
+        let changes = Changes {
+            deleted: BTreeSet::from([low]),
+            ..Default::default()
+        };
+        let region = region(&r, &BTreeSet::from([low]));
+        let x = rung_box(&r, &changes, &region);
+        let working: BTreeSet<FaceId> =
+            region.faces.iter().copied().filter(|&f| f != low).collect();
+        let near = |g: FaceId| near_box(&r, &changes, &region, g, &x, 0);
+        let f = *working.iter().next().unwrap();
+        let clipped = BTreeSet::from([f]);
+        // Unreleased, it is given room (as in `a_face_is_adjusted_one_way_only`).
+        assert!(room(&r, &working, &clipped, &x, &Adjusts::new(), &near).is_some());
+        let a = Adjusts::from([(f, Adjust::Released)]);
+        let out = room(&r, &working, &clipped, &x, &a, &near);
+        assert!(
+            out.as_ref()
+                .is_none_or(|o| o.get(&f) == Some(&Adjust::Released)),
+            "{out:?}"
+        );
+        let n = cube([0.0; 3], [1.0; 3]);
+        let must = cube([0.1; 3], [0.4, 0.5, 0.5]);
+        let pin = cube([0.7, 0.2, 0.9], [1.2, 0.4, 1.2]);
+        assert_eq!(kept_off(f, &n, &n, &must, &pin, 1e-6, &a), None);
+        // Unreleased, the same cut is asked.
+        assert!(kept_off(f, &n, &n, &must, &pin, 1e-6, &Adjusts::new()).is_some());
     }
 }

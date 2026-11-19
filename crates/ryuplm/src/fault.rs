@@ -59,9 +59,27 @@ impl Fault {
         }
         Value::Object(v)
     }
+
+    /// [`Fault::to_json`], its message and details moved rather than
+    /// copied: a check's answer holds every fault.
+    pub fn into_json(self) -> Value {
+        let mut v = Map::new();
+        v.insert("code".into(), json!(self.error.code));
+        v.insert("severity".into(), json!(self.severity));
+        v.insert("message".into(), Value::String(self.error.message));
+        if !self.error.details.is_null() {
+            v.insert("details".into(), self.error.details);
+        }
+        Value::Object(v)
+    }
 }
 
 /// The JSON of each fault.
 pub fn list(faults: &[Fault]) -> Value {
     Value::Array(faults.iter().map(Fault::to_json).collect())
+}
+
+/// [`list`], the faults moved into it.
+pub fn into_list(faults: Vec<Fault>) -> Value {
+    Value::Array(faults.into_iter().map(Fault::into_json).collect())
 }
