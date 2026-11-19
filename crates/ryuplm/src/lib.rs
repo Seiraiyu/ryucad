@@ -7,6 +7,15 @@
 
 pub use ryu_doc::{canonical, error, id, source, units};
 
+/// The version of the shape of the JSON that the hosted service reads
+/// (design 938): `info`, `check`, `diff`, `item list`, `item show`,
+/// `release list`, `merge status`, `git attributes`, `reps`, `index` and
+/// `resolve` say it as `"schema"`; `bom show`, `bom diff`, `where-used`
+/// and `release check` give theirs by the same rule. Adding a field or a
+/// code doesn't change it; changing or removing one does. `version`
+/// answers it as `schema_outputs`, so a tool can ask once.
+pub const OUTPUT_SCHEMA: u64 = 1;
+
 pub mod activity;
 pub mod aml;
 pub mod bom;

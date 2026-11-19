@@ -19,6 +19,10 @@ pub struct VersionInfo {
     pub commit: String,
     pub target: String,
     pub protocol: u32,
+    /// [`crate::OUTPUT_SCHEMA`]: the shape of the answers other tools
+    /// read (0 from a ryuplm before it was said).
+    #[serde(default)]
+    pub schema_outputs: u64,
 }
 
 impl VersionInfo {
@@ -29,6 +33,7 @@ impl VersionInfo {
             commit: env!("RYUPLM_COMMIT").to_owned(),
             target: env!("RYUPLM_TARGET").to_owned(),
             protocol: PROTOCOL_VERSION,
+            schema_outputs: crate::OUTPUT_SCHEMA,
         }
     }
 
@@ -385,6 +390,21 @@ mod tests {
         assert!(me.same_build(&v));
         v["commit"] = json!("0123456789ab");
         assert!(!me.same_build(&v));
+    }
+
+    #[test]
+    fn a_version_from_before_the_contract_reads_as_schema_zero() {
+        let me = VersionInfo::current();
+        assert_eq!(me.schema_outputs, crate::OUTPUT_SCHEMA);
+        let old: VersionInfo = serde_json::from_value(
+            json!({"ryuplm": "0.1.0", "commit": "c", "target": "t", "protocol": 1}),
+        )
+        .unwrap();
+        assert_eq!(old.schema_outputs, 0);
+        // The contract's number is no part of being the same build.
+        let mut v = json!(me);
+        v["schema_outputs"] = json!(7);
+        assert!(me.same_build(&v));
     }
 
     #[test]
