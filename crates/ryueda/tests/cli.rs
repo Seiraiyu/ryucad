@@ -822,6 +822,11 @@ fn every_protocol_method_has_a_command() {
         ("design.delete", &["design", "delete"]),
         ("design.list", &["design", "list"]),
         ("board.create", &["board", "create"]),
+        ("preset.list", &["preset", "list"]),
+        ("preset.show", &["preset", "show"]),
+        ("preset.create", &["preset", "create"]),
+        ("preset.edit", &["preset", "edit"]),
+        ("preset.delete", &["preset", "delete"]),
         ("board.edit", &["board", "edit"]),
         ("board.delete", &["board", "delete"]),
         ("board.list", &["board", "list"]),
@@ -5709,4 +5714,63 @@ fn parts_on_the_bottom_from_the_cli() {
         "invalid_param",
         1,
     );
+}
+
+/// Presets from the CLI (ryueda 7.B): the built-ins listed and shown as
+/// documents, a project's own made from one, edited, used by a board and
+/// refused deletion while it is.
+#[test]
+fn presets_from_the_cli() {
+    let p = Pair::breakout();
+    let l = p.ok(&["preset", "list"]);
+    let names: Vec<&str> = l["presets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["jlc-2l", "jlc-4l"], "{l}");
+    let s = p.ok(&["preset", "show", "jlc-4l"]);
+    assert_eq!(s["preset"]["kind"], "ryueda.fab-preset", "{s}");
+    assert_eq!(s["built_in"], true, "{s}");
+    assert_eq!(
+        s["preset"]["stackup"]["layers"].as_array().unwrap().len(),
+        7,
+        "{s}"
+    );
+    let c = p.ok(&["preset", "create", "acme-2l", "--from", "jlc-2l"]);
+    assert_eq!(c["path"], "presets/acme-2l.json", "{c}");
+    let e = p.ok(&[
+        "preset",
+        "edit",
+        "acme-2l",
+        "clearance_nm=0.15mm",
+        "blind_vias=true",
+    ]);
+    assert_eq!(e["preset"]["clearance_nm"], 150_000, "{e}");
+    assert_eq!(e["preset"]["blind_vias"], true, "{e}");
+    p.fails(
+        &["preset", "edit", "jlc-2l", "clearance_nm=0.2mm"],
+        "invalid_param",
+        1,
+    );
+    p.fails(
+        &["preset", "edit", "acme-2l", "clearence_nm=1"],
+        "invalid_param",
+        1,
+    );
+    p.fails(
+        &["preset", "create", "jlc-2l", "--from", "jlc-4l"],
+        "invalid_param",
+        1,
+    );
+    p.ok(&[
+        "board", "create", "Acme", "--design", "board", "--rect", "30,20", "--preset", "acme-2l",
+        "--id", "acme",
+    ]);
+    p.fails(&["preset", "delete", "acme-2l"], "preset_in_use", 1);
+    p.ok(&["board", "delete", "acme"]);
+    p.ok(&["preset", "delete", "acme-2l"]);
+    let l = p.ok(&["preset", "list"]);
+    assert_eq!(l["presets"].as_array().unwrap().len(), 2, "{l}");
 }

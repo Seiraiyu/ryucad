@@ -510,6 +510,9 @@ enum Command {
     /// Boards: create, edit, list, show and delete; place parts; render.
     #[command(subcommand)]
     Board(BoardCmd),
+    /// Fab presets: the built-in ones and the project's own (presets/<id>.json).
+    #[command(subcommand)]
+    Preset(PresetCmd),
     /// Import libraries from other tools: KiCad's for now.
     #[command(subcommand)]
     Import(ImportCmd),
@@ -1501,6 +1504,36 @@ enum ClassCmd {
 }
 
 #[derive(Subcommand)]
+enum PresetCmd {
+    /// The built-in presets and the project's own, with the boards using each.
+    List,
+    /// A preset's document.
+    Show { name: String },
+    /// A project preset copied from another: presets/<NAME>.json.
+    Create {
+        name: String,
+        #[arg(long)]
+        from: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Set fields of a project preset: KEY=VALUE, *_nm values lengths, blind_vias true or false, the rest JSON (stackup, assembly).
+    Edit {
+        name: String,
+        #[arg(required = true, value_name = "KEY=VALUE")]
+        set: Vec<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Delete a project preset no board uses.
+    Delete {
+        name: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+}
+
+#[derive(Subcommand)]
 enum DesignCmd {
     /// A design over a root block, its ID random unless given.
     Create {
@@ -1549,10 +1582,14 @@ enum BoardCmd {
         /// lengths ("10 mm", or "10" in the project's unit).
         #[arg(long, value_name = "OPS")]
         outline: Option<String>,
-        /// Copper layers (2 by default): N of the preset's copper with equal
-        /// FR-4 between, filling its board thickness.
+        /// Copper layers (the preset's by default): N of the preset's copper
+        /// with equal FR-4 between, filling its board thickness.
         #[arg(long, value_name = "N")]
         layers: Option<u32>,
+        /// The fab preset: jlc-2l (the default), jlc-4l, or one of the
+        /// project's (`ryueda preset list`).
+        #[arg(long)]
+        preset: Option<String>,
         #[arg(long)]
         id: Option<String>,
         #[command(flatten)]
@@ -3792,12 +3829,29 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             expected_revision: expect.expect.clone(),
         },
         Command::Design(DesignCmd::List) => Request::DesignList {},
+        Command::Preset(PresetCmd::List) => Request::PresetList {},
+        Command::Preset(PresetCmd::Show { name }) => Request::PresetShow { name: name.clone() },
+        Command::Preset(PresetCmd::Create { name, from, expect }) => Request::PresetCreate {
+            name: name.clone(),
+            from: from.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Preset(PresetCmd::Edit { name, set, expect }) => Request::PresetEdit {
+            name: name.clone(),
+            set: set.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Preset(PresetCmd::Delete { name, expect }) => Request::PresetDelete {
+            name: name.clone(),
+            expected_revision: expect.expect.clone(),
+        },
         Command::Board(BoardCmd::Create {
             name,
             design,
             rect,
             outline,
             layers,
+            preset,
             id,
             expect,
         }) => Request::BoardCreate {
@@ -3809,6 +3863,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
                 .map(|o| json_arg("--outline", o))
                 .transpose()?,
             layers: *layers,
+            preset: preset.clone(),
             id: id.clone(),
             expected_revision: expect.expect.clone(),
         },

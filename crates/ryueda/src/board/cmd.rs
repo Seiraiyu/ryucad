@@ -110,11 +110,23 @@ pub fn create(
     rect: Option<&[String; 2]>,
     outline: Option<&Value>,
     layers: Option<u32>,
+    preset: Option<&str>,
     id: Option<&str>,
     expected: Option<&str>,
 ) -> Result<Value> {
     let p = session.project();
     check_revision("the project", &p.revision, expected)?;
+    let preset_name = preset.unwrap_or(&super::preset::DEFAULT.name).to_owned();
+    let chosen = super::preset::resolve(p, &preset_name).ok_or_else(|| {
+        Error::new(
+            Code::BoardPresetNotFound,
+            format!(
+                "there is no preset {preset_name}; presets are {}",
+                super::preset::names_in(p)
+            ),
+        )
+        .with("preset", &preset_name)
+    })?;
     let unit = p.manifest.default_unit;
     let design = crate::netlist::one_design(p, Some(design))?;
     if named_elsewhere(p, name, None) {
@@ -148,7 +160,7 @@ pub fn create(
     };
     let stackup = match layers {
         None | Some(2) => None,
-        Some(n) => Some(super::stackup::even(super::preset::DEFAULT, n as usize)?),
+        Some(n) => Some(super::stackup::even(&chosen, n as usize)?),
     };
     let id = new_id(id, "board", |s| {
         Id::parse(s, "board").is_ok_and(|i| p.boards.contains_key(&i))
@@ -156,7 +168,7 @@ pub fn create(
     let board = Board {
         name: name.to_owned(),
         design,
-        preset: super::preset::DEFAULT.name.to_string(),
+        preset: preset_name,
         outline,
         cutouts: Vec::new(),
         stackup,

@@ -581,7 +581,34 @@ pub enum Request {
     },
     #[serde(rename = "design.list")]
     DesignList {},
-    /// A board for a design (design 732), with the `jlc-2l` preset.
+    #[serde(rename = "preset.list")]
+    PresetList {},
+    #[serde(rename = "preset.show")]
+    PresetShow { name: String },
+    /// A project preset copied from another (`presets/<name>.json`).
+    #[serde(rename = "preset.create")]
+    PresetCreate {
+        name: String,
+        from: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// `key=value` pairs set on a project preset.
+    #[serde(rename = "preset.edit")]
+    PresetEdit {
+        name: String,
+        set: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "preset.delete")]
+    PresetDelete {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// A board for a design (design 732), with the `jlc-2l` preset unless
+    /// another is named.
     #[serde(rename = "board.create")]
     BoardCreate {
         name: String,
@@ -596,6 +623,10 @@ pub enum Request {
         /// Copper layers: 2 (the default) or an even stackup of `n`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         layers: Option<u32>,
+        /// The fab preset: built in (`jlc-2l`, the default; `jlc-4l`) or
+        /// the project's own.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preset: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
         /// The project's revision.
@@ -1629,6 +1660,9 @@ impl Request {
                 | Request::DesignCreate { .. }
                 | Request::DesignEdit { .. }
                 | Request::DesignDelete { .. }
+                | Request::PresetCreate { .. }
+                | Request::PresetEdit { .. }
+                | Request::PresetDelete { .. }
                 | Request::BoardCreate { .. }
                 | Request::BoardEdit { .. }
                 | Request::BoardDelete { .. }
@@ -1743,6 +1777,7 @@ mod tests {
                 rect: Some(["30 mm".into(), "20 mm".into()]),
                 outline: None,
                 layers: Some(4),
+                preset: None,
                 id: Some("main".into()),
                 expected_revision: None,
             },

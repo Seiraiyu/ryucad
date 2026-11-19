@@ -18,6 +18,7 @@ pub mod opening;
 pub mod outline;
 pub mod pad;
 pub mod preset;
+pub mod presetcmd;
 pub mod render;
 pub mod route;
 pub mod shapes;

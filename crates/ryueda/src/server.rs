@@ -1212,12 +1212,29 @@ fn dispatch(
             expected_revision,
         } => topcmd::design_delete(session, &design, expected_revision.as_deref()),
         Request::DesignList {} => Ok(topcmd::design_list(session.project())),
+        Request::PresetList {} => Ok(crate::board::presetcmd::list(session.project())),
+        Request::PresetShow { name } => crate::board::presetcmd::show(session.project(), &name),
+        Request::PresetCreate {
+            name,
+            from,
+            expected_revision,
+        } => crate::board::presetcmd::create(session, &name, &from, expected_revision.as_deref()),
+        Request::PresetEdit {
+            name,
+            set,
+            expected_revision,
+        } => crate::board::presetcmd::edit(session, &name, &set, expected_revision.as_deref()),
+        Request::PresetDelete {
+            name,
+            expected_revision,
+        } => crate::board::presetcmd::delete(session, &name, expected_revision.as_deref()),
         Request::BoardCreate {
             name,
             design,
             rect,
             outline,
             layers,
+            preset,
             id,
             expected_revision,
         } => crate::board::cmd::create(
@@ -1227,6 +1244,7 @@ fn dispatch(
             rect.as_ref(),
             outline.as_ref(),
             layers,
+            preset.as_deref(),
             id.as_deref(),
             expected_revision.as_deref(),
         ),
