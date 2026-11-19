@@ -251,3 +251,69 @@ pub fn explain(session: &mut Session, board: &str, refs: &[String]) -> Result<Va
     }
     Ok(v)
 }
+
+/// `board.waive`: a finding waived with a reason (its measurement kept as
+/// the limit), or its waiver removed.
+pub fn waive(
+    session: &mut Session,
+    board: &str,
+    finding: &str,
+    reason: Option<&str>,
+    remove: bool,
+    by: &str,
+    expected: Option<&str>,
+) -> Result<Value> {
+    let p = session.project();
+    let b = find(p, board)?;
+    check_revision(&format!("board {}", b.id), &b.revision, expected)?;
+    let id = b.id.clone();
+    board_of(b)?;
+    let mut f = file_of(b)?;
+    if remove {
+        if f.waivers.remove(finding).is_none() {
+            return Err(Error::new(
+                Code::FindingNotFound,
+                format!("board {id} has no waiver {finding}"),
+            )
+            .with("finding", finding));
+        }
+    } else {
+        let reason = reason
+            .filter(|r| !r.trim().is_empty())
+            .ok_or_else(|| invalid("a waiver needs --reason", "reason"))?;
+        let c = session.board_check(&id)?;
+        let found = c.findings.iter().find(|x| x.id == finding).ok_or_else(|| {
+            Error::new(
+                Code::FindingNotFound,
+                format!("board {id} has no finding {finding}; `ryueda board drc {id}` lists them"),
+            )
+            .with("finding", finding)
+        })?;
+        if rules::NOT_WAIVABLE.contains(&found.code) {
+            return Err(Error::new(
+                Code::FindingNotWaivable,
+                format!(
+                    "{} can't be waived: fix it",
+                    json!(found.code).as_str().unwrap_or("")
+                ),
+            )
+            .with("finding", finding));
+        }
+        let limit = rules::measurement(found.code, &found.details).map(|(v, _)| v);
+        f.waivers.insert(
+            finding.to_owned(),
+            rules::Waiver {
+                code: found.code,
+                refs: found.refs.clone(),
+                reason: reason.to_owned(),
+                by: by.to_owned(),
+                limit,
+            },
+        );
+    }
+    let before = super::drc::now(session, &id);
+    write(session, &id, &f, &format!("board {id} waiver"))?;
+    let mut v = show(session.project(), id.as_str())?;
+    v["drc"] = super::drc::delta(session, &id, before);
+    Ok(v)
+}

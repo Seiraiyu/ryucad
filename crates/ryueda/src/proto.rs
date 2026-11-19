@@ -856,6 +856,18 @@ pub enum Request {
     },
     #[serde(rename = "board.rules.explain")]
     BoardRulesExplain { board: String, refs: Vec<String> },
+    /// A finding waived with a reason, or (`remove`) its waiver removed.
+    #[serde(rename = "board.waive")]
+    BoardWaive {
+        board: String,
+        finding: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        remove: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     /// A board's counts: parts placed, nets routed and open, findings.
     #[serde(rename = "board.status")]
     BoardStatus { board: String },
@@ -1689,6 +1701,7 @@ impl Request {
                 | Request::BoardCreate { .. }
                 | Request::BoardRulesSet { .. }
                 | Request::BoardRulesUnset { .. }
+                | Request::BoardWaive { .. }
                 | Request::BoardEdit { .. }
                 | Request::BoardDelete { .. }
                 | Request::BoardPlace { .. }

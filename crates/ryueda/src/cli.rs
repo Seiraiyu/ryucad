@@ -1756,6 +1756,19 @@ enum BoardCmd {
     /// The board's rules: defaults and per net class over its preset's floor.
     #[command(subcommand)]
     Rules(RulesCmd),
+    /// Waive a finding by ID with --reason (kept with its measurement as a
+    /// limit: a finding that gets worse counts again), or --remove its
+    /// waiver. Shorts can't be waived.
+    Waive {
+        board: String,
+        finding: String,
+        #[arg(long)]
+        reason: Option<String>,
+        #[arg(long, conflicts_with = "reason")]
+        remove: bool,
+        #[command(flatten)]
+        expect: Expect,
+    },
     /// Parts placed, nets routed and open, findings by code.
     Status { board: String },
     /// The fabrication package into --out: Gerber X2 per layer, Excellon
@@ -4068,6 +4081,19 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
         Command::Board(BoardCmd::Drc { board, codes }) => Request::BoardDrc {
             board: board.clone(),
             codes: codes.clone(),
+        },
+        Command::Board(BoardCmd::Waive {
+            board,
+            finding,
+            reason,
+            remove,
+            expect,
+        }) => Request::BoardWaive {
+            board: board.clone(),
+            finding: finding.clone(),
+            reason: reason.clone(),
+            remove: *remove,
+            expected_revision: expect.expect.clone(),
         },
         Command::Board(BoardCmd::Status { board }) => Request::BoardStatus {
             board: board.clone(),

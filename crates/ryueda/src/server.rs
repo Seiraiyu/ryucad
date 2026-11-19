@@ -1419,6 +1419,24 @@ fn dispatch(
         Request::BoardRulesExplain { board, refs } => {
             crate::board::rulecmd::explain(session, &board, &refs)
         }
+        Request::BoardWaive {
+            board,
+            finding,
+            reason,
+            remove,
+            expected_revision,
+        } => {
+            let by = caller_name(live, me);
+            crate::board::rulecmd::waive(
+                session,
+                &board,
+                &finding,
+                reason.as_deref(),
+                remove,
+                &by,
+                expected_revision.as_deref(),
+            )
+        }
         Request::BoardExport {
             board,
             allow_errors,

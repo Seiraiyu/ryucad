@@ -847,6 +847,7 @@ fn every_protocol_method_has_a_command() {
         ("board.rules.set", &["board", "rules", "set"]),
         ("board.rules.unset", &["board", "rules", "unset"]),
         ("board.rules.explain", &["board", "rules", "explain"]),
+        ("board.waive", &["board", "waive"]),
         ("board.export", &["board", "export"]),
         ("block.create", &["block", "create"]),
         ("block.edit", &["block", "edit"]),
@@ -5886,4 +5887,102 @@ fn board_rules_from_the_cli() {
     );
     let d = p.ok(&["board", "drc", id]);
     assert_eq!(d["findings"], json!([]), "{d}");
+}
+
+/// A finding waived from the CLI (ryueda 7.B): it stops counting, the
+/// waiver records its limit, a short can't be waived, an unknown ID is
+/// refused, and the waiver is removed again.
+#[test]
+fn findings_waived_from_the_cli() {
+    let p = Pair::breakout();
+    for args in breakout_board::script() {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        p.ok(&args);
+    }
+    let id = breakout_board::BOARD;
+    // A board-wide clearance the round's board doesn't meet everywhere.
+    p.ok(&["board", "rules", "set", id, "clearance=0.3mm"]);
+    let d = p.both_in("board", &["board", "drc", id]).1;
+    let report = &d["error"]["details"]["report"];
+    let gap = report["findings"]
+        .as_array()
+        .unwrap_or_else(|| panic!("errors under 0.3 mm: {d}"))
+        .iter()
+        .find(|f| f["code"] == "drc_clearance")
+        .unwrap_or_else(|| panic!("a gap under 0.3 mm: {d}"))
+        .clone();
+    let fid = gap["id"].as_str().unwrap();
+    let w = p.ok(&[
+        "board",
+        "waive",
+        id,
+        fid,
+        "--reason",
+        "checked against the fab's DFM",
+    ]);
+    let waiver = &w["file"]["waivers"][fid];
+    assert_eq!(waiver["code"], "drc_clearance", "{w}");
+    assert_eq!(waiver["limit"], gap["details"]["distance_nm"], "{w}");
+    assert_eq!(waiver["by"], "agent", "{w}");
+    p.fails(
+        &["board", "waive", id, "0123456789abcdef", "--reason", "x"],
+        "finding_not_found",
+        1,
+    );
+    p.fails(&["board", "waive", id, fid], "invalid_param", 1); // no reason
+    p.ok(&["board", "waive", id, fid, "--remove"]);
+    p.fails(
+        &["board", "waive", id, fid, "--remove"],
+        "finding_not_found",
+        1,
+    );
+    p.ok(&["board", "rules", "unset", id, "clearance"]);
+
+    // A short can't be waived: a second board with a track drawn across
+    // another net's pad.
+    p.ok(&[
+        "board", "create", "Main", "--design", "board", "--rect", "30,20", "--id", "main",
+    ]);
+    p.ok(&["board", "place", "main", "R1", "--at", "10,10"]);
+    p.ok(&["board", "place", "main", "R2", "--at", "14,10"]);
+    let pads = p.ok(&["board", "show", "main", "--pads"])["pads"].clone();
+    let net = pads
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["reference"] == "main:R1/2")
+        .unwrap()["net"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let t = p.ok(&[
+        "board",
+        "track",
+        "add",
+        "main",
+        "--net",
+        &net,
+        "--layer",
+        "top",
+        "--path",
+        "R1/2",
+        "main:R2/1",
+        "main:R2/2",
+        "--id",
+        "t1",
+    ]);
+    let short = t["drc"]["added"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["code"] == "net_short")
+        .unwrap_or_else(|| panic!("a short: {}", t["drc"]))["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    p.fails(
+        &["board", "waive", "main", &short, "--reason", "x"],
+        "finding_not_waivable",
+        1,
+    );
 }
