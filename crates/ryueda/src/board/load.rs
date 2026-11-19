@@ -25,6 +25,8 @@ pub struct BoardFiles {
     pub tracks: BTreeMap<Id, Loaded<Track>>,
     pub vias: BTreeMap<Id, Loaded<Via>>,
     pub holes: BTreeMap<Id, Loaded<Hole>>,
+    /// `rules.json`, when the board has one (design 924).
+    pub rules: Option<Loaded<super::rules::RulesFile>>,
 }
 
 fn unknown(path: &str) -> Fault {
@@ -83,6 +85,7 @@ fn load_one(
     let mut tracks = BTreeMap::new();
     let mut vias = BTreeMap::new();
     let mut holes = BTreeMap::new();
+    let mut rules = None;
     let mut any = false;
     for (name, kind) in src.list(dir)? {
         let path = join(dir, &name);
@@ -164,6 +167,29 @@ fn load_one(
                     hole_faults,
                 )?;
             }
+            (RULES_FILE, Kind::File) => {
+                any = true;
+                let bytes = read(src, &path)?;
+                piece(&mut h, name.as_bytes());
+                piece(&mut h, &bytes);
+                rules = Some(
+                    match doc::read::<super::rules::RulesFile>(
+                        &bytes,
+                        &path,
+                        RULES_KIND,
+                        super::rules::FORMAT,
+                    ) {
+                        Ok(r) => Loaded {
+                            item: Ok(r),
+                            faults: Vec::new(),
+                        },
+                        Err(e) => Loaded {
+                            item: Err(e),
+                            faults: Vec::new(),
+                        },
+                    },
+                );
+            }
             _ => faults.push(unknown(&path)),
         }
     }
@@ -219,6 +245,7 @@ fn load_one(
         tracks,
         vias,
         holes,
+        rules,
     }))
 }
 
@@ -378,6 +405,9 @@ impl BoardFiles {
         }
         for h in self.holes.values() {
             one(h.item.as_ref().err(), &h.faults);
+        }
+        if let Some(r) = &self.rules {
+            one(r.item.as_ref().err(), &r.faults);
         }
         out
     }

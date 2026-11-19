@@ -25,6 +25,9 @@ pub const HOLES: &str = "holes";
 pub const TRACK_KIND: &str = "ryueda.track";
 pub const VIA_KIND: &str = "ryueda.via";
 pub const HOLE_KIND: &str = "ryueda.hole";
+/// A board's rules (design 924): `boards/<board>/rules.json`.
+pub const RULES_FILE: &str = "rules.json";
+pub const RULES_KIND: &str = "ryueda.board-rules";
 
 /// A copper layer by its position in the stackup: the top, the `k`th
 /// inner layer from the top (1 or more), or the bottom.

@@ -913,6 +913,17 @@ impl Project {
                     .with("pointer", "/preset"),
                 );
             }
+            if let (Ok(board), Some(rules)) = (&b.board.item, &b.rules)
+                && let Ok(r) = &rules.item
+                && let Some(preset) = crate::board::preset::resolve(&p, &board.preset)
+            {
+                let classes: std::collections::BTreeSet<Id> =
+                    p.conn.classes.keys().cloned().collect();
+                let path = join(&crate::board::file::board_dir(id), crate::board::RULES_FILE);
+                for f in crate::board::rules::judge(r, &preset, &classes) {
+                    board_faults.push(f.with("path", &path));
+                }
+            }
             // Route nets against the design's flattened nets: only for
             // boards with routes, and only when the design flattens (its
             // own faults say why when it doesn't).
@@ -2129,6 +2140,47 @@ pub(crate) mod tests {
             "{:?}",
             p.faults()
         );
+    }
+
+    #[test]
+    fn a_board_rule_under_its_preset_is_a_fault() {
+        let dir = tempfile::tempdir().unwrap();
+        let top = dir.path().join("board");
+        manifest(&top, ProjectKind::Design, &[]);
+        library_in(&top);
+        design_in(&top);
+        let design = Project::load(&top)
+            .unwrap()
+            .conn
+            .designs
+            .keys()
+            .next()
+            .unwrap()
+            .clone();
+        let b = top.join("boards").join("b");
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(
+            b.join("board.json"),
+            format!(r#"{{"design":"{design}","format":1,"kind":"ryueda.board","name":"B","outline":{{"edges":[{{"to":[10,0],"type":"line"}},{{"to":[10,10],"type":"line"}},{{"to":[0,10],"type":"line"}},{{"to":[0,0],"type":"line"}}],"start":[0,0]}},"preset":"jlc-2l"}}"#),
+        )
+        .unwrap();
+        let before = Project::load(&top).unwrap();
+        let rev = before.boards[&Id::parse("b", "board").unwrap()]
+            .revision
+            .clone();
+        std::fs::write(
+            b.join("rules.json"),
+            r#"{"defaults":{"clearance_nm":1},"format":1,"kind":"ryueda.board-rules"}"#,
+        )
+        .unwrap();
+        let p = Project::load(&top).unwrap();
+        let faults = p.faults();
+        assert!(
+            faults.iter().any(|f| f.error.code == Code::RuleBelowPreset
+                && f.error.details["path"] == "boards/b/rules.json"),
+            "{faults:?}"
+        );
+        assert_ne!(p.boards[&Id::parse("b", "board").unwrap()].revision, rev);
     }
 
     #[test]
