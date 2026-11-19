@@ -156,6 +156,8 @@ fn version_names_ryuplm() {
     for k in ["ryuplm", "commit", "target", "protocol"] {
         assert!(v["result"].get(k).is_some(), "{k}");
     }
+    // The shape of the answers other tools read (design 938): asked once.
+    assert_eq!(v["result"]["schema_outputs"], 1, "{v}");
     let bad = Command::cargo_bin("ryuplm")
         .unwrap()
         .arg("no-such-command")
@@ -534,4 +536,27 @@ fn a_history_imports_and_shows_from_the_cli() {
     let l = shown(&["release", "list", "100-0001"]);
     assert_eq!(l["legacy"], s["legacy"]);
     assert_eq!(p.files(&p.direct), p.files(&p.daemon));
+}
+
+#[test]
+fn git_attributes_are_the_drivers_lines() {
+    // Outside any catalogue: the service asks before it has a checkout.
+    let dir = tempfile::tempdir().unwrap();
+    let out = Command::cargo_bin("ryuplm")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["git", "attributes"])
+        .output()
+        .unwrap();
+    let (code, v) = parse(out, dir.path());
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(v["result"]["schema"], 1);
+    assert_eq!(v["result"]["lines"], json!(ryuplm::drivers::LINES));
+    assert!(
+        v["result"]["lines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|l| l == "items/*/*.json merge=ryuplm diff=ryuplm text eol=lf")
+    );
 }

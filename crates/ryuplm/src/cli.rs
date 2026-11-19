@@ -451,6 +451,10 @@ enum GitCmd {
         #[arg(long)]
         global: bool,
     },
+    /// The .gitattributes lines ryuplm's drivers need, relative to a
+    /// catalogue's folder: for a tool that sets up a clone itself (the
+    /// hosted service).
+    Attributes,
     /// Git's textconv: a file's lines (stdout, not JSON).
     Textconv { path: PathBuf },
     /// Git's merge driver: %O %A %B %P.
@@ -892,11 +896,15 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
         Command::Daemon(DaemonCmd::Stop { all: true }) => client::stop_all(),
         Command::Daemon(DaemonCmd::Stop { all: false }) => client::stop(&find_root(&here)?),
         Command::Git(GitCmd::Install { global }) => ryuplm::drivers::install(&here, !global),
+        Command::Git(GitCmd::Attributes) => Ok(json!({
+            "schema": ryuplm::OUTPUT_SCHEMA,
+            "lines": ryuplm::drivers::LINES,
+        })),
         Command::Git(GitCmd::Textconv { .. } | GitCmd::MergeDriver { .. })
         | Command::Merge(MergeCmd::Status { hook: true }) => unreachable!("answered in main"),
         Command::Merge(MergeCmd::Status { hook: false }) => {
             let roots = ryu_git::merging_projects::<ryuplm::Plm>(&here)?;
-            Ok(json!({"merging": roots
+            Ok(json!({"schema": ryuplm::OUTPUT_SCHEMA, "merging": roots
                 .iter()
                 .map(|r| json!({"root": r, "unresolved": ryuplm::merge::unresolved(r)}))
                 .collect::<Vec<_>>()}))
