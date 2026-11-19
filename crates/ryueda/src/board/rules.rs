@@ -221,6 +221,285 @@ pub fn judge(r: &RulesFile, preset: &Preset, classes: &BTreeSet<Id>) -> Vec<Faul
     out
 }
 
+/// A resolved value and the layer that set it: `class:<id>`, `board`,
+/// `preset:<name>`, or `ryueda` (a built-in default).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Resolved {
+    pub value: i64,
+    pub source: String,
+}
+
+/// A board's rules resolved against its preset and its design's classes.
+#[derive(Clone, Debug)]
+pub struct Rules {
+    pub preset: std::sync::Arc<Preset>,
+    pub file: RulesFile,
+    /// Each board net (as the board names it: `sda`, `rail:gnd`) that has a
+    /// class, with it.
+    pub class_of: BTreeMap<String, Id>,
+}
+
+/// The placement grid when the rules give none: 0.1 mm.
+pub const PLACEMENT_GRID_NM: i64 = 100_000;
+
+impl Rules {
+    pub fn from_parts(
+        preset: std::sync::Arc<Preset>,
+        file: Option<RulesFile>,
+        class_of: BTreeMap<String, Id>,
+    ) -> Rules {
+        Rules {
+            preset,
+            file: file.unwrap_or_default(),
+            class_of,
+        }
+    }
+
+    /// The rules of a board whose design flattened to `n`.
+    pub fn new(
+        preset: std::sync::Arc<Preset>,
+        file: Option<&RulesFile>,
+        n: &crate::netlist::Netlist,
+    ) -> Rules {
+        let class_of = n
+            .nets
+            .iter()
+            .filter_map(|x| Some((super::occ::local(&n.design, &x.id), x.class.clone()?)))
+            .collect();
+        Rules::from_parts(preset, file.cloned(), class_of)
+    }
+
+    fn class_set(&self, net: Option<&str>) -> Option<(&Id, &RuleSet)> {
+        let id = self.class_of.get(net?)?;
+        Some((id, self.file.classes.get(id)?))
+    }
+
+    /// The class's value, else the board's, else `fallback` from the preset;
+    /// never under `floor`.
+    fn pick(
+        &self,
+        net: Option<&str>,
+        get: impl Fn(&RuleSet) -> Option<i64>,
+        fallback: i64,
+        floor: i64,
+    ) -> Resolved {
+        let found = self
+            .class_set(net)
+            .and_then(|(id, s)| get(s).map(|v| (v, format!("class:{id}"))))
+            .or_else(|| get(&self.file.defaults).map(|v| (v, "board".to_owned())));
+        match found {
+            Some((v, source)) if v >= floor => Resolved { value: v, source },
+            // Under the floor: a fault of the file; DRC applies the floor.
+            _ => Resolved {
+                value: fallback.max(floor),
+                source: format!("preset:{}", self.preset.name),
+            },
+        }
+    }
+
+    pub fn clearance(&self, net: Option<&str>) -> Resolved {
+        let p = &self.preset;
+        self.pick(net, |s| s.clearance_nm, p.clearance_nm, p.clearance_nm)
+    }
+
+    /// The least width DRC applies to a track of `net`.
+    pub fn track_width_min(&self, net: Option<&str>) -> Resolved {
+        let p = &self.preset;
+        self.pick(
+            net,
+            |s| s.track_width_nm,
+            p.track_width_min_nm,
+            p.track_width_min_nm,
+        )
+    }
+
+    /// The width a track of `net` takes when drawn with none.
+    pub fn track_width_default(&self, net: Option<&str>) -> Resolved {
+        let p = &self.preset;
+        self.pick(
+            net,
+            |s| s.track_width_nm,
+            p.default_track_width_nm,
+            p.track_width_min_nm,
+        )
+    }
+
+    /// The size a via of `net` takes when drawn with none.
+    pub fn via_default(&self, net: Option<&str>) -> (ViaRule, String) {
+        let found = self
+            .class_set(net)
+            .and_then(|(id, s)| s.via.map(|v| (v, format!("class:{id}"))))
+            .or_else(|| self.file.defaults.via.map(|v| (v, "board".to_owned())));
+        found.unwrap_or_else(|| {
+            (
+                ViaRule {
+                    drill_nm: self.preset.default_via_drill_nm,
+                    diameter_nm: self.preset.default_via_diameter_nm,
+                },
+                format!("preset:{}", self.preset.name),
+            )
+        })
+    }
+
+    /// A net's hole clearance rule, if the rules set one (the preset's
+    /// per-kind values apply under it).
+    pub fn hole_clearance(&self, net: Option<&str>) -> Option<Resolved> {
+        let r = self.pick(net, |s| s.hole_clearance_nm, 0, 0);
+        (!r.source.starts_with("preset:")).then_some(r)
+    }
+
+    pub fn edge_clearance(&self, net: Option<&str>) -> Resolved {
+        let p = &self.preset;
+        self.pick(
+            net,
+            |s| s.edge_clearance_nm,
+            p.edge_clearance_nm,
+            p.edge_clearance_nm,
+        )
+    }
+
+    pub fn courtyard_clearance(&self) -> Resolved {
+        match self.file.defaults.courtyard_clearance_nm {
+            Some(v) if v >= 0 => Resolved {
+                value: v,
+                source: "board".into(),
+            },
+            _ => Resolved {
+                value: 0,
+                source: "ryueda".into(),
+            },
+        }
+    }
+
+    pub fn placement_grid(&self) -> Resolved {
+        match self.file.defaults.placement_grid_nm {
+            Some(v) if v > 0 => Resolved {
+                value: v,
+                source: "board".into(),
+            },
+            _ => Resolved {
+                value: PLACEMENT_GRID_NM,
+                source: "ryueda".into(),
+            },
+        }
+    }
+
+    /// The clearance two islands need: the largest over both's nets (an
+    /// island with no net takes the board's).
+    pub fn pair_clearance(&self, a: &[&str], b: &[&str]) -> Resolved {
+        let side = |nets: &[&str]| -> Resolved {
+            if nets.is_empty() {
+                return self.clearance(None);
+            }
+            nets.iter()
+                .map(|n| self.clearance(Some(n)))
+                .max_by_key(|r| r.value)
+                .unwrap()
+        };
+        let (x, y) = (side(a), side(b));
+        if y.value > x.value { y } else { x }
+    }
+
+    /// The largest clearance any pair can need: what the engine is asked.
+    pub fn widest_clearance(&self) -> i64 {
+        std::iter::once(&self.file.defaults)
+            .chain(self.file.classes.values())
+            .filter_map(|s| s.clearance_nm)
+            .chain(std::iter::once(self.preset.clearance_nm))
+            .max()
+            .unwrap_or(self.preset.clearance_nm)
+            .max(self.preset.clearance_nm)
+    }
+
+    /// Whether any clearance is the board's own (else DRC runs exactly as
+    /// stage 5's).
+    pub fn has_clearance_rules(&self) -> bool {
+        std::iter::once(&self.file.defaults)
+            .chain(self.file.classes.values())
+            .any(|s| s.clearance_nm.is_some())
+    }
+
+    pub fn has_width_rules(&self) -> bool {
+        std::iter::once(&self.file.defaults)
+            .chain(self.file.classes.values())
+            .any(|s| s.track_width_nm.is_some())
+    }
+
+    pub fn has_hole_rules(&self) -> bool {
+        std::iter::once(&self.file.defaults)
+            .chain(self.file.classes.values())
+            .any(|s| s.hole_clearance_nm.is_some())
+    }
+
+    pub fn has_edge_rules(&self) -> bool {
+        std::iter::once(&self.file.defaults)
+            .chain(self.file.classes.values())
+            .any(|s| s.edge_clearance_nm.is_some())
+    }
+
+    fn set_json(&self, net: Option<&str>) -> serde_json::Value {
+        let (via, via_source) = self.via_default(net);
+        let mut v = serde_json::json!({
+            "clearance_nm": self.clearance(net),
+            "track_width_nm": self.track_width_min(net),
+            "track_width_default_nm": self.track_width_default(net),
+            "via": {"drill_nm": via.drill_nm, "diameter_nm": via.diameter_nm, "source": via_source},
+            "edge_clearance_nm": self.edge_clearance(net),
+        });
+        if let Some(h) = self.hole_clearance(net) {
+            v["hole_clearance_nm"] = serde_json::json!(h);
+        }
+        v
+    }
+
+    /// The resolved rules: board-wide, per class, and each net's class.
+    pub fn to_json(&self) -> serde_json::Value {
+        let mut board = self.set_json(None);
+        board["courtyard_clearance_nm"] = serde_json::json!(self.courtyard_clearance());
+        board["placement_grid_nm"] = serde_json::json!(self.placement_grid());
+        if let Some(p) = self.file.defaults.pour {
+            board["pour"] = serde_json::json!(p);
+        }
+        let classes: serde_json::Map<String, serde_json::Value> = self
+            .file
+            .classes
+            .keys()
+            .map(|id| {
+                // Any net of the class resolves as the class.
+                let net = self
+                    .class_of
+                    .iter()
+                    .find(|(_, c)| *c == id)
+                    .map(|(n, _)| n.as_str());
+                (
+                    id.to_string(),
+                    match net {
+                        Some(n) => self.set_json(Some(n)),
+                        None => serde_json::json!({"nets": 0}),
+                    },
+                )
+            })
+            .collect();
+        serde_json::json!({
+            "preset": self.preset.name,
+            "board": board,
+            "classes": classes,
+            "nets": self.class_of,
+        })
+    }
+}
+
+/// A board's rules from the project: its preset, its `rules.json` (when
+/// it reads) and its design's classes.
+pub fn of(p: &crate::project::Project, b: &super::load::BoardFiles) -> crate::error::Result<Rules> {
+    let file = b.board.item.as_ref().map_err(Clone::clone)?;
+    let preset = super::preset::resolve(p, &file.preset)
+        .unwrap_or_else(|| std::sync::Arc::new(super::preset::DEFAULT.clone()));
+    let n = crate::netlist::flatten(p, &file.design)?;
+    let rules = b.rules.as_ref().and_then(|l| l.item.as_ref().ok());
+    Ok(Rules::new(preset, rules, &n))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,5 +590,94 @@ mod tests {
             ..RulesFile::default()
         };
         assert!(judge(&ok, &JLC_2L, &classes()).is_empty());
+    }
+    fn rules(file: Option<RulesFile>) -> Rules {
+        let class_of: BTreeMap<String, Id> =
+            [("rail:vin".to_owned(), Id::parse("power", "class").unwrap())]
+                .into_iter()
+                .collect();
+        Rules::from_parts(std::sync::Arc::new(JLC_2L), file, class_of)
+    }
+
+    #[test]
+    fn a_value_is_its_class_else_the_board_else_the_preset() {
+        let r = rules(None);
+        let c = r.clearance(Some("rail:vin"));
+        assert_eq!(
+            (c.value, c.source.as_str()),
+            (JLC_2L.clearance_nm, "preset:jlc-2l")
+        );
+        let mut f = RulesFile::default();
+        f.defaults.clearance_nm = Some(150_000);
+        f.defaults.track_width_nm = Some(200_000);
+        f.classes.insert(
+            Id::parse("power", "class").unwrap(),
+            RuleSet {
+                clearance_nm: Some(250_000),
+                ..RuleSet::default()
+            },
+        );
+        let r = rules(Some(f));
+        assert_eq!(r.clearance(Some("rail:vin")).value, 250_000);
+        assert_eq!(r.clearance(Some("rail:vin")).source, "class:power");
+        assert_eq!(r.clearance(Some("sda")).value, 150_000);
+        assert_eq!(r.clearance(Some("sda")).source, "board");
+        assert_eq!(r.clearance(None).source, "board");
+        // The class sets no width: the board's.
+        assert_eq!(r.track_width_min(Some("rail:vin")).source, "board");
+        assert_eq!(r.track_width_default(Some("rail:vin")).value, 200_000);
+        // With nothing set, the least width is the preset's minimum and the
+        // drawn width its default.
+        let r0 = rules(None);
+        assert_eq!(
+            r0.track_width_min(Some("sda")).value,
+            JLC_2L.track_width_min_nm
+        );
+        assert_eq!(
+            r0.track_width_default(Some("sda")).value,
+            JLC_2L.default_track_width_nm
+        );
+        assert_eq!(r0.widest_clearance(), JLC_2L.clearance_nm);
+        assert_eq!(r.widest_clearance(), 250_000);
+    }
+
+    #[test]
+    fn a_pair_takes_the_larger_side() {
+        let mut f = RulesFile::default();
+        f.classes.insert(
+            Id::parse("power", "class").unwrap(),
+            RuleSet {
+                clearance_nm: Some(250_000),
+                ..RuleSet::default()
+            },
+        );
+        let r = rules(Some(f));
+        let p = r.pair_clearance(&["sda"], &["rail:vin"]);
+        assert_eq!((p.value, p.source.as_str()), (250_000, "class:power"));
+        let q = r.pair_clearance(&["sda"], &["scl"]);
+        assert_eq!(q.source, "preset:jlc-2l");
+        assert!(r.has_clearance_rules());
+        assert!(!rules(None).has_clearance_rules());
+    }
+
+    #[test]
+    fn the_json_lists_each_board_value_and_each_class() {
+        let mut f = RulesFile::default();
+        f.defaults.edge_clearance_nm = Some(300_000);
+        f.classes.insert(
+            Id::parse("power", "class").unwrap(),
+            RuleSet {
+                clearance_nm: Some(250_000),
+                ..RuleSet::default()
+            },
+        );
+        let v = rules(Some(f)).to_json();
+        assert_eq!(
+            v["board"]["edge_clearance_nm"],
+            serde_json::json!({"value": 300000, "source": "board"})
+        );
+        assert_eq!(v["board"]["clearance_nm"]["source"], "preset:jlc-2l");
+        assert_eq!(v["classes"]["power"]["clearance_nm"]["value"], 250000);
+        assert_eq!(v["nets"]["rail:vin"], "power");
     }
 }
