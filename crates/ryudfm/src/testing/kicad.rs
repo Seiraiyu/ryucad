@@ -268,6 +268,30 @@ fn drc_actual(d: &str) -> Option<ryu_board::geom::Nm> {
     nm_value(num, Unit::Mm).ok()
 }
 
+/// Gaps from plated holes' walls added to ours under `layer`, by pair of
+/// nets, the least distance kept (#946): KiCad measures to a via's or
+/// plated pad's hole on layers where it has no pad. An unplated hole has
+/// no net, so no KiCad clearance violation; a gap within one net isn't
+/// one either.
+fn add_hole_gaps<K: Clone>(
+    ours: &mut BTreeMap<(String, String, String), ryu_board::geom::Nm>,
+    layer: &str,
+    gaps: &[ryu_copper::connect::HoleGap<K>],
+    net: impl Fn(&ryu_copper::connect::IslandId<K>) -> String,
+) {
+    for g in gaps {
+        let Some(j) = &g.joined else { continue };
+        let (a, b) = sorted_pair(net(j), net(&g.island));
+        if a == b {
+            continue;
+        }
+        let e = ours
+            .entry((layer.to_owned(), a, b))
+            .or_insert(g.distance.nm);
+        *e = (*e).min(g.distance.nm);
+    }
+}
+
 fn sorted_pair(a: String, b: String) -> (String, String) {
     if a <= b { (a, b) } else { (b, a) }
 }
@@ -386,20 +410,12 @@ pub fn compare_with_drc(
                 .or_insert(g.distance.nm);
             *e = (*e).min(g.distance.nm);
         }
-        // KiCad measures to a via's or plated pad's hole on layers where
-        // it has no pad (#946); an unplated hole has no net, and no KiCad
-        // clearance violation.
-        for g in cb.copper.hole_clearance(l, clearance) {
-            let Some(j) = &g.joined else { continue };
-            let (a, b) = sorted_pair(net(j), net(&g.island));
-            if a == b {
-                continue;
-            }
-            let e = ours
-                .entry((cb.layer_name(l).to_ascii_uppercase(), a, b))
-                .or_insert(g.distance.nm);
-            *e = (*e).min(g.distance.nm);
-        }
+        add_hole_gaps(
+            &mut ours,
+            &cb.layer_name(l).to_ascii_uppercase(),
+            &cb.copper.hole_clearance(l, clearance),
+            net,
+        );
     }
     if capped {
         let only = ours.keys().filter(|k| !theirs.contains_key(*k)).count();
@@ -435,4 +451,116 @@ pub fn compare_with_drc(
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ryu_board::geom::{Edge, Pen, Point, Region, Stroke};
+    use ryu_board::model::Polarity;
+    use ryu_board::shape::{Part, Piece, Shape, circle};
+    use ryu_copper::connect::Copper;
+    use ryu_copper::layout::{Hole, HoleShape, Item, Layer, Layout};
+    use ryu_copper::measure::BodyOptions;
+
+    fn trace(layer: usize, y: i64, net: &str) -> Item {
+        Item {
+            layer,
+            shape: Shape {
+                parts: vec![Part {
+                    polarity: Polarity::Positive,
+                    piece: Piece::Stroke(Stroke {
+                        path: vec![Edge::line(
+                            Point::new(-2_000_000, y),
+                            Point::new(2_000_000, y),
+                        )],
+                        pen: Pen::Round(100_000),
+                    }),
+                }],
+                ..Shape::default()
+            },
+            net: Some(net.into()),
+        }
+    }
+
+    /// #946: a via with its pad on the top only, and on the second layer
+    /// (no pad) traces passing its wall. Another net's is a gap KiCad
+    /// reports, so ours; the via's own net's isn't; an unplated hole's
+    /// isn't either.
+    #[test]
+    fn gaps_to_plated_walls_are_ours_by_net_pair() {
+        let mut l: Layout<&str> = Layout {
+            layers: (0..2)
+                .map(|k| Layer {
+                    name: format!("l{k}"),
+                    side: if k == 0 { Side::Top } else { Side::Bottom },
+                    copper: true,
+                })
+                .collect(),
+            ..Layout::default()
+        };
+        let via = |at: Point, plated| Hole {
+            shape: HoleShape::Round { at, d: 300_000 },
+            span: (0, 1),
+            plated,
+            backdrilled: vec![],
+        };
+        l.holes.insert("v", via(Point::new(0, 0), true));
+        l.items.insert(
+            "vp",
+            Item {
+                layer: 0,
+                shape: Shape::regions(
+                    Polarity::Positive,
+                    [Region::solid(circle(Point::new(0, 0), 300_000).unwrap())],
+                ),
+                net: Some("A".into()),
+            },
+        );
+        // Another net 100 µm from the wall, and the via's own net 60 µm
+        // below it, both on the padless layer.
+        l.items.insert("b", trace(1, 300_000, "B"));
+        l.items.insert("a", trace(1, -260_000, "A"));
+        // An unplated hole far off, with net C's trace beside it.
+        l.holes.insert("n", via(Point::new(10_000_000, 0), false));
+        l.items.insert("c", {
+            let mut t = trace(1, 260_000, "C");
+            t.shape = Shape {
+                parts: vec![Part {
+                    polarity: Polarity::Positive,
+                    piece: Piece::Stroke(Stroke {
+                        path: vec![Edge::line(
+                            Point::new(9_000_000, 260_000),
+                            Point::new(11_000_000, 260_000),
+                        )],
+                        pen: Pen::Round(100_000),
+                    }),
+                }],
+                ..Shape::default()
+            };
+            t
+        });
+        let c = Copper::new(&l, BodyOptions::default());
+        let gaps = c.hole_clearance(1, 200_000);
+        // The engine finds all three: other net, own net, unplated.
+        assert_eq!(gaps.len(), 3, "{gaps:?}");
+        let island_net: BTreeMap<_, String> = c
+            .islands()
+            .iter()
+            .map(|i| (i.id, i.claims.first().cloned().unwrap_or_default()))
+            .collect();
+        let mut ours = BTreeMap::new();
+        add_hole_gaps(&mut ours, "L1", &gaps, |id| island_net[id].clone());
+        assert_eq!(
+            ours,
+            BTreeMap::from([(("L1".into(), "A".into(), "B".into()), 100_000)])
+        );
+        // The least distance per pair is kept.
+        let mut nearer = gaps.clone();
+        for g in &mut nearer {
+            g.distance.nm -= 1;
+        }
+        add_hole_gaps(&mut ours, "L1", &nearer, |id| island_net[id].clone());
+        assert_eq!(ours[&("L1".into(), "A".into(), "B".into())], 99_999);
+    }
 }

@@ -29,7 +29,7 @@ use ryudfm::testing::{compare_with_drc, manifest};
 
 /// Boards whose disagreements with KiCad's DRC are printed rather than
 /// asserted, each with the issue that holds them.
-const KNOWN_DRC_CASES: &[(&str, &str)] = &[];
+const KNOWN_DRC_CASES: &[(&str, &str)] = &[("lpddr4-test-board", "#1007")];
 
 #[test]
 #[ignore = "needs scripts/fetch-dfm-corpus.sh's DRC reports: run in the devcontainer"]
