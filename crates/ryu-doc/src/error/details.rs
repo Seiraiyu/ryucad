@@ -118,7 +118,7 @@ pub const COMMON: &[Key] = &[
     ),
 ];
 
-use Kind::{Any, Arr, Num, Obj, Str};
+use Kind::{Any, Arr, Bool, Num, Obj, Str};
 
 /// The table: each declared code and its own keys, beside [`COMMON`].
 macro_rules! details {
@@ -473,6 +473,59 @@ details! {
     BomCycle => [
         key("item", Str, "The first item of the cycle."),
         key("cycle", Arr, "The items of the cycle, in order."),
+    ],
+    BoardStackupInvalid => [],
+    BoardLayerNotFound => [
+        key("layer", Str, "The layer named, which the board's stackup doesn't have."),
+    ],
+    DrcViaSpan => [
+        key("from", Str, "The copper layer the via starts on."),
+        key("to", Str, "The copper layer the via ends on."),
+    ],
+    DrcHoleClearance => [
+        key("layer", Str, "The copper layer the gap was measured on."),
+        key("layers", Arr, "The copper layers the item is on."),
+        key("distance_nm", Num, "The gap to the hole wall, in nanometres."),
+        key("exact", Bool, "Whether the distance is exact."),
+        key("bound_nm", Any, "The distance's bound, in nanometres, when it isn't exact."),
+        key("uncertain", Bool, "Whether the verdict is uncertain."),
+        key("plated", Bool, "Whether the hole is plated."),
+        key("rule_nm", Num, "The hole clearance asked for, in nanometres."),
+    ],
+    ImportConflict => [
+        key("item", Str, "The item whose field changed on both sides."),
+        key("key", Str, "The item's key in the source."),
+        key("row", Num, "The source's row."),
+        key("field", Str, "The field that changed."),
+        key("base", Any, "The value the last import wrote."),
+        key("catalogue", Any, "The value in the catalogue."),
+        key("source", Any, "The value in the source."),
+    ],
+    ImportMissing => [
+        key("item", Str, "The item the source no longer has, or whose line it lost."),
+        key("key", Str, "The item's key in the source."),
+        key("revision", Str, "The revision label the source no longer has."),
+        key("line", Str, "The BOM line the source no longer has."),
+        key("child", Str, "The child item of that line."),
+    ],
+    ImportMappingInvalid => [
+        key("import", Str, "The mapping's name."),
+        key("missing", Arr, "The columns the mapping names that the source hasn't."),
+        key("columns", Arr, "The columns the source has."),
+    ],
+    ItemHistoryLabelForeign => [
+        key("item", Str, "The item whose history it is."),
+        key("label", Str, "The revision label outside the scheme."),
+        key("scheme", Str, "The catalogue's revision scheme."),
+    ],
+    PartNumberTaken => [
+        key("status", Num, "The HTTP status the ledger answered."),
+        key("service_code", Str, "The ledger's own code."),
+        key("service", Any, "The ledger's details: who holds each number."),
+    ],
+    LedgerUnavailable => [
+        key("why", Str, "Why the ledger can't be asked, as a code (`ledger_off`, `review_unreachable`)."),
+        key("cause", Obj, "The error asking it gave."),
     ],
 }
 
@@ -951,6 +1004,16 @@ mod tests {
             Code::BomUnlinked,
             Code::BomLineTwice,
             Code::BomCycle,
+            Code::BoardStackupInvalid,
+            Code::BoardLayerNotFound,
+            Code::DrcViaSpan,
+            Code::DrcHoleClearance,
+            Code::ImportConflict,
+            Code::ImportMissing,
+            Code::ImportMappingInvalid,
+            Code::ItemHistoryLabelForeign,
+            Code::PartNumberTaken,
+            Code::LedgerUnavailable,
         ] {
             assert!(keys(c).is_some(), "{c:?}");
         }

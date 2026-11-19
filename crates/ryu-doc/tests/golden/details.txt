@@ -287,6 +287,25 @@ dependency_project_mismatch exit 1 "Dependency project mismatch"
   url str The dependency's URL.
   alias str The dependency's alias.
 
+board_stackup_invalid exit 1 "Board stackup invalid"
+
+board_layer_not_found exit 1 "Board layer not found"
+  layer str The layer named, which the board's stackup doesn't have.
+
+drc_via_span exit 1 "DRC via span"
+  from str The copper layer the via starts on.
+  to str The copper layer the via ends on.
+
+drc_hole_clearance exit 1 "DRC hole clearance"
+  layer str The copper layer the gap was measured on.
+  layers arr The copper layers the item is on.
+  distance_nm num The gap to the hole wall, in nanometres.
+  exact bool Whether the distance is exact.
+  bound_nm any The distance's bound, in nanometres, when it isn't exact.
+  uncertain bool Whether the verdict is uncertain.
+  plated bool Whether the hole is plated.
+  rule_nm num The hole clearance asked for, in nanometres.
+
 drc_failed exit 1 "DRC failed"
   report obj The board's DRC report: `board`, `findings` and `drc`.
 
@@ -338,3 +357,38 @@ bom_line_twice exit 1 "BOM line twice"
 bom_cycle exit 1 "BOM cycle"
   item str The first item of the cycle.
   cycle arr The items of the cycle, in order.
+
+import_conflict exit 1 "Import conflict"
+  item str The item whose field changed on both sides.
+  key str The item's key in the source.
+  row num The source's row.
+  field str The field that changed.
+  base any The value the last import wrote.
+  catalogue any The value in the catalogue.
+  source any The value in the source.
+
+import_missing exit 1 "Import missing"
+  item str The item the source no longer has, or whose line it lost.
+  key str The item's key in the source.
+  revision str The revision label the source no longer has.
+  line str The BOM line the source no longer has.
+  child str The child item of that line.
+
+import_mapping_invalid exit 1 "Import mapping invalid"
+  import str The mapping's name.
+  missing arr The columns the mapping names that the source hasn't.
+  columns arr The columns the source has.
+
+item_history_label_foreign exit 1 "Item history label foreign"
+  item str The item whose history it is.
+  label str The revision label outside the scheme.
+  scheme str The catalogue's revision scheme.
+
+part_number_taken exit 1 "Part number taken"
+  status num The HTTP status the ledger answered.
+  service_code str The ledger's own code.
+  service any The ledger's details: who holds each number.
+
+ledger_unavailable exit 4 "Ledger unavailable"
+  why str Why the ledger can't be asked, as a code (`ledger_off`, `review_unreachable`).
+  cause obj The error asking it gave.
