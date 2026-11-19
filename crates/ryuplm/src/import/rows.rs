@@ -14,6 +14,9 @@ pub type Raw = (u64, Vec<String>);
 pub struct Table {
     pub columns: Vec<String>,
     pub rows: Vec<Row>,
+    /// Whether the source counts date serials from 1904 (an XLSX
+    /// workbook's `date1904`); false for every other reader.
+    pub date1904: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -163,7 +166,11 @@ impl Table {
                 place: None,
             });
         }
-        Ok(Table { columns, rows })
+        Ok(Table {
+            columns,
+            rows,
+            date1904: false,
+        })
     }
 
     /// The table of a tree reader's records (design 935): every path any
@@ -222,7 +229,11 @@ impl Table {
         for r in &mut rows {
             r.cells.resize(width, String::new());
         }
-        Ok(Table { columns, rows })
+        Ok(Table {
+            columns,
+            rows,
+            date1904: false,
+        })
     }
 
     /// Each refusal at a row given that row's place, when its reader gave

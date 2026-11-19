@@ -100,10 +100,29 @@ fn column_of(r: &str) -> Option<usize> {
     Some(n - 1)
 }
 
+/// Whether the workbook counts its date serials from 1904
+/// (`<workbookPr date1904="1"/>`, as older Mac workbooks do).
+fn date1904(parts: &BTreeMap<String, Vec<u8>>) -> Result<bool, Refusal> {
+    let Some(wb) = xml(parts, "xl/workbook.xml")? else {
+        return Ok(false);
+    };
+    Ok(doc(wb, "xl/workbook.xml")?
+        .descendants()
+        .filter(|n| n.is_element() && n.tag_name().name() == "workbookPr")
+        .any(|n| matches!(n.attribute("date1904"), Some("1" | "true"))))
+}
+
 /// The rows of sheet `sheet` (the first when `None`), each with its row
 /// number.
 pub fn read(bytes: &[u8], sheet: Option<&str>) -> Result<Vec<Raw>, Refusal> {
+    read_book(bytes, sheet).map(|(rows, _)| rows)
+}
+
+/// The rows of sheet `sheet` (the first when `None`), each with its row
+/// number, and whether the workbook counts its dates from 1904.
+pub fn read_book(bytes: &[u8], sheet: Option<&str>) -> Result<(Vec<Raw>, bool), Refusal> {
     let parts = parts(bytes)?;
+    let d1904 = date1904(&parts)?;
     let list = sheet_parts(&parts)?;
     let (name, path) = match sheet {
         Some(s) => list.iter().find(|(n, _)| n == s).ok_or_else(|| {
@@ -195,7 +214,7 @@ pub fn read(bytes: &[u8], sheet: Option<&str>) -> Result<Vec<Raw>, Refusal> {
             return Err(Refusal::file("more than 2,000,000 rows"));
         }
     }
-    Ok(out)
+    Ok((out, d1904))
 }
 
 #[cfg(test)]
@@ -250,5 +269,39 @@ mod tests {
         assert_eq!(column_of("AB12"), Some(27));
         assert_eq!(column_of("A1"), Some(0));
         assert_eq!(column_of("12"), None);
+    }
+
+    #[test]
+    fn a_workbook_may_count_dates_from_1904() {
+        let book = xlsx(&[("S", vec![vec![Cell::Str("A")]])]);
+        assert!(!read_book(&book, None).unwrap().1);
+        let mut parts: BTreeMap<String, Vec<u8>> = ryupdm::package::zip::read(&book, 1 << 24, &[])
+            .unwrap()
+            .into_iter()
+            .collect();
+        let wb = String::from_utf8(parts["xl/workbook.xml"].clone()).unwrap();
+        let wb = wb.replacen("<sheets>", "<workbookPr date1904=\"1\"/><sheets>", 1);
+        parts.insert("xl/workbook.xml".into(), wb.into_bytes());
+        let list: Vec<(&str, &[u8])> = parts
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_slice()))
+            .collect();
+        let z = ryupdm::package::zip::write(&list).unwrap();
+        let (rows, d1904) = read_book(&z, None).unwrap();
+        assert!(d1904);
+        assert_eq!(rows[0].1, ["A"]);
+        let reader = crate::import::mapping::Reader {
+            kind: crate::import::mapping::ReaderKind::Xlsx,
+            file: None,
+            encoding: None,
+            delimiter: None,
+            sheet: None,
+            header_row: 1,
+            records: None,
+            children: None,
+            lines: false,
+        };
+        assert!(crate::import::read_table(&z, &reader).unwrap().date1904);
+        assert!(!crate::import::read_table(&book, &reader).unwrap().date1904);
     }
 }

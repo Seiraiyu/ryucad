@@ -152,3 +152,41 @@ fn tree_imports_answer_the_same_everywhere() {
     }
     g.finish();
 }
+
+#[test]
+fn history_imports_answer_the_same_everywhere() {
+    use ryuplm::import::{history, records, rows::Table, run};
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut g = Golden::new(dir.join("tests/golden/history.txt"));
+    // SAFETY: the goldens read one seed.
+    unsafe { std::env::set_var(ryuplm::ids::SEED_VAR, "golden") };
+    let (mut files, m, csv) = ryuplm::testing::history_source("golden", 400);
+    let config = ryupdm::config::Config::read_in(&files, "ryuplm").unwrap();
+    let table = Table::from_raw(ryuplm::import::csv::parse(&csv, ',').unwrap(), 1).unwrap();
+    for round in 0..2 {
+        let cat = Catalogue::load(&files).unwrap();
+        let (rows, refusals) =
+            records::map(&table, &m, &config, cat.manifest.default_unit).unwrap();
+        g.section("refusals")
+            .str(&serde_json::to_string(&refusals).unwrap());
+        let out = run::plan(&files, &cat, &config, &m, &rows, None, 50).unwrap();
+        g.section(&format!("report{round}"))
+            .str(&serde_json::to_string(&out.report).unwrap());
+        for (id, it) in &out.items {
+            let text = it.to_text();
+            g.section(&format!("items{round}"))
+                .str(id.as_str())
+                .str(&text);
+            files.insert(ryuplm::ids::item_path(id), text.into_bytes());
+        }
+    }
+    let cat = Catalogue::load(&files).unwrap();
+    let foreign: Vec<(String, String)> = history::foreign(&files, &cat, &config)
+        .into_iter()
+        .map(|e| (e.message, e.details["label"].to_string()))
+        .collect();
+    g.section("foreign")
+        .str(&serde_json::to_string(&foreign).unwrap());
+    g.section("mapping").str(&m.to_text());
+    g.finish();
+}

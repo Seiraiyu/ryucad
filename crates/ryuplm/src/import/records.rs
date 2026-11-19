@@ -2,8 +2,10 @@
 //! by target, its class, the cells nothing maps (kept in `extra`), and for
 //! a BOM its parent, quantity and find number.
 
-use super::mapping::{Mapping, Numbers, Target, target};
+use super::history::{Legacy, Revision};
+use super::mapping::{Mapping, Numbers, Order, Target, target};
 use super::rows::{Record, Refusal, Table};
+use super::transform::Dates;
 use crate::error::{Code, Error, Result};
 use crate::units::Unit;
 use ryupdm::config::Config;
@@ -18,6 +20,9 @@ pub struct Mapped {
     /// `class`, `properties.<name>`, and `aml` (the whole imported list).
     pub values: BTreeMap<String, Value>,
     pub extra: BTreeMap<String, String>,
+    /// A history mapping's revisions of this key (design 935); `None`
+    /// for every other mapping.
+    pub history: Option<Legacy>,
 }
 
 pub const AML_STATUSES: [&str; 4] = ["active", "nrnd", "obsolete", "unknown"];
@@ -72,6 +77,15 @@ pub fn map(
     // Indented BOMs: the open ancestors, (depth, key).
     let mut stack: Vec<(usize, String)> = Vec::new();
     let mut top: Option<usize> = None;
+    let dates = if table.date1904 {
+        Dates::S1904
+    } else {
+        Dates::S1900
+    };
+    // A history mapping's rows by key, in order of first appearance: the
+    // key's first row's record, and its revisions so far.
+    let mut groups: Vec<(Record, Vec<Revision>)> = Vec::new();
+    let mut group_of: BTreeMap<String, usize> = BTreeMap::new();
     for row in &table.rows {
         let at = row.at;
         let cell = |c: &str| row.cells[col(c)].as_str();
@@ -85,8 +99,14 @@ pub fn map(
         let mut aml: BTreeMap<usize, BTreeMap<&str, String>> = BTreeMap::new();
         let mut ok = true;
         for (t, f) in &m.fields {
-            let Some(v) = super::transform::apply(f, cell(&f.from)) else {
-                continue;
+            let v = match super::transform::apply_in(f, cell(&f.from), dates) {
+                Ok(Some(v)) => v,
+                Ok(None) => continue,
+                Err(why) => {
+                    refuse(Some(f.from.as_str()), format!("{t}: {why}"));
+                    ok = false;
+                    continue;
+                }
             };
             match target(t) {
                 Some(Target::Plain("number")) if !crate::item::number_ok(&v) => {
@@ -256,6 +276,69 @@ pub fn map(
         if !ok {
             continue;
         }
+        if let Some(h) = &m.history {
+            let label = cell(&h.revision).trim().to_owned();
+            if label.is_empty() {
+                refuse(Some(h.revision.as_str()), "the revision is empty".into());
+                continue;
+            }
+            let mut parts: [Option<String>; 4] = Default::default();
+            for (i, f) in [&h.date, &h.state, &h.change, &h.author]
+                .into_iter()
+                .enumerate()
+            {
+                let Some(f) = f else { continue };
+                match super::transform::apply_in(f, cell(&f.from), dates) {
+                    Ok(v) => parts[i] = v,
+                    Err(why) => {
+                        refuse(Some(f.from.as_str()), format!("history: {why}"));
+                        ok = false;
+                    }
+                }
+            }
+            if ok && h.order == Order::Date && parts[0].is_none() {
+                let from = h
+                    .date
+                    .as_ref()
+                    .expect("order: date has a date")
+                    .from
+                    .as_str();
+                refuse(Some(from), "order: date needs every revision's date".into());
+                ok = false;
+            }
+            if !ok {
+                continue;
+            }
+            let g = match group_of.get(&key) {
+                Some(&g) => g,
+                None => {
+                    group_of.insert(key.clone(), groups.len());
+                    groups.push((record, Vec::new()));
+                    groups.len() - 1
+                }
+            };
+            if let Some(prev) = groups[g].1.iter().find(|r| r.label == label) {
+                refuse(
+                    Some(h.revision.as_str()),
+                    format!("key {key:?} has revision {label:?} on row {} too", prev.at),
+                );
+                continue;
+            }
+            let released = h.released.iter().all(|(c, v)| cell(c).trim() == v);
+            let [date, state, change, author] = parts;
+            groups[g].1.push(Revision {
+                label,
+                date,
+                state,
+                change,
+                author,
+                values,
+                extra,
+                at,
+                released,
+            });
+            continue;
+        }
         match first.get(&key) {
             Some(&i) if m.bom.is_none() => {
                 refuse(
@@ -280,6 +363,24 @@ pub fn map(
             record,
             values,
             extra,
+            history: None,
+        });
+    }
+    for (record, mut revisions) in groups {
+        if m.history.as_ref().is_some_and(|h| h.order == Order::Date) {
+            // Stable: revisions of one date keep the file's order.
+            revisions.sort_by(|a, b| a.date.cmp(&b.date));
+        }
+        let carried = revisions.iter().rposition(|r| r.released);
+        let take = carried.unwrap_or(revisions.len() - 1);
+        out.push(Mapped {
+            record,
+            values: revisions[take].values.clone(),
+            extra: revisions[take].extra.clone(),
+            history: Some(Legacy {
+                carried: carried.map(|i| revisions[i].label.clone()),
+                revisions,
+            }),
         });
     }
     Ok((out, refusals))
@@ -444,5 +545,119 @@ mod tests {
         );
         let (rows, refusals) = map(&t, &a, &config(), Unit::Mm).unwrap();
         assert_eq!((rows.len(), refusals.len()), (2, 0));
+    }
+
+    fn hist() -> Mapping {
+        mapping(crate::import::mapping::tests::hist())
+    }
+
+    const HEAD: &[&str] = &["PN", "Rev", "Released", "Lifecycle", "ECO", "By", "Note"];
+
+    #[test]
+    fn a_date_that_doesnt_read_is_refused_at_its_cell() {
+        let m = mapping(
+            json!({"format": 2, "kind": "ryuplm.import", "reader": {"type": "csv"}, "key": "ID",
+            "fields": {"number": {"from": "PN"}, "description": {"from": "Made", "date": ["DD/MM/YYYY", "serial"]}}}),
+        );
+        let mut t = table(&[
+            &["ID", "PN", "Made"],
+            &["1", "A", "07/03/2019"],
+            &["2", "B", "43531"],
+            &["3", "C", "someday"],
+        ]);
+        let (rows, refused) = map(&t, &m, &config(), Unit::Mm).unwrap();
+        assert_eq!(rows[0].values["description"], "2019-03-07");
+        assert_eq!(rows[1].values["description"], "2019-03-07");
+        assert_eq!(
+            (refused[0].row, refused[0].column.as_deref()),
+            (4, Some("Made"))
+        );
+        t.date1904 = true;
+        let (rows, _) = map(&t, &m, &config(), Unit::Mm).unwrap();
+        assert_eq!(rows[1].values["description"], "2023-03-08");
+    }
+
+    #[test]
+    fn history_rows_group_by_key_and_carry_the_last_released() {
+        let t = table(&[
+            HEAD,
+            &["A-1", "A", "07/03/2019", "Released", "E1", " Jo ", "first"],
+            &["B-1", "01", "2018-01-15", "Released", "", "Kim", ""],
+            &["A-1", "B", "2020-11-02", "Released", "E2", "Jo", ""],
+            &["A-1", "C", "", "In Work", "E3", "Al", "next"],
+        ]);
+        let (rows, refused) = map(&t, &hist(), &config(), Unit::Mm).unwrap();
+        assert_eq!(refused, vec![]);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].record.key, "A-1");
+        let a = rows[0].history.as_ref().unwrap();
+        let labels: Vec<&str> = a.revisions.iter().map(|r| r.label.as_str()).collect();
+        assert_eq!(labels, ["A", "B", "C"]);
+        assert_eq!(a.carried.as_deref(), Some("B"));
+        assert_eq!(a.revisions[0].date.as_deref(), Some("2019-03-07"));
+        assert_eq!(a.revisions[0].author.as_deref(), Some("Jo"));
+        assert_eq!(a.revisions[2].date, None);
+        assert_eq!(a.revisions[2].state.as_deref(), Some("In Work"));
+        assert_eq!(a.revisions[0].extra["Note"], "first");
+        assert_eq!(rows[0].values["number"], "A-1");
+        assert!(rows[0].extra.is_empty(), "B's unmapped cells: none");
+        assert_eq!(
+            a.revisions[0].to_json(),
+            json!({"label": "A", "date": "2019-03-07", "state": "Released", "change": "E1",
+                   "author": "Jo", "values": {"number": "A-1"}, "extra": {"Note": "first"}})
+        );
+        assert_eq!(
+            rows[1].history.as_ref().unwrap().carried.as_deref(),
+            Some("01")
+        );
+    }
+
+    #[test]
+    fn a_revision_twice_and_an_undated_one_by_date_are_refused() {
+        let twice = table(&[
+            HEAD,
+            &["A-1", "A", "", "Released", "", "", ""],
+            &["A-1", "A", "", "Released", "", "", ""],
+        ]);
+        let (_, refused) = map(&twice, &hist(), &config(), Unit::Mm).unwrap();
+        assert_eq!(
+            (refused[0].row, refused[0].column.as_deref()),
+            (3, Some("Rev"))
+        );
+        let mut j = crate::import::mapping::tests::hist();
+        j["history"]["order"] = json!("date");
+        let by_date = mapping(j);
+        let t = table(&[
+            HEAD,
+            &["A-1", "B", "2020-11-02", "Released", "", "", ""],
+            &["A-1", "A", "07/03/2019", "Released", "", "", ""],
+            &["A-1", "C", "", "In Work", "", "", ""],
+        ]);
+        let (rows, refused) = map(&t, &by_date, &config(), Unit::Mm).unwrap();
+        assert_eq!(
+            (refused[0].row, refused[0].column.as_deref()),
+            (4, Some("Released"))
+        );
+        let labels: Vec<&str> = rows[0]
+            .history
+            .as_ref()
+            .unwrap()
+            .revisions
+            .iter()
+            .map(|r| r.label.as_str())
+            .collect();
+        assert_eq!(labels, ["A", "B"]);
+    }
+
+    #[test]
+    fn with_none_released_nothing_is_carried_and_the_last_gives_the_values() {
+        let t = table(&[
+            HEAD,
+            &["A-1", "A", "", "In Work", "", "", "a"],
+            &["A-1", "B", "", "In Work", "", "", "b"],
+        ]);
+        let (rows, _) = map(&t, &hist(), &config(), Unit::Mm).unwrap();
+        assert_eq!(rows[0].history.as_ref().unwrap().carried, None);
+        assert_eq!(rows[0].extra["Note"], "b");
     }
 }

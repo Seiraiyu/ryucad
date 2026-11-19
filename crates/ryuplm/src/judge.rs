@@ -58,6 +58,11 @@ pub fn all(src: &dyn Source, cat: &Catalogue, cx: &Context) -> Vec<Fault> {
     if let Some(c) = &config {
         out.extend(properties(src, cat, c).into_iter().map(err));
         out.extend(numbers(src, cat, c, cx));
+        out.extend(
+            crate::import::history::foreign(src, cat, c)
+                .into_iter()
+                .map(warn),
+        );
     }
     out
 }

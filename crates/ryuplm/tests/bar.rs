@@ -3,7 +3,10 @@
 //! first import in 20 s; re-importing it unchanged in 5 s, writing
 //! nothing; where-used across 10 checkouts of 10,000 items in 1 s.
 //! Design 935's: 100,000 JSON records and 100,000 XML records each read
-//! into a table in 2 s, and imported first within the CSV's 20 s. With
+//! into a table in 2 s, and imported first within the CSV's 20 s; a
+//! history of 500,000 rows (100,000 items, five revisions each)
+//! imported onto an existing master in 45 s, and again unchanged in
+//! 10 s. With
 //! `RYUPLM_BARS=1` the bars are asserted as they are, else ten times
 //! looser (a shared CI runner is no measuring instrument). Run with
 //! `--nocapture` to see the times.
@@ -216,6 +219,107 @@ fn a_bom_of_two_hundred_thousand_children() {
         Duration::from_secs(2),
     );
     assert_eq!(table.rows.len(), 200_001);
+}
+
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "release only: the bars time a release build"
+)]
+fn a_history_of_half_a_million_rows() {
+    // Unseeded, as the CSV import's bar is.
+    // SAFETY: no test in this file sets the seed.
+    unsafe { std::env::remove_var("RYUPLM_ID_SEED") };
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path().canonicalize().unwrap();
+    ryuplm::server::init(&root, None).unwrap();
+    let mut slot = None;
+    ask(
+        &mut slot,
+        &root,
+        Request::SettingsEdit {
+            change: serde_json::from_value(json!({"class": "part"})).unwrap(),
+            expected_revision: None,
+        },
+    );
+    let mut master = String::from("ID,Number,Name\n");
+    let mut history = String::from("Number,Rev,Released,Lifecycle,ECO,By\n");
+    for k in 0..100_000 {
+        master += &format!("{k},P-{k:06},Part {k}\n");
+        for (r, label) in ["A", "B", "C", "D", "E"].into_iter().enumerate() {
+            history += &format!(
+                "P-{k:06},{label},{:02}/{:02}/{},{},ECO-{k}-{r},Author {}\n",
+                1 + (k + r) % 28,
+                1 + r,
+                2015 + r,
+                if r == 4 && k % 3 == 0 {
+                    "In Work"
+                } else {
+                    "Released"
+                },
+                k % 9
+            );
+        }
+    }
+    std::fs::create_dir_all(root.join("imports")).unwrap();
+    std::fs::write(
+        root.join("imports/erp.json"),
+        ryuplm::canonical::to_string(&json!({"format": 1, "kind": "ryuplm.import",
+            "reader": {"type": "csv"}, "key": "ID",
+            "fields": {"number": {"from": "Number"}, "name": {"from": "Name"}}, "class": "part"})),
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("imports/history.json"),
+        ryuplm::canonical::to_string(&json!({"format": 2, "kind": "ryuplm.import",
+            "reader": {"type": "csv"}, "key": "Number", "fields": {"number": {"from": "Number"}},
+            "numbers": "keep",
+            "history": {"revision": "Rev", "date": {"from": "Released", "date": ["DD/MM/YYYY"]},
+                "state": "Lifecycle", "change": "ECO", "author": "By",
+                "released": {"Lifecycle": "Released"}}})),
+    )
+    .unwrap();
+    std::fs::write(root.join("master.csv"), &master).unwrap();
+    std::fs::write(root.join("history.csv"), &history).unwrap();
+    let run = |slot: &mut Option<ryuplm::session::Session>, name: &str, file: &str| {
+        ask(
+            slot,
+            &root,
+            Request::ImportRun {
+                name: name.into(),
+                file: root.join(file).display().to_string(),
+                dry_run: false,
+                prefer: None,
+                limit: Some(10),
+                expected_revision: None,
+            },
+        )
+    };
+    assert_eq!(
+        run(&mut slot, "erp", "master.csv")["created"]["count"],
+        100_000
+    );
+    let t = Instant::now();
+    let first = run(&mut slot, "history", "history.csv");
+    within(
+        "a history of 500,000 rows imported onto 100,000 items",
+        t.elapsed(),
+        Duration::from_secs(45),
+    );
+    assert_eq!(first["adopted"]["count"], 100_000);
+    // Again, cold: a fresh session, as a new process would have.
+    let mut cold = None;
+    let t = Instant::now();
+    let again = run(&mut cold, "history", "history.csv");
+    within(
+        "the same history imported again",
+        t.elapsed(),
+        Duration::from_secs(10),
+    );
+    assert_eq!(
+        (again["unchanged"].clone(), again["written"].clone()),
+        (json!(100_000), json!(0))
+    );
 }
 
 #[test]

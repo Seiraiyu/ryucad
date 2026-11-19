@@ -128,6 +128,19 @@ impl Product for Plm {
     fn properties_from(v: &Value) -> Option<Result<Properties>> {
         (v["kind"] == crate::item::KIND).then(|| Item::from_json(v).map(|i| properties(&i)))
     }
+
+    /// An item whose legacy history carried a label of the scheme
+    /// continues it (design 935); any other starts at the scheme's first.
+    fn first_label(src: &dyn Source, part: &Id, scheme: ryupdm::config::Scheme) -> String {
+        src.read(&item_path(part))
+            .ok()
+            .flatten()
+            .and_then(|b| Item::read(part, &b).ok())
+            .and_then(|i| {
+                crate::import::history::carried(&i).and_then(|c| ryupdm::label::next(scheme, c))
+            })
+            .unwrap_or_else(|| ryupdm::label::first(scheme))
+    }
 }
 
 #[cfg(test)]
