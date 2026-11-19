@@ -556,8 +556,12 @@ pub fn plan_with(
                                 let (_, tpl) =
                                     crate::numbers::template(config, Some(&s.name), class)?;
                                 let floor = crate::numbers::highest(src, cat, tpl);
-                                seqs.entry(s.name.clone())
-                                    .or_insert((tpl.clone(), floor + 1, floor, 0))
+                                seqs.entry(s.name.clone()).or_insert((
+                                    tpl.clone(),
+                                    floor + 1,
+                                    floor,
+                                    0,
+                                ))
                             }
                         };
                         let n = if given.is_empty() {
@@ -1179,10 +1183,15 @@ pub(crate) mod tests {
             .values()
             .map(|i| (i.description.as_deref().unwrap(), i.number.as_str()))
             .collect();
-        assert_eq!(by_desc, BTreeMap::from([("One", "MECH-00100"), ("Two", "MECH-00101")]));
+        assert_eq!(
+            by_desc,
+            BTreeMap::from([("One", "MECH-00100"), ("Two", "MECH-00101")])
+        );
         // Fewer numbers than new items: refused, nothing planned.
         let short = BTreeMap::from([("mech".to_owned(), vec!["MECH-00100".to_owned()])]);
-        let e = plan_with(&f, &cat, &config, &m, &rows, None, 100, &short).err().unwrap();
+        let e = plan_with(&f, &cat, &config, &m, &rows, None, 100, &short)
+            .err()
+            .unwrap();
         assert_eq!(e.code, Code::Conflict);
     }
 

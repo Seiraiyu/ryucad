@@ -272,12 +272,9 @@ fn dispatch(
             save,
         )?,
         Request::ImportList {} => crate::import::list(session)?,
-        Request::NumberLocal { next, class, item } => crate::numbers::local(
-            session,
-            next.as_deref(),
-            class.as_deref(),
-            item.as_deref(),
-        )?,
+        Request::NumberLocal { next, class, item } => {
+            crate::numbers::local(session, next.as_deref(), class.as_deref(), item.as_deref())?
+        }
         Request::ImportCheck { name, file, limit } => {
             crate::import::preview::check(session, &name, std::path::Path::new(&file), limit)?
         }

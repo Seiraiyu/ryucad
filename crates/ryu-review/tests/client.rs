@@ -221,14 +221,19 @@ fn the_fake_ledger_hands_out_reserves_and_answers() {
         .unwrap_err();
     assert_eq!(e.code, Code::PartNumberTaken);
     assert_eq!(e.details["service"]["taken"][0]["number"], "M-008");
-    assert_eq!(e.details["service"]["taken"][0]["holders"][0]["catalogue"], cat);
+    assert_eq!(
+        e.details["service"]["taken"][0]["holders"][0]["catalogue"],
+        cat
+    );
     assert!(!ledger.lock().unwrap().reserved.contains_key("X 1"));
     c.post(
         &format!("{base}/reserve"),
         &json!({"catalogue": other, "numbers": ["X 1"]}),
     )
     .unwrap();
-    let v = c.get(&format!("{base}/{}", ryu_review::escape("X 1"))).unwrap();
+    let v = c
+        .get(&format!("{base}/{}", ryu_review::escape("X 1")))
+        .unwrap();
     assert_eq!(
         (v["number"].as_str(), v["holders"][0]["kind"].as_str()),
         (Some("X 1"), Some("reserved"))
@@ -250,7 +255,10 @@ fn the_fake_ledger_hands_out_reserves_and_answers() {
         .insert("B-1".into(), (other.into(), "k3v9q2m8x4c1p".into()));
     let v = c.get(&format!("{base}/B-1")).unwrap();
     assert_eq!(
-        (v["holders"][0]["kind"].as_str(), v["holders"][0]["item"].as_str()),
+        (
+            v["holders"][0]["kind"].as_str(),
+            v["holders"][0]["item"].as_str()
+        ),
         (Some("bound"), Some("k3v9q2m8x4c1p"))
     );
     ledger.lock().unwrap().refuse = Some((403, "not_in_beta".into()));

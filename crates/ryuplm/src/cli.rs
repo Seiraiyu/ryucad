@@ -995,7 +995,12 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
         Command::Number(cmd) => {
             let root = find_root(&here)?;
             let ask = match cmd {
-                NumberCmd::Next { scheme, class, count, days } => ryuplm::ledger::Ask::Next {
+                NumberCmd::Next {
+                    scheme,
+                    class,
+                    count,
+                    days,
+                } => ryuplm::ledger::Ask::Next {
                     scheme: scheme.clone(),
                     class: class.clone(),
                     count: *count,
@@ -1005,7 +1010,9 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
                     numbers: numbers.clone(),
                     days: *days,
                 },
-                NumberCmd::Who { number } => ryuplm::ledger::Ask::Who { number: number.clone() },
+                NumberCmd::Who { number } => ryuplm::ledger::Ask::Who {
+                    number: number.clone(),
+                },
                 NumberCmd::List { mine, all, after } => ryuplm::ledger::Ask::List {
                     mine: *mine,
                     all: *all,

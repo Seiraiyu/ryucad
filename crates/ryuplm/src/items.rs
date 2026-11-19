@@ -454,8 +454,20 @@ mod tests {
         };
         let v = local(Some(""), None);
         assert_eq!(
-            (&v["scheme"], &v["template"], &v["floor"], &v["next"], &v["ledger"]),
-            (&json!("mech"), &json!("MECH-{seq:5}"), &json!(41), &json!("MECH-00042"), &json!(false))
+            (
+                &v["scheme"],
+                &v["template"],
+                &v["floor"],
+                &v["next"],
+                &v["ledger"]
+            ),
+            (
+                &json!("mech"),
+                &json!("MECH-{seq:5}"),
+                &json!(41),
+                &json!("MECH-00042"),
+                &json!(false)
+            )
         );
         assert_eq!(v["catalogue"].as_str().unwrap().len(), 32);
         let plain = local(None, None);
@@ -478,10 +490,21 @@ mod tests {
         };
         let on = edit(json!({"ledger": true})).unwrap();
         assert_eq!(
-            (&on["ryupdm"]["part_number"]["ledger"], &on["ryupdm"]["format"]),
+            (
+                &on["ryupdm"]["part_number"]["ledger"],
+                &on["ryupdm"]["format"]
+            ),
             (&json!(true), &json!(6))
         );
-        let local = ask(&root, Request::NumberLocal { next: None, class: None, item: None }).unwrap();
+        let local = ask(
+            &root,
+            Request::NumberLocal {
+                next: None,
+                class: None,
+                item: None,
+            },
+        )
+        .unwrap();
         assert_eq!(local["ledger"], true);
         let off = edit(json!({"ledger": false})).unwrap();
         assert_eq!(

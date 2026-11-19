@@ -542,7 +542,13 @@ fn a_hundred_thousand_numbers_from_the_ledger() {
     let l = ryuplm::ledger::Ledger::at(&fake.url, "t", "acme/widgets");
     let t = Instant::now();
     let more = l
-        .next("0123456789abcdef0123456789abcdef", "MECH-{seq:6}", 100_000, 100_000, None)
+        .next(
+            "0123456789abcdef0123456789abcdef",
+            "MECH-{seq:6}",
+            100_000,
+            100_000,
+            None,
+        )
         .unwrap();
     within(
         "100,000 numbers asked of the ledger",

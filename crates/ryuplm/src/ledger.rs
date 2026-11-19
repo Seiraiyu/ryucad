@@ -99,7 +99,8 @@ impl Ledger {
         floor: u64,
         days: Option<u64>,
     ) -> Result<Value> {
-        let mut b = json!({"catalogue": catalogue, "template": template, "count": count, "floor": floor});
+        let mut b =
+            json!({"catalogue": catalogue, "template": template, "count": count, "floor": floor});
         if let Some(d) = days {
             b["days"] = json!(d);
         }
@@ -350,9 +351,13 @@ pub fn import_run(
                 w["floor"].as_u64().unwrap_or(0),
                 None,
             )?;
-            let numbers: Vec<String> = serde_json::from_value(v["numbers"].clone()).map_err(|e| {
-                Error::new(Code::ReviewFailed, format!("the ledger's numbers don't read: {e}"))
-            })?;
+            let numbers: Vec<String> =
+                serde_json::from_value(v["numbers"].clone()).map_err(|e| {
+                    Error::new(
+                        Code::ReviewFailed,
+                        format!("the ledger's numbers don't read: {e}"),
+                    )
+                })?;
             given.insert(w["scheme"].as_str().unwrap_or_default().to_owned(), numbers);
             expires = v["expires_at"].clone();
         }
@@ -388,7 +393,10 @@ pub enum Ask {
         days: Option<u64>,
     },
     /// Numbers typed by hand, reserved to this catalogue, all or none.
-    Reserve { numbers: Vec<String>, days: Option<u64> },
+    Reserve {
+        numbers: Vec<String>,
+        days: Option<u64>,
+    },
     /// Who holds a number in the organization.
     Who { number: String },
     /// The live reservations: this catalogue's, or the organization's
@@ -406,7 +414,9 @@ pub enum Ask {
 /// catalogue whose ledger is off, is `ledger_unavailable`.
 pub fn number(send: &mut Sender, open: &dyn Fn() -> Result<Ledger>, ask: Ask) -> Result<Value> {
     let (next, class) = match &ask {
-        Ask::Next { scheme, class, .. } => (Some(scheme.clone().unwrap_or_default()), class.clone()),
+        Ask::Next { scheme, class, .. } => {
+            (Some(scheme.clone().unwrap_or_default()), class.clone())
+        }
         _ => (None, None),
     };
     let local = send(Request::NumberLocal {
@@ -456,18 +466,27 @@ mod tests {
         assert_eq!(v["numbers"], json!(["MECH-00042", "MECH-00043"]));
         let v = l.reserve(CAT, &["100-0042 rev".into()], Some(7)).unwrap();
         assert_eq!(v["numbers"], json!(["100-0042 rev"]));
-        assert_eq!(l.who("100-0042 rev").unwrap()["holders"][0]["catalogue"], CAT);
+        assert_eq!(
+            l.who("100-0042 rev").unwrap()["holders"][0]["catalogue"],
+            CAT
+        );
         let listed = l.list(Some(CAT), false, None).unwrap();
         assert_eq!(listed["reservations"].as_array().unwrap().len(), 3);
         // The service can't be asked about a number spelled as a route.
         assert_eq!(l.who("next").unwrap_err().code, Code::InvalidParam);
         state.lock().unwrap().bound.insert(
             "B-1".into(),
-            ("fedcba9876543210fedcba9876543210".into(), "k3v9q2m8x4c1p".into()),
+            (
+                "fedcba9876543210fedcba9876543210".into(),
+                "k3v9q2m8x4c1p".into(),
+            ),
         );
         let e = l.reserve(CAT, &["B-1".into()], None).unwrap_err();
         assert_eq!(e.code, Code::PartNumberTaken);
-        assert_eq!(e.details["service"]["taken"][0]["holders"][0]["item"], "k3v9q2m8x4c1p");
+        assert_eq!(
+            e.details["service"]["taken"][0]["holders"][0]["item"],
+            "k3v9q2m8x4c1p"
+        );
         let seen = fake.seen.lock().unwrap();
         assert_eq!(seen[0].auth.as_deref(), Some("Bearer t"));
         assert!(seen[0].body.contains("\"floor\":41"), "{}", seen[0].body);
@@ -494,7 +513,11 @@ mod tests {
             (400, "invalid_request", Code::ReviewInvalidRequest),
         ] {
             state.lock().unwrap().refuse = Some((status, code.into()));
-            assert_eq!(l.next(CAT, "M-{seq:3}", 1, 0, None).unwrap_err().code, ours, "{code}");
+            assert_eq!(
+                l.next(CAT, "M-{seq:3}", 1, 0, None).unwrap_err().code,
+                ours,
+                "{code}"
+            );
         }
         // No token at all is offline too; a catalogue whose ledger is off.
         let none = ryu_review::token_from(TOKEN_VAR, |_| None, || None).unwrap_err();
@@ -548,7 +571,11 @@ mod tests {
         let (_d, root) = catalogue(true);
         let mut send = sender(&root);
         let (fake, state) = Fake::start("acme/widgets");
-        state.lock().unwrap().sequences.insert("MECH-{seq:5}".into(), 500);
+        state
+            .lock()
+            .unwrap()
+            .sequences
+            .insert("MECH-{seq:5}".into(), 500);
         let url = fake.url.clone();
         let open = move || -> Result<Ledger> { Ok(Ledger::at(&url, "t", "acme/widgets")) };
         let mut w = Vec::new();
@@ -564,7 +591,8 @@ mod tests {
         assert!(fake.seen.lock().unwrap()[1].body.contains("\"floor\":500"));
         assert!(w.is_empty(), "{w:?}");
         // Offline: the local next number, a warning, reserved false.
-        let down = || -> Result<Ledger> { Ok(Ledger::at("http://127.0.0.1:9", "t", "acme/widgets")) };
+        let down =
+            || -> Result<Ledger> { Ok(Ledger::at("http://127.0.0.1:9", "t", "acme/widgets")) };
         let v = numbered(&mut send, &down, create(), &mut w).unwrap();
         assert_eq!(v["item"]["number"], "MECH-00502");
         assert_eq!(
@@ -604,7 +632,10 @@ mod tests {
             next: Some(String::new()),
             expected_revision: None,
         };
-        assert_eq!(numbered(&mut send, &never, both, &mut w).unwrap_err().code, Code::Usage);
+        assert_eq!(
+            numbered(&mut send, &never, both, &mut w).unwrap_err().code,
+            Code::Usage
+        );
     }
 
     fn import(root: &Path, dry_run: bool) -> Request {
@@ -654,7 +685,11 @@ mod tests {
         let v = import_run(&mut send, &open, import(&root, false), &mut w).unwrap();
         assert_eq!(v["created"]["count"], 1000);
         assert_eq!(
-            (&v["ledger"]["reserved"], &v["ledger"]["numbers"], &v["ledger"]["requests"]),
+            (
+                &v["ledger"]["reserved"],
+                &v["ledger"]["numbers"],
+                &v["ledger"]["requests"]
+            ),
             (&json!(true), &json!(1000), &json!(1))
         );
         let seen = fake.seen.lock().unwrap();
@@ -668,13 +703,17 @@ mod tests {
         let (_d, root) = catalogue(true);
         assigning(&root, 2);
         let mut send = sender(&root);
-        let down = || -> Result<Ledger> { Ok(Ledger::at("http://127.0.0.1:9", "t", "acme/widgets")) };
+        let down =
+            || -> Result<Ledger> { Ok(Ledger::at("http://127.0.0.1:9", "t", "acme/widgets")) };
         let mut w = Vec::new();
         let v = import_run(&mut send, &down, import(&root, false), &mut w).unwrap();
         assert_eq!(v["created"]["count"], 2);
         assert_eq!(v["ledger"]["reserved"], false);
         assert_eq!(w.len(), 1);
-        let shown = send(Request::ItemShow { item: "MECH-00002".into() }).unwrap();
+        let shown = send(Request::ItemShow {
+            item: "MECH-00002".into(),
+        })
+        .unwrap();
         assert_eq!(shown["item"]["name"], "Part 1");
     }
 }

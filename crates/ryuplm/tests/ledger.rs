@@ -55,7 +55,12 @@ fn catalogue(ledger: bool) -> Cat {
     };
     for args in [
         &["init", "-q"][..],
-        &["remote", "add", "origin", "https://github.com/acme/widgets.git"],
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/acme/widgets.git",
+        ],
     ] {
         let st = std::process::Command::new("git")
             .args(args)
@@ -68,7 +73,16 @@ fn catalogue(ledger: bool) -> Cat {
     ok(
         &c,
         OFFLINE,
-        &["settings", "edit", "--scheme", "mech", "--pattern", "MECH-\\d{5}", "--next-template", "MECH-{seq:5}"],
+        &[
+            "settings",
+            "edit",
+            "--scheme",
+            "mech",
+            "--pattern",
+            "MECH-\\d{5}",
+            "--next-template",
+            "MECH-{seq:5}",
+        ],
     );
     if ledger {
         ok(&c, OFFLINE, &["settings", "edit", "--ledger", "on"]);
@@ -80,8 +94,16 @@ fn catalogue(ledger: bool) -> Cat {
 fn item_create_next_reserves_from_the_ledger_through_the_daemon_and_in_process() {
     let c = catalogue(true);
     let (fake, state) = Ledger::start("acme/widgets");
-    state.lock().unwrap().sequences.insert("MECH-{seq:5}".into(), 42);
-    let v = ok(&c, &fake.url, &["item", "create", "--next", "--name", "Bracket"]);
+    state
+        .lock()
+        .unwrap()
+        .sequences
+        .insert("MECH-{seq:5}".into(), 42);
+    let v = ok(
+        &c,
+        &fake.url,
+        &["item", "create", "--next", "--name", "Bracket"],
+    );
     assert_eq!(v["result"]["item"]["number"], "MECH-00042");
     assert_eq!(
         v["result"]["ledger"],
@@ -92,7 +114,10 @@ fn item_create_next_reserves_from_the_ledger_through_the_daemon_and_in_process()
     assert_eq!(state.lock().unwrap().reserved.len(), 2);
     {
         let seen = fake.seen.lock().unwrap();
-        assert!(seen.iter().all(|s| s.path == "/api/v1/repos/acme/widgets/numbers/next"));
+        assert!(
+            seen.iter()
+                .all(|s| s.path == "/api/v1/repos/acme/widgets/numbers/next")
+        );
         assert_eq!(seen[0].auth.as_deref(), Some("Bearer t"));
     }
     ok(&c, &fake.url, &["daemon", "stop"]);
@@ -104,7 +129,10 @@ fn offline_the_local_number_with_a_warning() {
     let v = ok(&c, OFFLINE, &["item", "create", "--next"]);
     assert_eq!(v["result"]["item"]["number"], "MECH-00001");
     assert_eq!(
-        (&v["result"]["ledger"]["reserved"], &v["result"]["ledger"]["why"]),
+        (
+            &v["result"]["ledger"]["reserved"],
+            &v["result"]["ledger"]["why"]
+        ),
         (&json!(false), &json!("review_unreachable"))
     );
     assert!(
@@ -135,10 +163,32 @@ fn number_commands() {
     let (fake, state) = Ledger::start("acme/widgets");
     let u = fake.url.as_str();
     let v = ok(&c, u, &["number", "next", "--count", "3"]);
-    assert_eq!(v["result"]["numbers"], json!(["MECH-00001", "MECH-00002", "MECH-00003"]));
+    assert_eq!(
+        v["result"]["numbers"],
+        json!(["MECH-00001", "MECH-00002", "MECH-00003"])
+    );
     assert_eq!(v["result"]["repo"], "acme/widgets");
-    ok(&c, u, &["number", "reserve", "100-0042 rev", "100-0043", "--days", "7"]);
-    assert!(fake.seen.lock().unwrap().last().unwrap().body.contains("\"days\":7"));
+    ok(
+        &c,
+        u,
+        &[
+            "number",
+            "reserve",
+            "100-0042 rev",
+            "100-0043",
+            "--days",
+            "7",
+        ],
+    );
+    assert!(
+        fake.seen
+            .lock()
+            .unwrap()
+            .last()
+            .unwrap()
+            .body
+            .contains("\"days\":7")
+    );
     let v = ok(&c, u, &["number", "who", "100-0042 rev"]);
     assert_eq!(v["result"]["holders"][0]["kind"], "reserved");
     let v = ok(&c, u, &["number", "list"]);
@@ -146,14 +196,28 @@ fn number_commands() {
     // Held for another catalogue's item: refused, naming the holder.
     state.lock().unwrap().bound.insert(
         "B-1".into(),
-        ("fedcba9876543210fedcba9876543210".into(), "k3v9q2m8x4c1p".into()),
+        (
+            "fedcba9876543210fedcba9876543210".into(),
+            "k3v9q2m8x4c1p".into(),
+        ),
     );
     let (code, v) = run(&c, u, &["number", "reserve", "B-1"]);
-    assert_eq!((code, v["error"]["code"].as_str()), (1, Some("part_number_taken")), "{v}");
-    assert_eq!(v["error"]["details"]["service"]["taken"][0]["holders"][0]["item"], "k3v9q2m8x4c1p");
+    assert_eq!(
+        (code, v["error"]["code"].as_str()),
+        (1, Some("part_number_taken")),
+        "{v}"
+    );
+    assert_eq!(
+        v["error"]["details"]["service"]["taken"][0]["holders"][0]["item"],
+        "k3v9q2m8x4c1p"
+    );
     // Offline: nothing local to fall back to.
     let (code, v) = run(&c, OFFLINE, &["number", "who", "B-1"]);
-    assert_eq!((code, v["error"]["code"].as_str()), (4, Some("ledger_unavailable")), "{v}");
+    assert_eq!(
+        (code, v["error"]["code"].as_str()),
+        (4, Some("ledger_unavailable")),
+        "{v}"
+    );
     let (code, _) = run(&c, u, &["number", "next", "--count", "0"]);
     assert_eq!(code, 2);
     ok(&c, u, &["daemon", "stop"]);
@@ -165,7 +229,11 @@ fn number_commands_need_the_ledger_on() {
     let (fake, _) = Ledger::start("acme/widgets");
     let (code, v) = run(&c, &fake.url, &["number", "list"]);
     assert_eq!(
-        (code, v["error"]["code"].as_str(), v["error"]["details"]["why"].as_str()),
+        (
+            code,
+            v["error"]["code"].as_str(),
+            v["error"]["details"]["why"].as_str()
+        ),
         (4, Some("ledger_unavailable"), Some("ledger_off"))
     );
     assert!(fake.seen.lock().unwrap().is_empty());
@@ -186,21 +254,37 @@ fn an_import_assigns_through_the_ledger_or_locally_offline() {
     std::fs::write(c.root.join("a.csv"), "ID,Name\n1,One\n2,Two\n").unwrap();
     std::fs::write(c.root.join("b.csv"), "ID,Name\n1,One\n2,Two\n3,Three\n").unwrap();
     let (fake, state) = Ledger::start("acme/widgets");
-    state.lock().unwrap().sequences.insert("MECH-{seq:5}".into(), 700);
+    state
+        .lock()
+        .unwrap()
+        .sequences
+        .insert("MECH-{seq:5}".into(), 700);
     let u = fake.url.as_str();
     let v = ok(&c, u, &["import", "run", "erp", "a.csv", "--dry-run"]);
     assert_eq!(v["result"]["would_reserve"][0]["count"], 2);
-    assert!(fake.seen.lock().unwrap().is_empty(), "a dry run reserves nothing");
+    assert!(
+        fake.seen.lock().unwrap().is_empty(),
+        "a dry run reserves nothing"
+    );
     let v = ok(&c, u, &["import", "run", "erp", "a.csv"]);
     assert_eq!(
-        (&v["result"]["created"]["count"], &v["result"]["ledger"]["requests"]),
+        (
+            &v["result"]["created"]["count"],
+            &v["result"]["ledger"]["requests"]
+        ),
         (&json!(2), &json!(1))
     );
-    assert_eq!(ok(&c, u, &["item", "show", "MECH-00701"])["result"]["item"]["name"], "Two");
+    assert_eq!(
+        ok(&c, u, &["item", "show", "MECH-00701"])["result"]["item"]["name"],
+        "Two"
+    );
     // Offline, the new row is numbered locally, above what is held.
     let v = ok(&c, OFFLINE, &["import", "run", "erp", "b.csv"]);
     assert_eq!(
-        (&v["result"]["created"]["count"], &v["result"]["ledger"]["reserved"]),
+        (
+            &v["result"]["created"]["count"],
+            &v["result"]["ledger"]["reserved"]
+        ),
         (&json!(1), &json!(false))
     );
     ok(&c, u, &["item", "show", "MECH-00702"]);

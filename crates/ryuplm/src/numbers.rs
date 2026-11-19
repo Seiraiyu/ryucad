@@ -6,8 +6,8 @@
 use crate::error::{Code, Error, Result};
 use crate::id::Id;
 use crate::load::Catalogue;
-use crate::source::Source;
 use crate::session::Session;
+use crate::source::Source;
 use ryupdm::config::{Config, NumberScheme, Template};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -164,7 +164,11 @@ pub fn local(
             }
             None => class.map(str::to_owned),
         };
-        let (s, t) = template(&config, (!name.is_empty()).then_some(name), class.as_deref())?;
+        let (s, t) = template(
+            &config,
+            (!name.is_empty()).then_some(name),
+            class.as_deref(),
+        )?;
         let floor = highest(&src, cat, t);
         v["scheme"] = json!(s.name);
         v["template"] = json!(t.text());

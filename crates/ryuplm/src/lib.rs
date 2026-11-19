@@ -94,8 +94,14 @@ mod prefs_tests {
             "review.url",
             &json!("https://review.example.com")
         ));
-        assert!(crate::Plm::accepts("review.url", &json!("http://127.0.0.1:9")));
-        assert!(!crate::Plm::accepts("review.url", &json!("http://example.com")));
+        assert!(crate::Plm::accepts(
+            "review.url",
+            &json!("http://127.0.0.1:9")
+        ));
+        assert!(!crate::Plm::accepts(
+            "review.url",
+            &json!("http://example.com")
+        ));
         assert!(!crate::Plm::accepts("review.url", &json!(3)));
         assert_eq!(
             crate::Plm::default_of("review.url"),

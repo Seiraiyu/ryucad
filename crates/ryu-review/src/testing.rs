@@ -175,10 +175,15 @@ impl Ledger {
         match (method, rest) {
             ("POST", "/next") => self.next(&b),
             ("POST", "/reserve") => self.reserve(&b),
-            ("GET", r) if r.is_empty() || r.starts_with('?') => self.list(r.trim_start_matches('?')),
+            ("GET", r) if r.is_empty() || r.starts_with('?') => {
+                self.list(r.trim_start_matches('?'))
+            }
             ("GET", r) if r.len() > 1 && r.starts_with('/') => {
                 let n = unescape(&r[1..]);
-                (200, json!({"schema": 1, "number": n, "holders": self.holders(&n)}))
+                (
+                    200,
+                    json!({"schema": 1, "number": n, "holders": self.holders(&n)}),
+                )
             }
             _ => (404, error("not_found", "no such API route")),
         }
@@ -186,10 +191,16 @@ impl Ledger {
 
     fn next(&mut self, b: &Value) -> (u16, Value) {
         let (Some(cat), Some(text)) = (b["catalogue"].as_str(), b["template"].as_str()) else {
-            return (400, error("invalid_request", "catalogue and template are required"));
+            return (
+                400,
+                error("invalid_request", "catalogue and template are required"),
+            );
         };
         let Some(t) = Template::new(text) else {
-            return (400, error("invalid_request", "template needs one {seq:N}, N 1 to 12"));
+            return (
+                400,
+                error("invalid_request", "template needs one {seq:N}, N 1 to 12"),
+            );
         };
         let count = b["count"].as_u64().unwrap_or(1);
         if !(1..=100_000).contains(&count) {
@@ -251,7 +262,10 @@ impl Ledger {
         if !taken.is_empty() {
             let mut e = error(
                 "part_number_taken",
-                &format!("{} of these numbers are held for something else", taken.len()),
+                &format!(
+                    "{} of these numbers are held for something else",
+                    taken.len()
+                ),
             );
             e["error"]["details"] = json!({"taken": taken});
             return (409, e);
@@ -259,18 +273,25 @@ impl Ledger {
         for n in &numbers {
             self.reserved.insert(n.clone(), cat.to_owned());
         }
-        (200, json!({"schema": 1, "catalogue": cat, "numbers": numbers, "expires_at": EXPIRES}))
+        (
+            200,
+            json!({"schema": 1, "catalogue": cat, "numbers": numbers, "expires_at": EXPIRES}),
+        )
     }
 
     /// Who holds `n`: its binding, then its reservation.
     fn holders(&self, n: &str) -> Vec<Value> {
         let mut out = Vec::new();
         if let Some((cat, item)) = self.bound.get(n) {
-            out.push(json!({"kind": "bound", "repo": self.slug, "path": "", "catalogue": cat,
-                            "item": item, "state": "bound"}));
+            out.push(
+                json!({"kind": "bound", "repo": self.slug, "path": "", "catalogue": cat,
+                            "item": item, "state": "bound"}),
+            );
         }
         if let Some(cat) = self.reserved.get(n) {
-            out.push(json!({"kind": "reserved", "catalogue": cat, "by": BY, "expires_at": EXPIRES}));
+            out.push(
+                json!({"kind": "reserved", "catalogue": cat, "by": BY, "expires_at": EXPIRES}),
+            );
         }
         out
     }
@@ -294,7 +315,10 @@ impl Ledger {
             .map(|(n, c)| json!({"number": n, "catalogue": c, "by": BY, "expires_at": EXPIRES}))
             .collect();
         let next = (rows.len() == 1000).then(|| rows[999]["number"].clone());
-        (200, json!({"schema": 1, "reservations": rows, "after": next}))
+        (
+            200,
+            json!({"schema": 1, "reservations": rows, "after": next}),
+        )
     }
 }
 
@@ -311,7 +335,10 @@ impl Template {
         let start = text.find("{seq:")?;
         let rest = &text[start + 5..];
         let close = rest.find('}')?;
-        let width: usize = rest[..close].parse().ok().filter(|w| (1..=12).contains(w))?;
+        let width: usize = rest[..close]
+            .parse()
+            .ok()
+            .filter(|w| (1..=12).contains(w))?;
         Some(Template {
             before: text[..start].to_owned(),
             width,
@@ -324,7 +351,9 @@ impl Template {
     }
 
     fn read(&self, number: &str) -> Option<u64> {
-        let d = number.strip_prefix(&self.before)?.strip_suffix(&self.after)?;
+        let d = number
+            .strip_prefix(&self.before)?
+            .strip_suffix(&self.after)?;
         (d.len() >= self.width && d.bytes().all(|c| c.is_ascii_digit()))
             .then(|| d.parse().ok())
             .flatten()
