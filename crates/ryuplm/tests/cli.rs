@@ -587,6 +587,10 @@ fn git(dir: &Path, args: &[&str]) {
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "cad"),
+    ignore = "needs ryucad's lines: the `cad` feature"
+)]
 fn the_services_answers_from_the_cli() {
     let p = Pair::project();
     let pid = mech(&p);
