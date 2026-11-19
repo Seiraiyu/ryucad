@@ -7,6 +7,7 @@
 //! `ryuplm / check` catches a clash before it merges.
 
 use crate::error::{Code, Error, Result};
+use crate::proto::Request;
 use serde_json::{Value, json};
 use std::path::Path;
 
@@ -188,11 +189,110 @@ pub fn off() -> Error {
     .with("why", "ledger_off")
 }
 
+/// What sends a request to the catalogue's daemon, or answers it in
+/// process: the CLI's own path for every request.
+pub type Sender<'a> = dyn FnMut(Request) -> Result<Value> + 'a;
+
+/// The warning a fallback adds to the CLI's `warnings`.
+pub fn warning(e: &Error) -> String {
+    format!("ledger_unavailable: {}; numbered locally", e.message)
+}
+
+/// `item.create` or `item.renumber` with `--next` and no number: on a
+/// catalogue whose ledger is on, one number from the ledger (above the
+/// local floor) sent as the request's number, the answer's `ledger`
+/// saying so. When the ledger can't be asked, the request goes as it is,
+/// the daemon takes the local next number, and `warnings` says why. Any
+/// other request, and any on a catalogue whose ledger is off, is sent
+/// unchanged, with no call to the service and no token looked for.
+pub fn numbered(
+    send: &mut Sender,
+    open: &dyn Fn() -> Result<Ledger>,
+    req: Request,
+    warnings: &mut Vec<String>,
+) -> Result<Value> {
+    let (next, class, item) = match &req {
+        Request::ItemCreate {
+            next: Some(n),
+            number: None,
+            fields,
+            ..
+        } => (n.clone(), fields.class.clone(), None),
+        Request::ItemRenumber {
+            next: Some(n),
+            number: None,
+            item,
+            ..
+        } => (n.clone(), None, Some(item.clone())),
+        _ => return send(req),
+    };
+    let local = send(Request::NumberLocal {
+        next: Some(next),
+        class,
+        item,
+    })?;
+    if local["ledger"] != json!(true) {
+        return send(req);
+    }
+    let asked = open().and_then(|l| {
+        l.next(
+            local["catalogue"].as_str().unwrap_or_default(),
+            local["template"].as_str().unwrap_or_default(),
+            1,
+            local["floor"].as_u64().unwrap_or(0),
+            None,
+        )
+    });
+    match asked {
+        Ok(v) => {
+            let n = v["numbers"][0]
+                .as_str()
+                .ok_or_else(|| Error::new(Code::ReviewFailed, "the ledger answered no number"))?
+                .to_owned();
+            let req = match req {
+                Request::ItemCreate {
+                    fields,
+                    expected_revision,
+                    ..
+                } => Request::ItemCreate {
+                    fields,
+                    number: Some(n.clone()),
+                    next: None,
+                    expected_revision,
+                },
+                Request::ItemRenumber {
+                    item,
+                    expected_revision,
+                    ..
+                } => Request::ItemRenumber {
+                    item,
+                    number: Some(n.clone()),
+                    next: None,
+                    expected_revision,
+                },
+                other => other,
+            };
+            let mut out = send(req)?;
+            out["ledger"] = json!({"reserved": true, "number": n, "expires_at": v["expires_at"]});
+            Ok(out)
+        }
+        Err(e) if e.code == Code::LedgerUnavailable => {
+            warnings.push(warning(&e));
+            let mut out = send(req)?;
+            out["ledger"] =
+                json!({"reserved": false, "code": "ledger_unavailable", "why": e.details["why"]});
+            Ok(out)
+        }
+        Err(e) => Err(e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use ryu_review::testing::Ledger as Fake;
     use serde_json::json;
+    use std::path::{Path, PathBuf};
 
     pub(crate) const CAT: &str = "0123456789abcdef0123456789abcdef";
 
@@ -249,5 +349,109 @@ mod tests {
         assert_eq!(unavailable(none).details["why"], "review_unauthenticated");
         assert_eq!(off().details["why"], "ledger_off");
         assert_eq!(off().code, Code::LedgerUnavailable);
+    }
+
+    /// A catalogue with the `mech` scheme, its ledger on or off.
+    pub(crate) fn catalogue(ledger: bool) -> (tempfile::TempDir, PathBuf) {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().canonicalize().unwrap();
+        crate::server::init(&root, None).unwrap();
+        let mut slot = None;
+        for change in [
+            json!({"scheme": "mech", "pattern": "MECH-\\d{5}", "next_template": "MECH-{seq:5}"}),
+            json!({"ledger": ledger}),
+        ] {
+            crate::server::handle_safely(
+                &mut slot,
+                None,
+                None,
+                &root,
+                Request::SettingsEdit {
+                    change: serde_json::from_value(change).unwrap(),
+                    expected_revision: None,
+                },
+            )
+            .unwrap();
+        }
+        (d, root)
+    }
+
+    /// Requests answered in process, as the CLI's `--no-daemon` does.
+    pub(crate) fn sender(root: &Path) -> impl FnMut(Request) -> Result<Value> + '_ {
+        let mut slot = None;
+        move |r| crate::server::handle_safely(&mut slot, None, None, root, r).map(|a| a.result)
+    }
+
+    fn create() -> Request {
+        Request::ItemCreate {
+            fields: Default::default(),
+            number: None,
+            next: Some(String::new()),
+            expected_revision: None,
+        }
+    }
+
+    #[test]
+    fn next_takes_the_ledgers_number_or_falls_back() {
+        let (_d, root) = catalogue(true);
+        let mut send = sender(&root);
+        let (fake, state) = Fake::start("acme/widgets");
+        state.lock().unwrap().sequences.insert("MECH-{seq:5}".into(), 500);
+        let url = fake.url.clone();
+        let open = move || -> Result<Ledger> { Ok(Ledger::at(&url, "t", "acme/widgets")) };
+        let mut w = Vec::new();
+        let v = numbered(&mut send, &open, create(), &mut w).unwrap();
+        assert_eq!(v["item"]["number"], "MECH-00500");
+        assert_eq!(
+            v["ledger"],
+            json!({"reserved": true, "number": "MECH-00500", "expires_at": ryu_review::testing::EXPIRES})
+        );
+        // The local floor goes with the next call.
+        let v = numbered(&mut send, &open, create(), &mut w).unwrap();
+        assert_eq!(v["item"]["number"], "MECH-00501");
+        assert!(fake.seen.lock().unwrap()[1].body.contains("\"floor\":500"));
+        assert!(w.is_empty(), "{w:?}");
+        // Offline: the local next number, a warning, reserved false.
+        let down = || -> Result<Ledger> { Ok(Ledger::at("http://127.0.0.1:9", "t", "acme/widgets")) };
+        let v = numbered(&mut send, &down, create(), &mut w).unwrap();
+        assert_eq!(v["item"]["number"], "MECH-00502");
+        assert_eq!(
+            (&v["ledger"]["reserved"], &v["ledger"]["why"]),
+            (&json!(false), &json!("review_unreachable"))
+        );
+        assert!(w[0].starts_with("ledger_unavailable: "), "{w:?}");
+        // Renumbered from the ledger too.
+        let v = numbered(
+            &mut send,
+            &open,
+            Request::ItemRenumber {
+                item: "MECH-00500".into(),
+                number: None,
+                next: Some(String::new()),
+                expected_revision: None,
+            },
+            &mut w,
+        )
+        .unwrap();
+        assert_eq!(v["item"]["number"], "MECH-00503");
+    }
+
+    #[test]
+    fn a_catalogue_without_the_ledger_never_asks() {
+        let (_d, root) = catalogue(false);
+        let mut send = sender(&root);
+        let never = || -> Result<Ledger> { panic!("a catalogue without the ledger opened it") };
+        let mut w = Vec::new();
+        let v = numbered(&mut send, &never, create(), &mut w).unwrap();
+        assert_eq!(v["item"]["number"], "MECH-00001");
+        assert!(v.get("ledger").is_none() && w.is_empty());
+        // A number and --next together reach the daemon, which refuses them.
+        let both = Request::ItemCreate {
+            fields: Default::default(),
+            number: Some("X".into()),
+            next: Some(String::new()),
+            expected_revision: None,
+        };
+        assert_eq!(numbered(&mut send, &never, both, &mut w).unwrap_err().code, Code::Usage);
     }
 }
