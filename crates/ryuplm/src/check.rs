@@ -23,7 +23,12 @@ pub fn elsewhere(within: &[String]) -> Vec<PathBuf> {
 
 /// What tells one fault from another across revisions: its code, the item
 /// it names (else its file), and where in it.
-fn key(f: &crate::fault::Fault) -> (String, String, String) {
+type Key = (String, String, String);
+
+/// The faults a base revision raised, by [`key`].
+type Keys = std::collections::BTreeSet<Key>;
+
+fn key(f: &crate::fault::Fault) -> Key {
     let d = &f.error.details;
     let s = |k: &str| d[k].as_str().unwrap_or("").to_owned();
     let at = if d["item"].is_string() {
@@ -40,14 +45,7 @@ fn key(f: &crate::fault::Fault) -> (String, String, String) {
 
 /// The catalogue's faults at `rev`, by [`key`], and the commit `rev`
 /// names; `None` for the faults when that commit holds no catalogue here.
-fn base(
-    session: &mut Session,
-    rev: &str,
-    within: &[String],
-) -> Result<(
-    String,
-    Option<std::collections::BTreeSet<(String, String, String)>>,
-)> {
+fn base(session: &mut Session, rev: &str, within: &[String]) -> Result<(String, Option<Keys>)> {
     let (repo, _) = crate::release::history(session)?;
     let commit = crate::reps::commit_hex(repo.gix(), rev)?;
     let files: std::collections::BTreeMap<String, Vec<u8>> =
