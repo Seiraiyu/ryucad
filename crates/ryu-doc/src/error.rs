@@ -1144,6 +1144,18 @@ pub enum Code {
     /// ryueda DRC finding (a warning): a courtyard whose graphics don't
     /// close, judged by its box.
     DrcCourtyardOpen,
+    /// A board's stackup doesn't start and end with copper, doesn't
+    /// alternate copper and dielectric, has fewer than 2 or more than 32
+    /// copper layers, or has a thickness that isn't positive.
+    BoardStackupInvalid,
+    /// A track or via names a copper layer its board's stackup lacks.
+    BoardLayerNotFound,
+    /// ryueda DRC finding (an error): a blind or buried via on a board
+    /// whose preset makes only through vias.
+    DrcViaSpan,
+    /// ryueda DRC finding (an error): copper closer to a hole's wall than
+    /// the preset allows, on a layer where the hole doesn't join it.
+    DrcHoleClearance,
     /// `board export` refused: the board has DRC errors (its report in
     /// `details.report`); fix them, or export with `--allow-errors`,
     /// which the manifest records.
@@ -1596,6 +1608,10 @@ impl Code {
         Code::DrcEdgeClearance,
         Code::DrcCourtyardOverlap,
         Code::DrcCourtyardOpen,
+        Code::BoardStackupInvalid,
+        Code::BoardLayerNotFound,
+        Code::DrcViaSpan,
+        Code::DrcHoleClearance,
         Code::DrcFailed,
         Code::ItemNotFound,
         Code::ItemClassUnknown,
@@ -1761,6 +1777,20 @@ mod tests {
             (Code::DrcEdgeClearance, "drc_edge_clearance"),
             (Code::DrcCourtyardOverlap, "drc_courtyard_overlap"),
             (Code::DrcCourtyardOpen, "drc_courtyard_open"),
+        ] {
+            assert_eq!(json!(c), json!(s));
+            assert_eq!(c.exit_code(), 1);
+            assert!(Code::ALL.contains(&c), "{c:?} in ALL");
+        }
+    }
+
+    #[test]
+    fn stackup_and_hole_codes() {
+        for (c, s) in [
+            (Code::BoardStackupInvalid, "board_stackup_invalid"),
+            (Code::BoardLayerNotFound, "board_layer_not_found"),
+            (Code::DrcViaSpan, "drc_via_span"),
+            (Code::DrcHoleClearance, "drc_hole_clearance"),
         ] {
             assert_eq!(json!(c), json!(s));
             assert_eq!(c.exit_code(), 1);

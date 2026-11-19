@@ -21,6 +21,7 @@ pub mod preset;
 pub mod render;
 pub mod route;
 pub mod shapes;
+pub mod stackup;
 #[cfg(test)]
 pub(crate) mod testing;
 pub mod text;

@@ -77,6 +77,7 @@ fn board_faults(b: &Board, path: &str) -> Vec<Fault> {
     super::outline::judge(b)
         .into_iter()
         .chain(preset)
+        .chain(b.stackup.iter().flat_map(super::stackup::judge))
         .map(|f| f.with("path", path))
         .collect()
 }
@@ -104,7 +105,7 @@ fn load_one(
                 piece(&mut h, name.as_bytes());
                 piece(&mut h, &bytes);
                 board = Some(
-                    match doc::read::<Board>(&bytes, &path, BOARD_KIND, FORMAT) {
+                    match doc::read::<Board>(&bytes, &path, BOARD_KIND, NEWEST) {
                         Ok(b) => Loaded {
                             faults: board_faults(&b, &path),
                             item: Ok(b),
@@ -128,7 +129,7 @@ fn load_one(
                     let bytes = read(src, &at)?;
                     piece(&mut h, join(PLACEMENTS, &file).as_bytes());
                     piece(&mut h, &bytes);
-                    let loaded = match doc::read::<Placement>(&bytes, &at, PLACEMENT_KIND, FORMAT) {
+                    let loaded = match doc::read::<Placement>(&bytes, &at, PLACEMENT_KIND, NEWEST) {
                         Ok(p) => Loaded {
                             faults: placement_faults(&p)
                                 .into_iter()
@@ -181,6 +182,39 @@ fn load_one(
     if !any {
         return Ok(None);
     }
+    // Routes judged against the board's stackup.
+    if let Some(Loaded { item: Ok(b), .. }) = &board {
+        let n = super::stackup::copper_count(b);
+        for (tid, t) in tracks.iter_mut() {
+            if let Ok(track) = &t.item
+                && track.layer.index(n).is_none()
+            {
+                t.faults.push(
+                    no_layer(&track.layer.short(), n, "/layer")
+                        .with("path", route_path(&id, TRACKS, tid)),
+                );
+            }
+        }
+        for (vid, v) in vias.iter_mut() {
+            let Ok(via) = &v.item else { continue };
+            let path = route_path(&id, VIAS, vid);
+            let mut missing = false;
+            for (l, pointer) in [(via.from, "/from"), (via.to, "/to")] {
+                if let Some(l) = l
+                    && l.index(n).is_none()
+                {
+                    missing = true;
+                    v.faults
+                        .push(no_layer(&l.short(), n, pointer).with("path", &path));
+                }
+            }
+            if !missing && via.span(n).is_none() {
+                v.faults.push(
+                    invalid("a via runs from a layer to one below it", "/from").with("path", &path),
+                );
+            }
+        }
+    }
     let board = board.unwrap_or_else(|| Loaded {
         item: Err(Error::new(
             Code::InvalidDocument,
@@ -228,7 +262,9 @@ fn routes<T: serde::de::DeserializeOwned>(
         let bytes = read(src, &at)?;
         piece(h, join(folder, &file).as_bytes());
         piece(h, &bytes);
-        let loaded = match doc::read::<T>(&bytes, &at, kind, FORMAT) {
+        // Holes have no format 2.
+        let newest = if kind == HOLE_KIND { FORMAT } else { NEWEST };
+        let loaded = match doc::read::<T>(&bytes, &at, kind, newest) {
             Ok(x) => Loaded {
                 faults: check(&x).into_iter().map(|f| f.with("path", &at)).collect(),
                 item: Ok(x),
@@ -246,6 +282,26 @@ fn routes<T: serde::de::DeserializeOwned>(
 fn out_of_range(p: &crate::symbol::Point) -> bool {
     let lim = ryu_board::geom::COORD_LIMIT;
     p[0].abs() > lim || p[1].abs() > lim
+}
+
+fn no_layer(layer: &str, n: usize, pointer: &str) -> Fault {
+    Fault::error(
+        Code::BoardLayerNotFound,
+        format!(
+            "the board has {n} copper layers and no {layer}; they are {}",
+            layer_list(n)
+        ),
+    )
+    .with("pointer", pointer)
+    .with("layer", layer)
+}
+
+/// A board's copper layers by name, `top, in1, …, bottom`.
+pub(crate) fn layer_list(n: usize) -> String {
+    (0..n)
+        .map(|i| CopperLayer::at(i, n).short())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn invalid(msg: &str, pointer: &str) -> Fault {
@@ -411,10 +467,86 @@ mod tests {
         assert_eq!(b.faults()[0].error.details["pointer"], "/preset");
     }
 
+    #[test]
+    fn a_bad_stackup_is_a_fault_and_a_good_one_reads() {
+        let good = BOARD.replace(r#""format":1"#, r#""format":2"#).replace(
+            r#""preset":"jlc-2l""#,
+            r#""preset":"jlc-2l","stackup":{"layers":[{"kind":"copper","thickness_nm":35000},{"kind":"dielectric","thickness_nm":1530000},{"kind":"copper","thickness_nm":35000}]}"#,
+        );
+        let (boards, _) = load(&files(&[("boards/b/board.json", &good)])).unwrap();
+        let b = &boards[&Id::parse("b", "board").unwrap()];
+        assert!(b.faults().is_empty(), "{:?}", b.faults());
+        let bad = good.replace(r#"{"kind":"dielectric","thickness_nm":1530000},"#, "");
+        let (boards, _) = load(&files(&[("boards/b/board.json", &bad)])).unwrap();
+        let f = boards[&Id::parse("b", "board").unwrap()].faults();
+        assert_eq!(f[0].error.code, Code::BoardStackupInvalid);
+    }
+
     const TRACK: &str = r#"{"format":1,"kind":"ryueda.track","layer":"top","net":"sda","points":[[0,0],[10,0]],"width_nm":5}"#;
     const VIA: &str =
         r#"{"at":[1,1],"diameter_nm":6,"drill_nm":3,"format":1,"kind":"ryueda.via","net":"sda"}"#;
     const HOLE: &str = r#"{"at":[2,2],"drill_nm":3,"format":1,"kind":"ryueda.hole"}"#;
+
+    const FOUR: &str = r#""stackup":{"layers":[{"kind":"copper","thickness_nm":35000},{"kind":"dielectric","thickness_nm":400000},{"kind":"copper","thickness_nm":35000},{"kind":"dielectric","thickness_nm":400000},{"kind":"copper","thickness_nm":35000},{"kind":"dielectric","thickness_nm":400000},{"kind":"copper","thickness_nm":35000}]}"#;
+
+    fn four() -> String {
+        BOARD.replace(r#""format":1"#, r#""format":2"#).replace(
+            r#""preset":"jlc-2l""#,
+            &format!(r#""preset":"jlc-2l",{FOUR}"#),
+        )
+    }
+
+    #[test]
+    fn routes_are_judged_against_the_stackup() {
+        let inner = TRACK
+            .replace(r#""format":1"#, r#""format":2"#)
+            .replace(r#""layer":"top""#, r#""layer":"in2""#);
+        let blind = VIA
+            .replace(r#""format":1"#, r#""format":2"#)
+            .replace(r#""net":"sda""#, r#""net":"sda","to":"in1""#);
+        let b4 = four();
+        let ok = files(&[
+            ("boards/b/board.json", &b4),
+            ("boards/b/tracks/t1.json", &inner),
+            ("boards/b/vias/v1.json", &blind),
+        ]);
+        let (boards, _) = load(&ok).unwrap();
+        let id = Id::parse("b", "board").unwrap();
+        assert!(
+            boards[&id].faults().is_empty(),
+            "{:?}",
+            boards[&id].faults()
+        );
+        // The same routes on a two-layer board: the layers aren't there.
+        let two = files(&[
+            ("boards/b/board.json", BOARD),
+            ("boards/b/tracks/t1.json", &inner),
+            ("boards/b/vias/v1.json", &blind),
+        ]);
+        let f = load(&two).unwrap().0[&id].faults();
+        assert_eq!(f.len(), 2, "{f:?}");
+        assert!(f.iter().all(|x| x.error.code == Code::BoardLayerNotFound));
+        assert_eq!(f[0].error.details["path"], "boards/b/tracks/t1.json");
+        assert_eq!(f[0].error.details["pointer"], "/layer");
+        assert_eq!(f[1].error.details["pointer"], "/to");
+        // A span must run downwards and cover two layers.
+        for (from, to) in [("in2", "in1"), ("in1", "in1"), ("bottom", "top")] {
+            let v = VIA.replace(r#""format":1"#, r#""format":2"#).replace(
+                r#""net":"sda""#,
+                &format!(r#""from":"{from}","net":"sda","to":"{to}""#),
+            );
+            let f = load(&files(&[
+                ("boards/b/board.json", &b4),
+                ("boards/b/vias/v1.json", &v),
+            ]))
+            .unwrap()
+            .0[&id]
+                .faults();
+            assert_eq!(f.len(), 1, "{from}-{to}: {f:?}");
+            assert_eq!(f[0].error.code, Code::InvalidDocument);
+            assert_eq!(f[0].error.details["pointer"], "/from");
+        }
+    }
 
     #[test]
     fn routes_load_with_their_board() {

@@ -118,15 +118,15 @@ pub fn copper(p: &Pad) -> Result<Shape, ShapeError> {
         .placed(&pad_place(p), Polarity::Positive))
 }
 
-/// Which copper layers the pad is on: `(top, bottom)`, and whether it
-/// names `copper.inner` (which stage 5 can't build).
+/// Which copper layers the pad is on: (top, bottom, every inner layer).
+/// A through pad, and a pad on `copper.all`, is on every layer.
 pub fn copper_sides(p: &Pad) -> (bool, bool, bool) {
     let has = |l: &str| p.layers.iter().any(|x| x == l);
     let all = has("copper.all") || matches!(p.kind, PadKind::Through);
     (
         all || has("copper.top"),
         all || has("copper.bottom"),
-        has("copper.inner"),
+        all || has("copper.inner"),
     )
 }
 
@@ -224,7 +224,20 @@ mod tests {
                 d: 100_000
             }
         );
-        assert_eq!(copper_sides(&p), (true, true, false));
+        assert_eq!(copper_sides(&p), (true, true, true));
+    }
+
+    #[test]
+    fn pads_on_inner_layers() {
+        let mut p = r0402().pads.into_values().next().unwrap();
+        p.layers = vec!["copper.inner".into()];
+        assert_eq!(copper_sides(&p), (false, false, true));
+        p.layers = vec!["copper.all".into()];
+        assert_eq!(copper_sides(&p), (true, true, true));
+        p.layers = vec!["copper.top".into()];
+        assert_eq!(copper_sides(&p), (true, false, false));
+        p.kind = PadKind::Through;
+        assert_eq!(copper_sides(&p), (true, true, true));
     }
 
     #[test]

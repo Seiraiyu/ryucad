@@ -16,15 +16,17 @@ use ryu_gerber::gerber::{Item, Layer};
 
 /// One Gerber file of the package.
 pub struct LayerFile {
-    /// Its name's function part: `copper-top`.
-    pub function: &'static str,
-    /// Its Protel extension: `gtl`.
-    pub ext: &'static str,
+    /// Its name's function part: `copper-top`, `copper-in1`.
+    pub function: String,
+    /// Its Protel extension: `gtl`, `g2`.
+    pub ext: String,
     pub layer: Layer,
 }
 
-/// The package's Gerber layers in order: (function, extension, the
-/// board's layer, X2's `.FileFunction`, negative).
+/// A two-layer package's Gerber layers in order: (function, extension,
+/// the board's layer, X2's `.FileFunction`, negative). A board of more
+/// copper layers has its inner ones after `copper-top`, and its bottom
+/// copper numbered `L<n>`.
 pub const LAYERS: [(&str, &str, &str, &str, bool); 9] = [
     ("copper-top", "gtl", "copper.top", "Copper,L1,Top", false),
     (
@@ -43,12 +45,13 @@ pub const LAYERS: [(&str, &str, &str, &str, bool); 9] = [
     ("profile", "gm1", "outline", "Profile,NP", false),
 ];
 
-/// A side's copper: each pad on it (`.P`, `.N`, `.C`), then its tracks
-/// and every via (`.N`).
-fn copper(board: &str, s: &BoardShapes, top: bool) -> Vec<Item> {
+/// A copper layer's items: each pad on it (`.P`, `.N`, `.C`), then its
+/// tracks and the vias whose span holds it (`.N`).
+fn copper(board: &str, s: &BoardShapes, l: usize) -> Vec<Item> {
+    let n = s.n();
     let prefix = format!("{board}:");
     let mut out = Vec::new();
-    for pd in s.pads.iter().filter(|p| if top { p.top } else { p.bottom }) {
+    for pd in s.pads.iter().filter(|p| p.on(l, n)) {
         let local = pd.reference.strip_prefix(&prefix).unwrap_or(&pd.reference);
         let refdes = local
             .rsplit_once('/')
@@ -73,12 +76,7 @@ fn copper(board: &str, s: &BoardShapes, top: bool) -> Vec<Item> {
             component: Some(refdes),
         });
     }
-    let side = if top {
-        CopperLayer::Top
-    } else {
-        CopperLayer::Bottom
-    };
-    for t in s.tracks.iter().filter(|t| t.layer == side) {
+    for t in s.tracks.iter().filter(|t| t.layer.index(n) == Some(l)) {
         out.push(Item {
             shape: t.shape.clone(),
             function: Some("Conductor".into()),
@@ -86,7 +84,7 @@ fn copper(board: &str, s: &BoardShapes, top: bool) -> Vec<Item> {
             ..Item::default()
         });
     }
-    for v in &s.vias {
+    for v in s.vias.iter().filter(|v| v.from <= l && l <= v.to) {
         out.push(Item {
             shape: v.shape.clone(),
             function: Some("ViaPad".into()),
@@ -192,31 +190,63 @@ fn hole_free(mut item: Item, layer: &str) -> Result<Item> {
     Ok(item)
 }
 
-/// The package's Gerber layers, in [`LAYERS`]' order; every one, even
-/// when empty, so a package always has the full set.
+/// The package's Gerber layers: every copper layer in stack order, then
+/// [`LAYERS`]' others; every one, even when empty, so a package always
+/// has the full set.
 pub fn layers(board: &str, s: &BoardShapes) -> Result<Vec<LayerFile>> {
-    LAYERS
-        .iter()
-        .map(|&(function, ext, name, x2, negative)| {
-            let items = match name {
-                "copper.top" => copper(board, s, true),
-                "copper.bottom" => copper(board, s, false),
-                "outline" => vec![Item {
+    let n = s.n();
+    let mut table: Vec<(String, String, Option<usize>, String, String, bool)> = Vec::new();
+    for l in 0..n {
+        let (function, ext, x2) = match CopperLayer::at(l, n) {
+            CopperLayer::Top => (
+                "copper-top".to_owned(),
+                "gtl".to_owned(),
+                "Copper,L1,Top".to_owned(),
+            ),
+            CopperLayer::Bottom => (
+                "copper-bottom".to_owned(),
+                "gbl".to_owned(),
+                format!("Copper,L{n},Bot"),
+            ),
+            CopperLayer::Inner(k) => (
+                format!("copper-in{k}"),
+                format!("g{}", l + 1),
+                format!("Copper,L{},Inr", l + 1),
+            ),
+        };
+        table.push((function, ext, Some(l), String::new(), x2, false));
+    }
+    for &(function, ext, name, x2, negative) in &LAYERS[2..] {
+        table.push((
+            function.into(),
+            ext.into(),
+            None,
+            name.into(),
+            x2.into(),
+            negative,
+        ));
+    }
+    table
+        .into_iter()
+        .map(|(function, ext, copper_at, name, x2, negative)| {
+            let items = match (copper_at, name.as_str()) {
+                (Some(l), _) => copper(board, s, l),
+                (None, "outline") => vec![Item {
                     shape: super::render::outline_drawn(s),
                     function: Some("Profile".into()),
                     ..Item::default()
                 }],
-                other => plain(s, other),
+                (None, other) => plain(s, other),
             };
             let items = items
                 .into_iter()
-                .map(|i| hole_free(i, function))
+                .map(|i| hole_free(i, &function))
                 .collect::<Result<Vec<_>>>()?;
             Ok(LayerFile {
                 function,
                 ext,
                 layer: Layer {
-                    function: x2.to_owned(),
+                    function: x2,
                     negative,
                     items,
                 },
@@ -225,16 +255,20 @@ pub fn layers(board: &str, s: &BoardShapes) -> Result<Vec<LayerFile>> {
         .collect()
 }
 
-/// The plated and the unplated drills, each with its holes' functions.
-pub fn drills(s: &BoardShapes) -> [Drills; 2] {
-    let mut plated = Drills {
-        function: "Plated,1,2,PTH".into(),
-        holes: Vec::new(),
-    };
-    let mut unplated = Drills {
-        function: "NonPlated,1,2,NPTH".into(),
-        holes: Vec::new(),
-    };
+/// The drill files by name (`pth`, `pth-l1-l2`, `npth`): the plated
+/// holes through the board first, one file per other via span in use
+/// next (`Blind` when it reaches an outer layer, else `Buried`), the
+/// unplated holes last; each with its holes' functions. The first and
+/// last are there even when empty.
+pub fn drills(s: &BoardShapes) -> Vec<(String, Drills)> {
+    let n = s.n();
+    let whole = (0, n - 1);
+    let outer = |span: (usize, usize)| span.0 == 0 || span.1 == n - 1;
+    let kind = |span: (usize, usize)| if outer(span) { "Blind" } else { "Buried" };
+    let mut through = Vec::new();
+    let mut spans: std::collections::BTreeMap<(usize, usize), Vec<Hole>> =
+        std::collections::BTreeMap::new();
+    let mut unplated = Vec::new();
     for h in &s.holes {
         let drill = match &h.shape {
             HoleShape::Round { at, d } => Drill::Round { at: *at, d: *d },
@@ -244,23 +278,50 @@ pub fn drills(s: &BoardShapes) -> [Drills; 2] {
                 d: *d,
             },
         };
+        let part = h.plated && h.span != whole;
         let function = match (&h.of, h.plated) {
-            (HoleOf::Via(_), _) => "Plated,PTH,ViaDrill",
-            (HoleOf::Pad { .. }, true) => "Plated,PTH,ComponentDrill",
-            (HoleOf::Pad { .. }, false) => "NonPlated,NPTH,ComponentDrill",
-            (HoleOf::Hole(_), _) => "NonPlated,NPTH,MechanicalDrill",
+            (HoleOf::Via(_), _) if part => format!("Plated,{},ViaDrill", kind(h.span)),
+            (HoleOf::Via(_), _) => "Plated,PTH,ViaDrill".to_owned(),
+            (HoleOf::Pad { .. }, true) => "Plated,PTH,ComponentDrill".to_owned(),
+            (HoleOf::Pad { .. }, false) => "NonPlated,NPTH,ComponentDrill".to_owned(),
+            (HoleOf::Hole(_), _) => "NonPlated,NPTH,MechanicalDrill".to_owned(),
         };
         let hole = Hole {
             drill,
-            function: Some(function.to_owned()),
+            function: Some(function),
         };
-        if h.plated {
-            plated.holes.push(hole);
+        if !h.plated {
+            unplated.push(hole);
+        } else if part {
+            spans.entry(h.span).or_default().push(hole);
         } else {
-            unplated.holes.push(hole);
+            through.push(hole);
         }
     }
-    [plated, unplated]
+    let mut out = vec![(
+        "pth".to_owned(),
+        Drills {
+            function: format!("Plated,1,{n},PTH"),
+            holes: through,
+        },
+    )];
+    for ((a, b), holes) in spans {
+        out.push((
+            format!("pth-l{}-l{}", a + 1, b + 1),
+            Drills {
+                function: format!("Plated,{},{},{}", a + 1, b + 1, kind((a, b))),
+                holes,
+            },
+        ));
+    }
+    out.push((
+        "npth".to_owned(),
+        Drills {
+            function: format!("NonPlated,1,{n},NPTH"),
+            holes: unplated,
+        },
+    ));
+    out
 }
 
 #[cfg(test)]
@@ -298,7 +359,7 @@ mod tests {
     fn copper_carries_pads_tracks_and_vias_with_their_attributes() {
         let s = routed();
         let files = layers("b", &s).unwrap();
-        let names: Vec<&str> = files.iter().map(|f| f.function).collect();
+        let names: Vec<&str> = files.iter().map(|f| f.function.as_str()).collect();
         assert_eq!(
             names,
             [
@@ -351,9 +412,107 @@ mod tests {
     }
 
     #[test]
+    fn four_layers_give_four_copper_files_and_a_drill_file_per_span() {
+        use crate::board::testing::{MM, UM, board};
+        let mut s = board(20 * MM, 10 * MM);
+        s.through(
+            "j1",
+            "1",
+            (10 * MM, 5 * MM),
+            1700 * UM,
+            1000 * UM,
+            Some("a"),
+        )
+        .layers(4)
+        .track(
+            "t1",
+            "a",
+            CopperLayer::Inner(2),
+            250 * UM,
+            &[(2 * MM, 5 * MM), (10 * MM, 5 * MM)],
+        )
+        .via("v0", "a", (15 * MM, 5 * MM), 300 * UM, 600 * UM)
+        .hole("h1", (18 * MM, 8 * MM), 3200 * UM);
+        s.layers(4);
+        s.blind("v1", "a", (2 * MM, 5 * MM), 300 * UM, 600 * UM, (0, 1))
+            .blind("v2", "a", (4 * MM, 5 * MM), 300 * UM, 600 * UM, (1, 2));
+        let files = layers("b", &s).unwrap();
+        let named: Vec<(&str, &str, &str)> = files
+            .iter()
+            .map(|f| {
+                (
+                    f.function.as_str(),
+                    f.ext.as_str(),
+                    f.layer.function.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            &named[..4],
+            [
+                ("copper-top", "gtl", "Copper,L1,Top"),
+                ("copper-in1", "g2", "Copper,L2,Inr"),
+                ("copper-in2", "g3", "Copper,L3,Inr"),
+                ("copper-bottom", "gbl", "Copper,L4,Bot"),
+            ]
+        );
+        assert_eq!(files.len(), 11);
+        assert_eq!(files[10].function, "profile");
+        // in2 holds the through pad, the track, the through via and the buried one.
+        assert_eq!(files[2].layer.items.len(), 4);
+        assert_eq!(
+            files[3].layer.items.len(),
+            2,
+            "bottom: the pad and the through via"
+        );
+        let d = drills(&s);
+        let got: Vec<(&str, &str, usize)> = d
+            .iter()
+            .map(|(n, x)| (n.as_str(), x.function.as_str(), x.holes.len()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("pth", "Plated,1,4,PTH", 2),
+                ("pth-l1-l2", "Plated,1,2,Blind", 1),
+                ("pth-l2-l3", "Plated,2,3,Buried", 1),
+                ("npth", "NonPlated,1,4,NPTH", 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn two_layers_give_the_files_they_always_did() {
+        let s = routed();
+        let files = layers("b", &s).unwrap();
+        let named: Vec<(&str, &str, &str)> = files
+            .iter()
+            .map(|f| {
+                (
+                    f.function.as_str(),
+                    f.ext.as_str(),
+                    f.layer.function.as_str(),
+                )
+            })
+            .collect();
+        let was: Vec<(&str, &str, &str)> =
+            LAYERS.iter().map(|&(f, e, _, x, _)| (f, e, x)).collect();
+        assert_eq!(named, was);
+        let d = drills(&s);
+        assert_eq!(
+            d.iter()
+                .map(|(n, x)| (n.as_str(), x.function.as_str()))
+                .collect::<Vec<_>>(),
+            [("pth", "Plated,1,2,PTH"), ("npth", "NonPlated,1,2,NPTH")]
+        );
+    }
+
+    #[test]
     fn drills_split_by_plating_with_their_functions() {
         let s = routed();
-        let [plated, unplated] = drills(&s);
+        let d = drills(&s);
+        assert_eq!(d.len(), 2);
+        let (plated, unplated) = (&d[0].1, &d[1].1);
         assert_eq!(plated.function, "Plated,1,2,PTH");
         assert_eq!(unplated.function, "NonPlated,1,2,NPTH");
         assert!(

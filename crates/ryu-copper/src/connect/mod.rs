@@ -45,6 +45,7 @@ pub(crate) mod fixtures;
 mod gap;
 mod graph;
 mod hole;
+mod holegap;
 mod place;
 mod resolve;
 
@@ -65,6 +66,7 @@ use crate::tree::grown;
 pub use contact::PointContact;
 pub use gap::Gap;
 use graph::Graph;
+pub use holegap::HoleGap;
 pub use place::Placement;
 pub use resolve::{group_touch, groups};
 

@@ -184,6 +184,7 @@ mod tests {
             preset: "jlc-2l".into(),
             outline,
             cutouts,
+            stackup: None,
         }
     }
 
