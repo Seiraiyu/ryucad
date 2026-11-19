@@ -322,7 +322,8 @@ enum ItemCmd {
     /// A new item, with a number or the next of a scheme.
     Create {
         number: Option<String>,
-        /// Take the next number of SCHEME (or of the one that applies).
+        /// Take the next number of SCHEME (or of the one that applies): from
+        /// the organization's ledger when the catalogue's is on.
         #[arg(long, num_args = 0..=1, default_missing_value = "")]
         next: Option<String>,
         #[command(flatten)]
@@ -886,6 +887,20 @@ fn participant(cli: &Cli) -> Option<String> {
         .or_else(|| std::env::var("RYUPLM_PARTICIPANT").ok())
 }
 
+/// Sends `req` to the catalogue's daemon, or answers it in process when
+/// none can be reached (or with --no-daemon), as every request goes.
+fn send(cli: &Cli, root: &Path, req: Request, warnings: &mut Vec<String>) -> Result<Value> {
+    if !no_daemon(cli) {
+        match client::request(root, &req, participant(cli).as_deref()) {
+            Ok(answer) => return answer.map(|a| a.result),
+            // Never delivered, so running it here is safe.
+            Err(e) => warnings.push(format!("{}; ran in process", e.message)),
+        }
+    }
+    let me = participant(cli);
+    server::handle_safely(&mut None, None, me.as_deref(), root, req).map(|a| a.result)
+}
+
 /// Runs the command, collecting warnings for the output.
 fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
     let here = match &cli.dir {
@@ -937,15 +952,26 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
             let Some((root, req)) = request(cmd, &here)? else {
                 return Err(Error::new(Code::Internal, "a command that is no request"));
             };
-            if !no_daemon(cli) {
-                match client::request(&root, &req, participant(cli).as_deref()) {
-                    Ok(answer) => return answer.map(|a| a.result),
-                    // Never delivered, so running it here is safe.
-                    Err(e) => warnings.push(format!("{}; ran in process", e.message)),
+            // The ledger is asked here, in the CLI's process, never by
+            // the daemon (design 936); what the daemon gets is an
+            // ordinary request carrying the numbers.
+            let mut sent = Vec::new();
+            let out = {
+                let mut send_one = |r: Request| send(cli, &root, r, &mut sent);
+                let open = || ryuplm::ledger::Ledger::open(&root);
+                match &req {
+                    Request::ItemCreate { .. } | Request::ItemRenumber { .. } => {
+                        ryuplm::ledger::numbered(&mut send_one, &open, req, warnings)
+                    }
+                    Request::ImportRun { .. } => {
+                        ryuplm::ledger::import_run(&mut send_one, &open, req, warnings)
+                    }
+                    _ => send_one(req),
                 }
-            }
-            let me = participant(cli);
-            server::handle_safely(&mut None, None, me.as_deref(), &root, req).map(|a| a.result)
+            };
+            sent.dedup();
+            warnings.extend(sent);
+            out
         }
     }
 }
