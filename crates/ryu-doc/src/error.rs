@@ -1156,6 +1156,22 @@ pub enum Code {
     /// ryueda DRC finding (an error): copper closer to a hole's wall than
     /// the preset allows, on a layer where the hole doesn't join it.
     DrcHoleClearance,
+    /// A board's rules name a net class the design doesn't have.
+    BoardClassNotFound,
+    /// A board names a preset that is neither built in nor the project's.
+    BoardPresetNotFound,
+    /// A board's rule is under its preset's floor.
+    RuleBelowPreset,
+    /// The detail on a finding that has got worse than its waiver's limit:
+    /// it counts as an error again.
+    WaiverExceeded,
+    /// `board waive` names a finding the board doesn't have.
+    FindingNotFound,
+    /// `board waive` names a finding that can't be waived (a short, an
+    /// unbuildable footprint).
+    FindingNotWaivable,
+    /// `preset delete` names a preset a board uses.
+    PresetInUse,
     /// `board export` refused: the board has DRC errors (its report in
     /// `details.report`); fix them, or export with `--allow-errors`,
     /// which the manifest records.
@@ -1612,6 +1628,13 @@ impl Code {
         Code::BoardLayerNotFound,
         Code::DrcViaSpan,
         Code::DrcHoleClearance,
+        Code::BoardClassNotFound,
+        Code::BoardPresetNotFound,
+        Code::RuleBelowPreset,
+        Code::WaiverExceeded,
+        Code::FindingNotFound,
+        Code::FindingNotWaivable,
+        Code::PresetInUse,
         Code::DrcFailed,
         Code::ItemNotFound,
         Code::ItemClassUnknown,
@@ -1791,6 +1814,23 @@ mod tests {
             (Code::BoardLayerNotFound, "board_layer_not_found"),
             (Code::DrcViaSpan, "drc_via_span"),
             (Code::DrcHoleClearance, "drc_hole_clearance"),
+        ] {
+            assert_eq!(json!(c), json!(s));
+            assert_eq!(c.exit_code(), 1);
+            assert!(Code::ALL.contains(&c), "{c:?} in ALL");
+        }
+    }
+
+    #[test]
+    fn rules_and_waiver_codes() {
+        for (c, s) in [
+            (Code::BoardClassNotFound, "board_class_not_found"),
+            (Code::BoardPresetNotFound, "board_preset_not_found"),
+            (Code::RuleBelowPreset, "rule_below_preset"),
+            (Code::WaiverExceeded, "waiver_exceeded"),
+            (Code::FindingNotFound, "finding_not_found"),
+            (Code::FindingNotWaivable, "finding_not_waivable"),
+            (Code::PresetInUse, "preset_in_use"),
         ] {
             assert_eq!(json!(c), json!(s));
             assert_eq!(c.exit_code(), 1);
