@@ -54,6 +54,7 @@ fn takes_ryupdms_core_only() {
         "ryu-git",
         "ryupdm",
         "ryueda-parts",
+        "ryu-review",
     ] {
         assert!(names(MANIFEST, "[dependencies]").contains(&name), "{name}");
     }

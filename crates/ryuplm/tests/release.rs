@@ -358,6 +358,7 @@ fn a_first_release_continues_a_carried_legacy_label() {
             dry_run: false,
             prefer: None,
             limit: None,
+            numbers: Default::default(),
             expected_revision: None,
         },
     )

@@ -6,7 +6,9 @@
 //! into a table in 2 s, and imported first within the CSV's 20 s; a
 //! history of 500,000 rows (100,000 items, five revisions each)
 //! imported onto an existing master in 45 s, and again unchanged in
-//! 10 s. With
+//! 10 s. Design 936's: a 100,000-row first import on a ledger catalogue,
+//! its numbers in one request to the ledger's stand-in, within the same
+//! 20 s, and 100,000 numbers asked and read in 2 s. With
 //! `RYUPLM_BARS=1` the bars are asserted as they are, else ten times
 //! looser (a shared CI runner is no measuring instrument). Run with
 //! `--nocapture` to see the times.
@@ -159,6 +161,7 @@ fn a_hundred_thousand_row_import() {
         dry_run: false,
         prefer: None,
         limit: Some(10),
+        numbers: Default::default(),
         expected_revision: None,
     };
     let t = Instant::now();
@@ -291,6 +294,7 @@ fn a_history_of_half_a_million_rows() {
                 dry_run: false,
                 prefer: None,
                 limit: Some(10),
+                numbers: Default::default(),
                 expected_revision: None,
             },
         )
@@ -397,6 +401,7 @@ fn a_hundred_thousand_tree_records() {
                 dry_run: false,
                 prefer: None,
                 limit: Some(10),
+                numbers: Default::default(),
                 expected_revision: None,
             },
         );
@@ -459,4 +464,96 @@ fn where_used_across_ten_checkouts() {
         "{}",
         v["problems"]
     );
+}
+
+/// Design 936's client bar: a 100,000-row first import on a ledger
+/// catalogue takes its numbers in one `next` request (to the stand-in),
+/// within the first import's 20 s; the request alone, 100,000 numbers
+/// asked and read, in 2 s.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "release only: the bars time a release build"
+)]
+fn a_hundred_thousand_numbers_from_the_ledger() {
+    // SAFETY: no test in this file sets the seed.
+    unsafe { std::env::remove_var("RYUPLM_ID_SEED") };
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path().canonicalize().unwrap();
+    ryuplm::server::init(&root, None).unwrap();
+    let mut slot = None;
+    for change in [
+        json!({"scheme": "mech", "pattern": "MECH-\\d{6}", "next_template": "MECH-{seq:6}"}),
+        json!({"ledger": true}),
+    ] {
+        ask(
+            &mut slot,
+            &root,
+            Request::SettingsEdit {
+                change: serde_json::from_value(change).unwrap(),
+                expected_revision: None,
+            },
+        );
+    }
+    let mut csv = String::from("ID,Name\n");
+    for k in 0..100_000 {
+        csv += &format!("{k},Part {k}\n");
+    }
+    let src = root.join("master.csv");
+    std::fs::write(&src, &csv).unwrap();
+    std::fs::create_dir_all(root.join("imports")).unwrap();
+    std::fs::write(
+        root.join("imports/erp.json"),
+        ryuplm::canonical::to_string(&json!({"format": 1, "kind": "ryuplm.import",
+            "reader": {"type": "csv"}, "key": "ID", "fields": {"name": {"from": "Name"}},
+            "numbers": "assign", "scheme": "mech"})),
+    )
+    .unwrap();
+    let (fake, state) = ryu_review::testing::Ledger::start("acme/widgets");
+    let url = fake.url.clone();
+    let open = move || -> ryuplm::error::Result<ryuplm::ledger::Ledger> {
+        Ok(ryuplm::ledger::Ledger::at(&url, "t", "acme/widgets"))
+    };
+    let mut send = |r: Request| {
+        ryuplm::server::handle_safely(&mut slot, None, None, &root, r).map(|a| a.result)
+    };
+    let req = Request::ImportRun {
+        name: "erp".into(),
+        file: src.display().to_string(),
+        dry_run: false,
+        prefer: None,
+        limit: Some(10),
+        expected_revision: None,
+        numbers: Default::default(),
+    };
+    let t = Instant::now();
+    let v = ryuplm::ledger::import_run(&mut send, &open, req, &mut Vec::new()).unwrap();
+    within(
+        "first import of 100,000 rows, numbers from the ledger",
+        t.elapsed(),
+        Duration::from_secs(20),
+    );
+    assert_eq!(
+        (&v["created"]["count"], &v["ledger"]["requests"]),
+        (&json!(100_000), &json!(1))
+    );
+    assert_eq!(state.lock().unwrap().next_calls, 1);
+    // The request alone: 100,000 more numbers asked and read.
+    let l = ryuplm::ledger::Ledger::at(&fake.url, "t", "acme/widgets");
+    let t = Instant::now();
+    let more = l
+        .next(
+            "0123456789abcdef0123456789abcdef",
+            "MECH-{seq:6}",
+            100_000,
+            100_000,
+            None,
+        )
+        .unwrap();
+    within(
+        "100,000 numbers asked of the ledger",
+        t.elapsed(),
+        Duration::from_secs(2),
+    );
+    assert_eq!(more["numbers"][0], "MECH-100001");
 }

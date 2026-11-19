@@ -244,6 +244,8 @@ pub fn refusal(status: u16, body: &Value) -> Error {
         "invalid_request" => Code::ReviewInvalidRequest,
         "merge_unavailable" => Code::ReviewMergeUnavailable,
         "github_unreachable" => Code::ReviewGithubUnreachable,
+        // The ledger's (ryuplm 2, design 936): its own code everywhere.
+        "part_number_taken" => Code::PartNumberTaken,
         _ if status == 401 => Code::ReviewUnauthenticated,
         _ if status == 404 => Code::ReviewNotFound,
         _ => Code::ReviewFailed,
@@ -648,6 +650,7 @@ mod tests {
         assert_eq!(r(403, "not_in_beta"), Code::ReviewNotInBeta);
         assert_eq!(r(400, "invalid_request"), Code::ReviewInvalidRequest);
         assert_eq!(r(502, "github_unreachable"), Code::ReviewGithubUnreachable);
+        assert_eq!(r(409, "part_number_taken"), Code::PartNumberTaken);
         let e = refusal(
             409,
             &json!({"error": {"code": "merge_unavailable", "message": "m",

@@ -213,11 +213,26 @@ pub enum Request {
         prefer: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         limit: Option<usize>,
+        /// Numbers the ledger handed out, by scheme, taken in order by the
+        /// items an `assign` import creates (the CLI fills it, ryuplm 2.B).
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        numbers: std::collections::BTreeMap<String, Vec<String>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
     #[serde(rename = "import.list")]
     ImportList {},
+    /// What the CLI reads before it asks the ledger (ryuplm 2.B): see
+    /// `numbers::local`. Reads only.
+    #[serde(rename = "number.local")]
+    NumberLocal {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        next: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        class: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        item: Option<String>,
+    },
     #[serde(rename = "settings.show")]
     SettingsShow {},
     #[serde(rename = "settings.edit")]
@@ -455,9 +470,15 @@ mod tests {
                 dry_run: true,
                 prefer: Some("source".into()),
                 limit: None,
+                numbers: Default::default(),
                 expected_revision: None,
             },
             Request::ImportList {},
+            Request::NumberLocal {
+                next: Some(String::new()),
+                class: Some("machined".into()),
+                item: None,
+            },
         ];
         for r in reqs {
             assert_eq!(Request::from_rpc(&r.method(), Some(r.params())).unwrap(), r);

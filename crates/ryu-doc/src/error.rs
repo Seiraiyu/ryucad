@@ -1196,6 +1196,18 @@ pub enum Code {
     /// history carried isn't one of the catalogue's revision scheme, so its
     /// first release takes the scheme's first label (design 935).
     ItemHistoryLabelForeign,
+    /// A part number the organization's ledger holds for another
+    /// catalogue or item (ryuplm 2, design 936): `details.service.taken`
+    /// names each number's holders as the service answers them. Also the
+    /// hosted `ryuplm / check`'s finding.
+    PartNumberTaken,
+    /// The ledger can't be asked (design 936): the service is unreachable,
+    /// the organization isn't on it, there is no token or no GitHub
+    /// remote, or the catalogue's `part_number.ledger` is off.
+    /// `details.why` is the cause's code (`ledger_off` for the last).
+    /// `--next` and imports fall back to the local next number with this
+    /// as a warning; `ryuplm number` fails with it.
+    LedgerUnavailable,
 }
 
 impl Code {
@@ -1599,6 +1611,8 @@ impl Code {
         Code::ImportMissing,
         Code::ImportMappingInvalid,
         Code::ItemHistoryLabelForeign,
+        Code::PartNumberTaken,
+        Code::LedgerUnavailable,
     ];
 
     /// The CLI's exit code: 1 the agent can fix it, 2 usage, 3 not a
@@ -1618,7 +1632,8 @@ impl Code {
             | Code::DependencyFetchFailed
             | Code::PartsSourceUnreachable
             | Code::PartsRateLimited
-            | Code::Cancelled => 4,
+            | Code::Cancelled
+            | Code::LedgerUnavailable => 4,
             _ => 1,
         }
     }
@@ -1689,6 +1704,18 @@ mod tests {
             assert_eq!(json!(c), json!(s));
             assert_eq!(c.exit_code(), 1);
         }
+    }
+
+    #[test]
+    fn ledger_codes() {
+        assert_eq!(json!(Code::PartNumberTaken), json!("part_number_taken"));
+        assert_eq!(json!(Code::LedgerUnavailable), json!("ledger_unavailable"));
+        assert_eq!(Code::PartNumberTaken.exit_code(), 1);
+        assert_eq!(Code::LedgerUnavailable.exit_code(), 4);
+        assert_eq!(
+            &Code::ALL[Code::ALL.len() - 2..],
+            &[Code::PartNumberTaken, Code::LedgerUnavailable]
+        );
     }
 
     #[test]

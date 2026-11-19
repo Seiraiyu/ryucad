@@ -406,6 +406,8 @@ class Code(str, Enum):
     IMPORT_MISSING = "import_missing"
     IMPORT_MAPPING_INVALID = "import_mapping_invalid"
     ITEM_HISTORY_LABEL_FOREIGN = "item_history_label_foreign"
+    PART_NUMBER_TAKEN = "part_number_taken"
+    LEDGER_UNAVAILABLE = "ledger_unavailable"
 
 
 #: Each code's exit class.
@@ -805,4 +807,6 @@ EXIT: dict[Code, int] = {
     Code.IMPORT_MISSING: 1,
     Code.IMPORT_MAPPING_INVALID: 1,
     Code.ITEM_HISTORY_LABEL_FOREIGN: 1,
+    Code.PART_NUMBER_TAKEN: 1,
+    Code.LEDGER_UNAVAILABLE: 4,
 }

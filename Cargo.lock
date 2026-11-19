@@ -5245,6 +5245,7 @@ dependencies = [
  "roxmltree 0.21.2",
  "ryu-doc",
  "ryu-git",
+ "ryu-review",
  "ryu-session",
  "ryucad-doc",
  "ryueda-parts",
