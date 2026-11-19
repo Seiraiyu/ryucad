@@ -254,6 +254,11 @@ pub enum Request {
     Check {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         within: Vec<String>,
+        /// A Git revision to compare with: each fault says whether it is
+        /// `new` since then, and the report gains the items and BOM lines
+        /// changed (`against`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        against: Option<String>,
     },
     #[serde(rename = "release.propose")]
     ReleasePropose {
@@ -458,7 +463,10 @@ mod tests {
                 },
                 expected_revision: None,
             },
-            Request::Check { within: vec![] },
+            Request::Check {
+                within: vec![],
+                against: None,
+            },
             Request::ReleasePropose {
                 items: vec!["A-1".into()],
                 all: false,

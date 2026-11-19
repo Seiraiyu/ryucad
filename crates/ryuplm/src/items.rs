@@ -212,7 +212,10 @@ pub fn list(session: &mut Session, ask: &ListAsk) -> Result<Value> {
         Some("warnings") => Some(false),
         Some(other) => return Err(bad_param("faults", other, &["errors", "warnings"])),
     };
-    let picked: Option<Vec<Id>> = ask.number.as_deref().map(|n| session.catalogue().by_number(n));
+    let picked: Option<Vec<Id>> = ask
+        .number
+        .as_deref()
+        .map(|n| session.catalogue().by_number(n));
     let mut listing = crate::listing::of(session);
     // The order walked: a named sort's; else a number's own; else by ID.
     let order: std::sync::Arc<Vec<u32>> = match (&sort, &picked) {
@@ -231,9 +234,15 @@ pub fn list(session: &mut Session, ask: &ListAsk) -> Result<Value> {
     for &k in order.iter() {
         let r = &listing.rows()[k as usize];
         let keep = picked.as_ref().is_none_or(|ids| ids.contains(&r.id))
-            && ask.class.as_ref().is_none_or(|c| r.class.as_ref() == Some(c))
+            && ask
+                .class
+                .as_ref()
+                .is_none_or(|c| r.class.as_ref() == Some(c))
             && ask.state.as_ref().is_none_or(|s| &r.state == s)
-            && ask.make_buy.as_ref().is_none_or(|m| r.make_buy.as_ref() == Some(m))
+            && ask
+                .make_buy
+                .as_ref()
+                .is_none_or(|m| r.make_buy.as_ref() == Some(m))
             && faults.is_none_or(|errors| if errors { r.errors > 0 } else { r.warnings > 0 })
             && needle.as_ref().is_none_or(|t| r.hay.contains(t.as_str()));
         if !keep {
@@ -345,11 +354,7 @@ mod tests {
     }
 
     fn list(root: &std::path::Path, ask_: serde_json::Value) -> serde_json::Value {
-        ask(
-            root,
-            Request::from_rpc("item.list", Some(ask_)).unwrap(),
-        )
-        .unwrap()
+        ask(root, Request::from_rpc("item.list", Some(ask_)).unwrap()).unwrap()
     }
 
     #[test]
@@ -381,33 +386,82 @@ mod tests {
                 .unwrap()
                 .to_owned()
         };
-        mk("S-3", json!({"name": "Screw", "class": "fastener", "make_buy": "buy"}));
-        mk("B-1", json!({"name": "Bracket", "make_buy": "make", "unit": "kg"}));
-        let nut = mk("N-2", json!({"name": "Nut", "class": "fastener", "make_buy": "buy"}));
+        mk(
+            "S-3",
+            json!({"name": "Screw", "class": "fastener", "make_buy": "buy"}),
+        );
+        mk(
+            "B-1",
+            json!({"name": "Bracket", "make_buy": "make", "unit": "kg"}),
+        );
+        let nut = mk(
+            "N-2",
+            json!({"name": "Nut", "class": "fastener", "make_buy": "buy"}),
+        );
         mk("L-4", json!({"description": "a label for the box"}));
         let all = list(&root, json!({}));
-        assert_eq!((all["schema"].clone(), all["total"].clone(), all["count"].clone(), all["offset"].clone()),
-            (json!(1), json!(4), json!(4), json!(0)));
+        assert_eq!(
+            (
+                all["schema"].clone(),
+                all["total"].clone(),
+                all["count"].clone(),
+                all["offset"].clone()
+            ),
+            (json!(1), json!(4), json!(4), json!(0))
+        );
         // The default order is by ID, as it always was.
-        let ids: Vec<&str> = all["items"].as_array().unwrap().iter().map(|r| r["id"].as_str().unwrap()).collect();
+        let ids: Vec<&str> = all["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["id"].as_str().unwrap())
+            .collect();
         let mut sorted = ids.clone();
         sorted.sort();
         assert_eq!(ids, sorted);
-        let row = all["items"].as_array().unwrap().iter().find(|r| r["number"] == "B-1").unwrap();
+        let row = all["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["number"] == "B-1")
+            .unwrap();
         assert_eq!(
-            (row["state"].clone(), row["unit"].clone(), row["make_buy"].clone(), row["errors"].clone(), row["warnings"].clone()),
-            (json!("in_work"), json!("kg"), json!("make"), json!(0), json!(0))
+            (
+                row["state"].clone(),
+                row["unit"].clone(),
+                row["make_buy"].clone(),
+                row["errors"].clone(),
+                row["warnings"].clone()
+            ),
+            (
+                json!("in_work"),
+                json!("kg"),
+                json!("make"),
+                json!(0),
+                json!(0)
+            )
         );
         let numbers = |v: &serde_json::Value| -> Vec<String> {
-            v["items"].as_array().unwrap().iter().map(|r| r["number"].as_str().unwrap().to_owned()).collect()
+            v["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["number"].as_str().unwrap().to_owned())
+                .collect()
         };
         // A window: `total` is the matches, `count` the rows returned.
         let w = list(&root, json!({"sort": "number", "offset": 1, "limit": 2}));
         assert_eq!(numbers(&w), ["L-4", "N-2"]);
-        assert_eq!((w["total"].clone(), w["count"].clone(), w["offset"].clone()), (json!(4), json!(2), json!(1)));
+        assert_eq!(
+            (w["total"].clone(), w["count"].clone(), w["offset"].clone()),
+            (json!(4), json!(2), json!(1))
+        );
         // Past the end: no rows, the same total.
         let past = list(&root, json!({"sort": "number", "offset": 9}));
-        assert_eq!((past["total"].clone(), past["count"].clone()), (json!(4), json!(0)));
+        assert_eq!(
+            (past["total"].clone(), past["count"].clone()),
+            (json!(4), json!(0))
+        );
         // Filters narrow the whole before the window is cut.
         let f = list(&root, json!({"class": "fastener", "sort": "number"}));
         assert_eq!(numbers(&f), ["N-2", "S-3"]);
@@ -417,7 +471,16 @@ mod tests {
         assert_eq!(list(&root, json!({"faults": "errors"}))["total"], 0);
         // Text: number, name, description, and a number the item had.
         assert_eq!(numbers(&list(&root, json!({"text": "LABEL"}))), ["L-4"]);
-        ask(&root, Request::ItemRenumber { item: nut.clone(), number: Some("N-200".into()), next: None, expected_revision: None }).unwrap();
+        ask(
+            &root,
+            Request::ItemRenumber {
+                item: nut.clone(),
+                number: Some("N-200".into()),
+                next: None,
+                expected_revision: None,
+            },
+        )
+        .unwrap();
         assert_eq!(numbers(&list(&root, json!({"text": "n-2"}))), ["N-200"]);
         // By number: the current holder first, then one that had it.
         let by = list(&root, json!({"number": "N-2"}));

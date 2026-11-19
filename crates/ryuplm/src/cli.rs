@@ -81,6 +81,10 @@ enum Command {
         /// Also compare numbers with the catalogues under this folder.
         #[arg(long = "in", value_name = "DIR")]
         within: Vec<String>,
+        /// Compare with this Git revision: faults say whether they are
+        /// new since then, and the report lists what changed.
+        #[arg(long, value_name = "REV")]
+        against: Option<String>,
     },
     #[command(subcommand)]
     Release(ReleaseCmd),
@@ -832,10 +836,11 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
                 },
             )
         }
-        Command::Check { within } => (
+        Command::Check { within, against } => (
             root()?,
             Request::Check {
-                within: within.clone(),
+                within: absolute(here, within),
+                against: against.clone(),
             },
         ),
         Command::Release(ReleaseCmd::Propose {

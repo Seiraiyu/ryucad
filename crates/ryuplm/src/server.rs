@@ -321,7 +321,7 @@ fn dispatch(
             change,
             expected_revision,
         } => settings::edit(session, change, expected_revision.as_deref())?,
-        Request::Check { within } => check::check(session, &within)?,
+        Request::Check { within, against } => check::check(session, &within, against.as_deref())?,
         Request::ReleasePropose {
             items,
             all,

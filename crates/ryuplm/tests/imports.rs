@@ -469,7 +469,14 @@ fn each_fixture_imports_through_its_mapping_and_again_writes_nothing() {
         json!({"Legacy Note": "from the 2009 system"})
     );
     // Every legacy scheme is declared: check is clean of unschemed numbers.
-    let c = ask(&root, Request::Check { within: vec![] }).unwrap();
+    let c = ask(
+        &root,
+        Request::Check {
+            within: vec![],
+            against: None,
+        },
+    )
+    .unwrap();
     let codes: Vec<&str> = c["faults"]
         .as_array()
         .unwrap()

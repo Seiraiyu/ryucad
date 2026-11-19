@@ -189,7 +189,10 @@ mod tests {
         assert_eq!(r[2]["standing"], "removed_in");
         assert_eq!(r[2]["removed_in"], json!(format!("item/{kit}")));
         assert_eq!(r[2]["number"], "KIT-1");
-        assert_eq!(r[3], json!({"ref": "item/zzzzzzzzzzzzf", "standing": "gone"}));
+        assert_eq!(
+            r[3],
+            json!({"ref": "item/zzzzzzzzzzzzf", "standing": "gone"})
+        );
         // A reference that doesn't parse names itself.
         let e = ask(
             &root,

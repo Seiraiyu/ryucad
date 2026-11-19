@@ -259,7 +259,10 @@ mod tests {
         let mut l = of(&mut s);
         let numbers = |l: &mut Listing, sort| -> Vec<String> {
             let order = l.order(sort);
-            order.iter().map(|&k| l.rows()[k as usize].number.clone()).collect()
+            order
+                .iter()
+                .map(|&k| l.rows()[k as usize].number.clone())
+                .collect()
         };
         assert_eq!(numbers(&mut l, Sort::Number), ["A-1", "B-2", "C-3"]);
         // Names compare without case; an item with no name comes last.

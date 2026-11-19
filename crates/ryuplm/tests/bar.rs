@@ -112,7 +112,10 @@ fn a_hundred_thousand_items() {
         None,
         None,
         &root,
-        Request::Check { within: vec![] },
+        Request::Check {
+            within: vec![],
+            against: None,
+        },
     );
     within(
         "check of 100,000 items",
