@@ -140,7 +140,7 @@ pub fn package(
     let p = session.project();
     let b = &p.boards[&id];
     let file = cmd::board_of(b)?;
-    let preset = preset::by_name(&file.preset).ok_or_else(|| {
+    let preset = preset::resolve(p, &file.preset).ok_or_else(|| {
         Error::new(
             Code::InvalidDocument,
             format!("preset {} isn't known", file.preset),

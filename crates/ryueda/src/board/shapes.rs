@@ -445,7 +445,7 @@ fn note_missing(notices: &mut Vec<Fault>, o: &Occ, s: &Shape) {
 /// faults; a board file that doesn't read refuses with its error.
 pub fn build(p: &Project, b: &BoardFiles) -> Result<BoardShapes> {
     let file = b.board.item.as_ref().map_err(Clone::clone)?;
-    let preset = preset::by_name(&file.preset).ok_or_else(|| {
+    let preset = preset::resolve(p, &file.preset).ok_or_else(|| {
         Error::new(
             Code::InvalidDocument,
             format!("preset {} isn't known", file.preset),
@@ -473,7 +473,7 @@ pub fn build(p: &Project, b: &BoardFiles) -> Result<BoardShapes> {
     let parts: Vec<One> = placed
         .par_iter()
         .map(|(o, place)| match (&o.footprint, &o.footprint_error) {
-            (Some(f), _) => one(&board, o, f, *place, preset, n),
+            (Some(f), _) => one(&board, o, f, *place, &preset, n),
             (None, e) => One {
                 notices: vec![unsupported(
                     o,

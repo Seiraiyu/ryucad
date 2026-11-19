@@ -990,7 +990,7 @@ pub fn courtyards(s: &BoardShapes, board: &str) -> Vec<Finding> {
 pub struct BoardCheck {
     pub shapes: Arc<BoardShapes>,
     pub conn: Connectivity,
-    pub preset: &'static Preset,
+    pub preset: Arc<Preset>,
     pub findings: Vec<Finding>,
     pub incomplete: bool,
 }
@@ -1167,7 +1167,8 @@ const RULES: [Rule; 12] = [
 /// flatten refuses with its faults.
 pub fn check_shapes(p: &Project, b: &BoardFiles, shapes: Arc<BoardShapes>) -> Result<BoardCheck> {
     let file = b.board.item.as_ref().map_err(Clone::clone)?;
-    let preset = preset::by_name(&file.preset).unwrap_or(preset::DEFAULT);
+    let preset =
+        preset::resolve(p, &file.preset).unwrap_or_else(|| Arc::new(preset::DEFAULT.clone()));
     let (_, occs) = occ::occurrences(p, &file.design)?;
     let board = b.id.to_string();
     let conn = connect::connect(&board, &shapes);
@@ -1181,7 +1182,7 @@ pub fn check_shapes(p: &Project, b: &BoardFiles, shapes: Arc<BoardShapes>) -> Re
         occs: &occs,
         shapes: &shapes,
         conn: &conn,
-        preset,
+        preset: &preset,
         incomplete,
     };
     let mut findings: Vec<Finding> = RULES.par_iter().flat_map_iter(|r| r(&ctx)).collect();

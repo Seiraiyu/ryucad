@@ -5,33 +5,47 @@
 //!
 //! A fabricator's process, not a parts connector: this is the one file
 //! outside them that names it (`tests/connectors.rs`).
+//!
+//! Since ryueda 7.B a preset is a document (kind `ryueda.fab-preset`): the
+//! built-ins stay constants here, with their pages quoted beside their
+//! numbers, and their document is their canonical serialisation; a
+//! project may hold its own in `presets/<id>.json`.
+
+use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
+
+/// A preset document's kind and format.
+pub const KIND: &str = "ryueda.fab-preset";
+pub const FORMAT: u64 = 1;
 
 /// How a fabricator's assembly service reads a BOM and a pick and place
 /// file. `board export` writes both in this form beside its own.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AssemblyForm {
     /// The files' suffix: `<board>-bom-<name>.csv`, `<board>-pos-<name>.csv`.
-    pub name: &'static str,
+    pub name: Cow<'static, str>,
     /// The supplier whose part numbers its BOM carries (an offer's
     /// supplier, compared ignoring case and spaces).
-    pub supplier: &'static str,
+    pub supplier: Cow<'static, str>,
     /// The BOM's columns: the value, the designators, the footprint, the
     /// supplier's part number.
-    pub bom: [&'static str; 4],
+    pub bom: [Cow<'static, str>; 4],
     /// The pick and place file's columns: the designator, x, y, the side,
     /// the rotation.
-    pub pos: [&'static str; 5],
+    pub pos: [Cow<'static, str>; 5],
     /// What follows a length in the pick and place file (`mm`), and the
     /// top and bottom sides' names there.
-    pub length_suffix: &'static str,
-    pub top: &'static str,
-    pub bottom: &'static str,
+    pub length_suffix: Cow<'static, str>,
+    pub top: Cow<'static, str>,
+    pub bottom: Cow<'static, str>,
 }
 
 /// A preset's numbers, in nanometres.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Preset {
-    pub name: &'static str,
+    pub name: Cow<'static, str>,
     /// Solder mask openings grow beyond a pad by this on every side,
     /// where neither the pad nor its footprint says otherwise.
     pub mask_expansion_nm: i64,
@@ -76,8 +90,27 @@ pub struct Preset {
     pub npth_hole_clearance_nm: i64,
     /// Whether the process makes blind and buried vias.
     pub blind_vias: bool,
+    /// Inner layers' least distance from copper to a via's and a through
+    /// pad's hole wall, where it differs from the outer layers'.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inner_via_hole_clearance_nm: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inner_pth_hole_clearance_nm: Option<i64>,
+    /// The stackup a board of this preset has when it gives none; the
+    /// two-layer one of [`Preset::stackup`] when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stackup: Option<super::stackup::Stackup>,
     /// The assembly service's file form, if the fabricator has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assembly: Option<AssemblyForm>,
+}
+
+/// A drilled hole's kind, as the hole clearances tell them apart.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HoleKind {
+    Via,
+    Pth,
+    Npth,
 }
 
 impl Preset {
@@ -119,10 +152,38 @@ impl Preset {
 }
 
 impl Preset {
-    /// The stackup a board has when it gives none: two copper layers
-    /// round one FR-4 core filling the board's thickness.
+    /// The preset as its document: canonical JSON with its kind and format.
+    pub fn document(&self) -> serde_json::Value {
+        crate::doc::to_value(self, KIND, FORMAT)
+    }
+
+    /// A preset from its document (a project's `presets/<id>.json`).
+    pub fn from_document(v: &serde_json::Value, path: &str) -> crate::error::Result<Preset> {
+        crate::doc::from_value(v.clone(), path, KIND, FORMAT)
+    }
+
+    /// The hole clearance of a hole of `kind` on an inner or outer layer.
+    pub fn hole_clearance(&self, kind: HoleKind, inner: bool) -> i64 {
+        match (kind, inner) {
+            (HoleKind::Via, true) => self
+                .inner_via_hole_clearance_nm
+                .unwrap_or(self.via_hole_clearance_nm),
+            (HoleKind::Via, false) => self.via_hole_clearance_nm,
+            (HoleKind::Pth, true) => self
+                .inner_pth_hole_clearance_nm
+                .unwrap_or(self.pth_hole_clearance_nm),
+            (HoleKind::Pth, false) => self.pth_hole_clearance_nm,
+            (HoleKind::Npth, _) => self.npth_hole_clearance_nm,
+        }
+    }
+
+    /// The stackup a board has when it gives none: the preset's own, else
+    /// two copper layers round one FR-4 core filling the board's thickness.
     pub fn stackup(&self) -> super::stackup::Stackup {
         use super::stackup::{StackLayer, Stackup};
+        if let Some(s) = &self.stackup {
+            return s.clone();
+        }
         let cu = StackLayer::Copper {
             thickness_nm: self.copper_thickness_nm,
         };
@@ -159,13 +220,24 @@ impl Preset {
 ///   mirrored; ryueda writes the placement's, as seen from the top
 ///   (unconfirmed: see `docs/claude/ryueda-board.md`).
 pub const JLC_ASSEMBLY: AssemblyForm = AssemblyForm {
-    name: "jlc",
-    supplier: "LCSC",
-    bom: ["Comment", "Designator", "Footprint", "LCSC Part #"],
-    pos: ["Designator", "Mid X", "Mid Y", "Layer", "Rotation"],
-    length_suffix: "mm",
-    top: "Top",
-    bottom: "Bottom",
+    name: Cow::Borrowed("jlc"),
+    supplier: Cow::Borrowed("LCSC"),
+    bom: [
+        Cow::Borrowed("Comment"),
+        Cow::Borrowed("Designator"),
+        Cow::Borrowed("Footprint"),
+        Cow::Borrowed("LCSC Part #"),
+    ],
+    pos: [
+        Cow::Borrowed("Designator"),
+        Cow::Borrowed("Mid X"),
+        Cow::Borrowed("Mid Y"),
+        Cow::Borrowed("Layer"),
+        Cow::Borrowed("Rotation"),
+    ],
+    length_suffix: Cow::Borrowed("mm"),
+    top: Cow::Borrowed("Top"),
+    bottom: Cow::Borrowed("Bottom"),
 };
 
 /// Read from https://jlcpcb.com/capabilities/pcb-capabilities on
@@ -213,7 +285,7 @@ pub const JLC_ASSEMBLY: AssemblyForm = AssemblyForm {
 /// ryueda's defaults (a 0.25 mm track, a 0.30 mm drill in a 0.60 mm via)
 /// are its own choices and meet every rule above.
 pub const JLC_2L: Preset = Preset {
-    name: "jlc-2l",
+    name: Cow::Borrowed("jlc-2l"),
     mask_expansion_nm: 0,
     paste_margin_nm: 0,
     default_track_width_nm: 250_000,
@@ -237,6 +309,9 @@ pub const JLC_2L: Preset = Preset {
     pth_hole_clearance_nm: 280_000,
     npth_hole_clearance_nm: 200_000,
     blind_vias: false,
+    inner_via_hole_clearance_nm: None,
+    inner_pth_hole_clearance_nm: None,
+    stackup: None,
     assembly: Some(JLC_ASSEMBLY),
 };
 
@@ -253,12 +328,43 @@ pub fn by_name(name: &str) -> Option<&'static Preset> {
 
 /// The known presets' names, for messages.
 pub fn names() -> String {
-    ALL.iter().map(|p| p.name).collect::<Vec<_>>().join(", ")
+    ALL.iter()
+        .map(|p| p.name.to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The preset a board names: a built-in, else the project's own.
+pub fn resolve(p: &crate::project::Project, name: &str) -> Option<std::sync::Arc<Preset>> {
+    if let Some(b) = by_name(name) {
+        return Some(std::sync::Arc::new(b.clone()));
+    }
+    let _ = p; // Task 5: the project's own presets
+    None
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_built_in_reads_back_from_its_document() {
+        for p in ALL {
+            let doc = p.document();
+            assert_eq!(doc["kind"], KIND);
+            assert_eq!(doc["format"], FORMAT);
+            let back = Preset::from_document(&doc, "presets/x.json").unwrap();
+            assert_eq!(&back, p, "{}", p.name);
+        }
+    }
+
+    #[test]
+    fn a_document_with_an_unknown_field_is_refused() {
+        let mut doc = JLC_2L.document();
+        doc["clearence_nm"] = serde_json::json!(1);
+        let e = Preset::from_document(&doc, "presets/x.json").unwrap_err();
+        assert_eq!(e.code, crate::error::Code::InvalidDocument);
+    }
 
     #[test]
     fn the_one_preset_is_found_by_name() {
@@ -305,7 +411,10 @@ mod tests {
 
     #[test]
     fn the_preset_has_an_assembly_form() {
-        let f = JLC_2L.assembly.expect("jlc-2l has an assembly form");
+        let f = JLC_2L
+            .assembly
+            .clone()
+            .expect("jlc-2l has an assembly form");
         assert!(!f.name.is_empty() && f.name.chars().all(|c| c.is_ascii_lowercase()));
         assert!(f.bom.iter().all(|c| !c.is_empty() && !c.contains(',')));
         assert!(f.pos.iter().all(|c| !c.is_empty() && !c.contains(',')));

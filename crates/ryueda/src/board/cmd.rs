@@ -156,7 +156,7 @@ pub fn create(
     let board = Board {
         name: name.to_owned(),
         design,
-        preset: super::preset::DEFAULT.name.into(),
+        preset: super::preset::DEFAULT.name.to_string(),
         outline,
         cutouts: Vec::new(),
         stackup,
