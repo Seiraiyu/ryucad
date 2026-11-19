@@ -23,6 +23,8 @@ pub struct Row {
     pub footprint: String,
     pub at: [i64; 2],
     pub rotation_mdeg: i64,
+    /// The part is on the bottom.
+    pub bottom: bool,
 }
 
 /// The footprint's ID, as the BOM's `footprint` column writes it.
@@ -73,6 +75,7 @@ pub fn rows(occs: &[Occ], b: &BoardFiles) -> (Vec<Row>, Vec<Value>) {
                 footprint: footprint_id(o),
                 at: p.at,
                 rotation_mdeg: i64::from(ryu_board::geom::Mdeg::new(p.rotation_mdeg).get()),
+                bottom: !p.side.is_top(),
             }),
         }
     }
@@ -122,7 +125,7 @@ pub fn pos_csv(rows: &[Row]) -> String {
                 mm(r.at[0]),
                 mm(r.at[1]),
                 degrees(r.rotation_mdeg),
-                "top".to_owned(),
+                if r.bottom { "bottom" } else { "top" }.to_owned(),
             ],
         );
     }
@@ -140,7 +143,7 @@ pub fn pos_form(rows: &[Row], f: &AssemblyForm) -> String {
                 r.designator.clone(),
                 format!("{}{}", mm(r.at[0]), f.length_suffix),
                 format!("{}{}", mm(r.at[1]), f.length_suffix),
-                f.top.to_owned(),
+                if r.bottom { f.bottom } else { f.top }.to_owned(),
                 degrees(r.rotation_mdeg),
             ],
         );
@@ -203,17 +206,26 @@ mod tests {
             footprint: "R_0402".into(),
             at: [x, -2_500_000],
             rotation_mdeg: rot,
+            bottom: false,
         }
     }
 
     #[test]
     fn pick_and_place_writes_millimetres_and_degrees() {
-        let rows = vec![row("R2", 1_500_000, 90_000), row("R10", 0, 45_500)];
+        let rows = vec![
+            row("R2", 1_500_000, 90_000),
+            row("R10", 0, 45_500),
+            Row {
+                bottom: true,
+                ..row("R11", 2_000_000, 90_000)
+            },
+        ];
         assert_eq!(
             pos_csv(&rows),
             "Designator,Value,Footprint,X,Y,Rotation,Side\n\
              R2,10k,R_0402,1.5,-2.5,90,top\n\
-             R10,10k,R_0402,0.0,-2.5,45.5,top\n"
+             R10,10k,R_0402,0.0,-2.5,45.5,top\n\
+             R11,10k,R_0402,2.0,-2.5,90,bottom\n"
         );
         let f = JLC_2L.assembly.unwrap();
         let text = pos_form(&rows, &f);
@@ -224,6 +236,14 @@ mod tests {
                 "R2,1.5{s},-2.5{s},{t},90\n",
                 s = f.length_suffix,
                 t = f.top
+            )),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!(
+                "R11,2.0{s},-2.5{s},{b},90\n",
+                s = f.length_suffix,
+                b = f.bottom
             )),
             "{text}"
         );

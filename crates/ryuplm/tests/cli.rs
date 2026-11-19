@@ -156,6 +156,8 @@ fn version_names_ryuplm() {
     for k in ["ryuplm", "commit", "target", "protocol"] {
         assert!(v["result"].get(k).is_some(), "{k}");
     }
+    // The shape of the answers other tools read (design 938): asked once.
+    assert_eq!(v["result"]["schema_outputs"], 1, "{v}");
     let bad = Command::cargo_bin("ryuplm")
         .unwrap()
         .arg("no-such-command")
@@ -272,6 +274,14 @@ fn every_protocol_method_has_a_command() {
         ("bom.get", &["bom", "show"]),
         ("bom.diff", &["bom", "diff"]),
         ("bom.where_used", &["where-used"]),
+        ("reps.list", &["reps"]),
+        ("index", &["index"]),
+        ("import.guess", &["import", "guess"]),
+        ("import.check", &["import", "check"]),
+        ("import.run", &["import", "run"]),
+        ("import.list", &["import", "list"]),
+        // Read by the CLI before it asks the ledger (ryuplm 2.B).
+        ("number.local", &["number", "next"]),
         ("settings.show", &["settings", "show"]),
         ("settings.edit", &["settings", "edit"]),
         ("check", &["check"]),
@@ -281,6 +291,7 @@ fn every_protocol_method_has_a_command() {
         ("release.check", &["release", "check"]),
         ("release.sync", &["release", "sync"]),
         ("diff", &["diff"]),
+        ("resolve", &["resolve"]),
         ("activity.log", &["history"]),
         ("undo", &["undo"]),
         ("redo", &["redo"]),
@@ -375,6 +386,10 @@ fn mech(p: &Pair) -> &'static str {
 }
 
 #[test]
+#[cfg_attr(
+    not(feature = "cad"),
+    ignore = "needs ryucad's lines: the `cad` feature"
+)]
 fn links_boms_and_where_used_from_the_cli() {
     let p = Pair::project();
     let pid = mech(&p);
@@ -441,4 +456,252 @@ fn links_boms_and_where_used_from_the_cli() {
         .collect();
     assert_eq!(via, ["ryucad"], "{used}");
     p.ok(&["item", "unlink", "GLUE-1", "ryueda"]);
+}
+
+#[test]
+fn imports_from_the_cli() {
+    let p = Pair::project();
+    p.ok(&["settings", "edit", "--class", "machined"]);
+    let csv = "Item ID,Part No.,Descripton\n1,100-0001,Bracket\n2,100-0002,Screw\n";
+    for top in [&p.direct, &p.daemon] {
+        fs::write(top.join("p/items.csv"), csv).unwrap();
+    }
+    let g = p.ok(&["import", "guess", "items.csv", "--save", "erp"]);
+    assert_eq!(g["saved"], "imports/erp.json");
+    assert_eq!(g["mapping"]["key"], "Item ID");
+    assert_eq!(g["mapping"]["fields"]["description"]["from"], "Descripton");
+    p.fails(
+        &["import", "guess", "items.csv", "--save", "erp"],
+        "conflict",
+        1,
+    );
+    let c = p.ok(&["import", "check", "erp", "items.csv"]);
+    assert_eq!(c["rows"], 2);
+    let dry = p.ok(&["import", "run", "erp", "items.csv", "--dry-run"]);
+    assert_eq!(
+        (dry["created"]["count"].clone(), dry["written"].clone()),
+        (json!(2), json!(0))
+    );
+    let r = p.ok(&["import", "run", "erp", "items.csv"]);
+    assert_eq!(r["written"], 2);
+    let again = p.ok(&["import", "run", "erp", "items.csv"]);
+    assert_eq!(
+        (again["unchanged"].clone(), again["written"].clone()),
+        (json!(2), json!(0))
+    );
+    let l = p.ok(&["import", "list"]);
+    assert_eq!(l["imports"][0]["items"], 2);
+    p.fails(&["import", "run", "nope", "items.csv"], "not_found", 1);
+    p.fails(
+        &["import", "run", "erp", "items.csv", "--prefer", "both"],
+        "usage",
+        2,
+    );
+    assert_eq!(p.files(&p.direct), p.files(&p.daemon));
+    // A quantity column alone: a BOM with no parent, level or root. The
+    // proposal says what to finish, and refuses to be saved unfinished.
+    for top in [&p.direct, &p.daemon] {
+        fs::write(top.join("p/bom.csv"), "MPN,Qty\nX-1,2\n").unwrap();
+    }
+    let g = p.ok(&["import", "guess", "bom.csv"]);
+    assert_eq!(g["todo"].as_array().unwrap().len(), 1);
+    p.fails(
+        &["import", "guess", "bom.csv", "--save", "bom"],
+        "invalid_param",
+        1,
+    );
+}
+
+#[test]
+fn a_history_imports_and_shows_from_the_cli() {
+    let p = Pair::project();
+    let mapping = ryuplm::canonical::to_string(&json!({"format": 2, "kind": "ryuplm.import",
+        "reader": {"type": "csv"}, "key": "PN", "fields": {"number": {"from": "PN"}},
+        "history": {"revision": "Rev", "date": {"from": "Date", "date": ["DD/MM/YYYY"]}}}));
+    let csv = "PN,Rev,Date\n100-0001,A,07/03/2019\n100-0001,B,02/11/2020\n";
+    for top in [&p.direct, &p.daemon] {
+        fs::create_dir_all(top.join("p/imports")).unwrap();
+        fs::write(top.join("p/imports/hist.json"), &mapping).unwrap();
+        fs::write(top.join("p/hist.csv"), csv).unwrap();
+    }
+    let c = p.ok(&["import", "check", "hist", "hist.csv"]);
+    assert_eq!(c["rows"], 1, "one row per key: {c}");
+    let r = p.ok(&["import", "run", "hist", "hist.csv"]);
+    assert_eq!(r["created"]["count"], 1);
+    // Item answers may carry the item's own warnings (its number matches
+    // no scheme), so these two compare both ways without `ok`'s check.
+    let shown = |args: &[&str]| {
+        let (code, v) = p.both(args);
+        assert_eq!(code, 0, "{args:?}: {v}");
+        v["result"].clone()
+    };
+    let s = shown(&["item", "show", "100-0001"]);
+    assert_eq!(
+        s["legacy"][1],
+        json!({"label": "B", "date": "2020-11-02", "values": {"number": "100-0001"},
+               "import": "hist", "carried": true})
+    );
+    assert_eq!(s["state"]["next"], "C");
+    let l = shown(&["release", "list", "100-0001"]);
+    assert_eq!(l["legacy"], s["legacy"]);
+    assert_eq!(p.files(&p.direct), p.files(&p.daemon));
+}
+
+#[test]
+fn git_attributes_are_the_drivers_lines() {
+    // Outside any catalogue: the service asks before it has a checkout.
+    let dir = tempfile::tempdir().unwrap();
+    let out = Command::cargo_bin("ryuplm")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["git", "attributes"])
+        .output()
+        .unwrap();
+    let (code, v) = parse(out, dir.path());
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(v["result"]["schema"], 1);
+    assert_eq!(v["result"]["lines"], json!(ryuplm::drivers::LINES));
+    assert!(
+        v["result"]["lines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|l| l == "items/*/*.json merge=ryuplm diff=ryuplm text eol=lf")
+    );
+}
+
+/// `git` in `dir`, with an identity and no inherited repository.
+fn git(dir: &Path, args: &[&str]) {
+    let out = std::process::Command::new("git")
+        .current_dir(dir)
+        .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+        .args(args)
+        .env_remove("GIT_DIR")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "cad"),
+    ignore = "needs ryucad's lines: the `cad` feature"
+)]
+fn the_services_answers_from_the_cli() {
+    let p = Pair::project();
+    let pid = mech(&p);
+    for n in ["BOX-1", "SCREW-1", "GLUE-1"] {
+        p.ok(&["item", "create", n, "--name", n]);
+    }
+    p.ok(&["item", "link", "BOX-1", "ryucad", pid, "box"]);
+    p.ok(&["item", "link", "SCREW-1", "ryucad", pid, "screw"]);
+    let added = p.ok(&["bom", "add", "BOX-1", "GLUE-1", "0.5", "--unit", "kg"]);
+    let line = added["line"].as_str().unwrap().to_owned();
+    let box_id = p.ok(&["item", "show", "BOX-1"])["item"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // Every answer the service reads says its schema.
+    for args in [
+        vec!["info"],
+        vec!["item", "list"],
+        vec!["item", "show", "BOX-1"],
+        vec!["release", "list"],
+        vec!["bom", "show", "BOX-1"],
+        vec!["reps"],
+        vec!["check"],
+    ] {
+        assert_eq!(p.ok(&args)["schema"], 1, "{args:?}");
+    }
+    // A window, both ways.
+    let w = p.ok(&[
+        "item", "list", "--sort", "number", "--offset", "1", "--limit", "1",
+    ]);
+    assert_eq!(
+        (
+            w["total"].clone(),
+            w["count"].clone(),
+            w["items"][0]["number"].clone()
+        ),
+        (json!(3), json!(1), json!("GLUE-1"))
+    );
+    assert_eq!(p.ok(&["item", "list", "--text", "screw"])["total"], 1);
+    p.fails(&["item", "list", "--sort", "colour"], "invalid_param", 1);
+    // What it reaches.
+    let reps = p.ok(&["reps"]);
+    assert_eq!(
+        (
+            reps["projects"][0]["project"].clone(),
+            reps["projects"][0]["items"].clone()
+        ),
+        (json!(pid), json!(2))
+    );
+    // References.
+    let r = p.ok(&[
+        "resolve",
+        &format!("item/{box_id}"),
+        &format!("item/{box_id}/line/{line}"),
+        "item/zzzzzzzzzzzzf",
+    ]);
+    let standing: Vec<&str> = r["refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["standing"].as_str().unwrap())
+        .collect();
+    assert_eq!(standing, ["here", "here", "gone"]);
+    p.fails(&["resolve", "sheet:1"], "invalid_param", 1);
+    // The index: the same bytes in process and through the daemon.
+    let mut texts = Vec::new();
+    for top in [&p.direct, &p.daemon] {
+        let (code, v) = p.run_in(top, &["index", "--out", "../index.jsonl"]);
+        assert_eq!(code, 0, "{v}");
+        assert_eq!(
+            (v["result"]["items"].clone(), v["result"]["lines"].clone()),
+            (json!(3), json!(2))
+        );
+        texts.push(fs::read_to_string(top.join("index.jsonl")).unwrap());
+    }
+    // `Pair::project` copies one manifest to both folders, so they match.
+    assert_eq!(texts[0], texts[1]);
+    let lines: Vec<Value> = texts[0]
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let boxed = lines.iter().find(|l| l["number"] == "BOX-1").unwrap();
+    let from: Vec<&str> = boxed["lines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["from"].as_str().unwrap())
+        .collect();
+    assert_eq!(from, ["own", "ryucad"], "{boxed}");
+    assert_eq!(boxed["links"][0]["resolved"], true);
+    // check --against, in a repository of each folder's own. The two
+    // commits differ (their times do), so each way is read by itself.
+    for top in [&p.direct, &p.daemon] {
+        let root = top.join("p");
+        git(&root, &["init", "-q", "-b", "main"]);
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-q", "-m", "base"]);
+    }
+    p.ok(&["item", "create", "NEW-1"]);
+    for top in [&p.direct, &p.daemon] {
+        let (code, v) = p.run_in(top, &["check", "--against", "HEAD"]);
+        assert_eq!(code, 0, "{v}");
+        let a = &v["result"]["against"];
+        assert_eq!(a["items"]["added"][0]["number"], "NEW-1");
+        assert_eq!(a["rev"], "HEAD");
+        assert_eq!(a["commit"].as_str().unwrap().len(), 40);
+        let (code, v) = p.run_in(top, &["check", "--against", "no-such-rev"]);
+        assert_eq!(
+            (code, &v["error"]["code"]),
+            (1, &json!("rev_not_found")),
+            "{v}"
+        );
+    }
 }

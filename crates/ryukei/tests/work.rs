@@ -411,6 +411,58 @@ fn the_ruled_pin_twin_is_bounded() {
     println!("ruled_pin twin: {spent} units");
 }
 
+/// The released_pin twin (plan 23.A): bounded, the same units on one
+/// thread and eight, each rung build, adjusted build and released build
+/// within its cap. The delete refuses `HealAmbiguous` (census VIII), the
+/// answer it is bounded to; any other refusal fails.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn the_released_pin_twin_is_bounded() {
+    use ryukei::TweakError;
+    use ryukei_testkit::released_pin::{slotted, spec};
+    let b = slotted();
+    let spec = spec(&b);
+    let spent = bounded(
+        "released_pin twin",
+        |w| match ryukei::tweak::delete_faces_with(OpKey(0x23a5), &b, &spec, w) {
+            Err(Error::InvalidTweak(TweakError::HealAmbiguous { .. })) => Ok(()),
+            r => r.map(|_| ()),
+        },
+    );
+    println!("released_pin twin: {spent} units");
+}
+
+/// A delete that can't be made (plan 23.B): a slab's side, which no rung
+/// closes. Bounded like any call: the same units on one thread and eight,
+/// a budget of what it spends refuses as unbudgeted, one unit short
+/// answers `BudgetExceeded`, a cancel answers `Cancelled`. Its refusal is
+/// the answer bounded.
+#[test]
+fn a_refused_delete_is_bounded() {
+    use ryukei::TweakError;
+    use ryukei::name::{FaceRole, Name, Role};
+    use ryukei::tweak::{DeleteSpec, Heal, delete_faces_with};
+    let (b, _) = primitive::block(OpKey(0x23b0), 0.01, 0.006, 0.004, &Rigid::IDENTITY).unwrap();
+    let spec = DeleteSpec {
+        faces: vec![Name::derive(
+            OpKey(0x23b0),
+            Role::Face(FaceRole::PlusX),
+            &[],
+        )],
+        heal: Heal::Grow,
+    };
+    let spent = bounded("a slab's side", |w| {
+        match delete_faces_with(OpKey(0x23b1), &b, &spec, w) {
+            Err(Error::InvalidTweak(TweakError::GapNotHealed { .. })) => Ok(()),
+            r => r.map(|_| ()),
+        }
+    });
+    println!("a slab's side: {spent} units");
+}
+
 #[test]
 fn thickening_a_sheet_is_bounded() {
     use ryukei::name::{FaceRole, Name, Role};

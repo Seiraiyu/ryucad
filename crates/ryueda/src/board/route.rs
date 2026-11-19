@@ -49,12 +49,26 @@ pub fn net_of(nets: &BTreeSet<String>, design: &Id, text: &str) -> Result<String
     .with("net", text))
 }
 
-fn layer_of(v: Option<&Value>) -> Result<CopperLayer> {
+fn layer_of(v: Option<&Value>, n: usize) -> Result<CopperLayer> {
     let text = v
         .and_then(Value::as_str)
-        .ok_or_else(|| invalid("a track needs --layer top or bottom", "layer"))?;
-    CopperLayer::parse(text)
-        .ok_or_else(|| invalid(format!("--layer is top or bottom, not {text}"), "layer"))
+        .ok_or_else(|| invalid("a track needs --layer (top, in1 …, bottom)", "layer"))?;
+    named_layer(text, n, "layer")
+}
+
+/// A copper layer the board has, by name.
+fn named_layer(text: &str, n: usize, param: &str) -> Result<CopperLayer> {
+    let list = super::load::layer_list(n);
+    let layer = CopperLayer::parse(text)
+        .ok_or_else(|| invalid(format!("--{param} is one of {list}, not {text}"), param))?;
+    match layer.index(n) {
+        Some(_) => Ok(layer),
+        None => Err(Error::new(
+            Code::BoardLayerNotFound,
+            format!("the board has {n} copper layers and no {text}; they are {list}"),
+        )
+        .with("layer", text)),
+    }
 }
 
 /// A length that must be positive.
@@ -161,7 +175,7 @@ pub fn track_add(
             .and_then(Value::as_str)
             .ok_or_else(|| invalid(format!("track {i} needs a net"), "net"))?;
         let net = net_of(&nets, &file.design, net)?;
-        let layer = layer_of(field(a, "layer"))?;
+        let layer = layer_of(field(a, "layer"), super::stackup::copper_count(file))?;
         let width = match field(a, "width") {
             None => preset.default_track_width_nm,
             Some(v) => positive(v, unit, "width")?,
@@ -187,7 +201,7 @@ pub fn track_add(
             points,
         };
         w.put(route_path(&id, TRACKS, &tid), &t, TRACK_KIND);
-        made.push(json!({"id": tid, "reference": format!("{id}:track/{tid}"), "track": crate::doc::to_value(&t, TRACK_KIND, FORMAT)}));
+        made.push(json!({"id": tid, "reference": format!("{id}:track/{tid}"), "track": super::file::value(&t, TRACK_KIND)}));
     }
     commit(session, &format!("board {id} track"), w)?;
     Ok(answer(session, &id, json!({"tracks": made}), before))
@@ -230,7 +244,7 @@ pub fn track_edit(
         t.net = net_of(&nets(p, &file.design)?, &file.design, n)?;
     }
     if let Some(l) = layer {
-        t.layer = layer_of(Some(&json!(l)))?;
+        t.layer = layer_of(Some(&json!(l)), super::stackup::copper_count(file))?;
     }
     if let Some(wd) = width {
         t.width_nm = positive(&json!(wd), unit, "width")?;
@@ -244,7 +258,7 @@ pub fn track_edit(
     let mut w = Writes::default();
     w.put(route_path(&id, TRACKS, &tid), &t, TRACK_KIND);
     commit(session, &format!("board {id} track {tid}"), w)?;
-    let made = json!({"tracks": [{"id": tid, "reference": format!("{id}:track/{tid}"), "track": crate::doc::to_value(&t, TRACK_KIND, FORMAT)}]});
+    let made = json!({"tracks": [{"id": tid, "reference": format!("{id}:track/{tid}"), "track": super::file::value(&t, TRACK_KIND)}]});
     Ok(answer(session, &id, made, before))
 }
 
@@ -363,14 +377,30 @@ pub fn via_add(
             taken.contains(s)
         })?;
         taken.insert(vid.to_string());
+        let n = super::stackup::copper_count(file);
+        let end = |param: &str| -> Result<Option<CopperLayer>> {
+            field(a, param)
+                .map(|v| {
+                    let text = v.as_str().ok_or_else(|| {
+                        invalid(format!("--{param} is a copper layer's name"), param)
+                    })?;
+                    named_layer(text, n, param)
+                })
+                .transpose()
+        };
         let v = Via {
             net,
             at,
             drill_nm: drill,
             diameter_nm: diameter,
+            from: end("from")?,
+            to: end("to")?,
         };
+        if v.span(n).is_none() {
+            return Err(invalid("--from lies above --to", "from"));
+        }
         w.put(route_path(&id, VIAS, &vid), &v, VIA_KIND);
-        made.push(json!({"id": vid, "reference": format!("{id}:via/{vid}"), "via": crate::doc::to_value(&v, VIA_KIND, FORMAT)}));
+        made.push(json!({"id": vid, "reference": format!("{id}:via/{vid}"), "via": super::file::value(&v, VIA_KIND)}));
     }
     commit(session, &format!("board {id} via"), w)?;
     Ok(answer(session, &id, json!({"vias": made}), before))
@@ -412,7 +442,7 @@ pub fn hole_add(
             drill_nm: drill,
         };
         w.put(route_path(&id, HOLES, &hid), &h, HOLE_KIND);
-        made.push(json!({"id": hid, "reference": format!("{id}:hole/{hid}"), "hole": crate::doc::to_value(&h, HOLE_KIND, FORMAT)}));
+        made.push(json!({"id": hid, "reference": format!("{id}:hole/{hid}"), "hole": super::file::value(&h, HOLE_KIND)}));
     }
     commit(session, &format!("board {id} hole"), w)?;
     Ok(answer(session, &id, json!({"holes": made}), before))

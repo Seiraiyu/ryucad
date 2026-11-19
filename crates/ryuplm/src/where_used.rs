@@ -177,6 +177,15 @@ pub struct Ask<'a> {
     pub working: bool,
 }
 
+/// One other checkout searched: its folder as shown, its project and rows
+/// (working, released; `None` when it is this catalogue), or the error
+/// opening it, and its problems.
+type Searched = (
+    String,
+    std::result::Result<(Option<ProjectId>, Vec<Value>, Vec<Value>), Value>,
+    Vec<Value>,
+);
+
 /// `bom.where_used`: `{schema, item, number, catalogue, working,
 /// released, problems, searched}`, rows from this catalogue then each
 /// other catalogue found, each row with its `catalogue` and `folder`.
@@ -212,32 +221,68 @@ pub fn answer(session: &mut Session, ask: &Ask) -> Result<Value> {
     }
     let others = crate::numbers::others(session.root(), &folders);
     let mut searched = Vec::new();
-    for dir in &others {
-        let shown = dir.display().to_string();
-        let mut s = match Session::open(dir) {
-            Ok(s) => s,
-            Err(e) => {
-                problems.push(json!(e.with("folder", &shown)));
-                continue;
+    // Other checkouts opened and searched on threads, eight at a time so
+    // at most eight catalogues are held at once (design 734's bar: ten
+    // checkouts of 10,000 items in a second); the answer keeps the
+    // folders' order.
+    let mut results: Vec<Searched> = Vec::with_capacity(others.len());
+    for wave in others.chunks(8) {
+        results.extend(std::thread::scope(|s| {
+            let handles: Vec<_> = wave
+                .iter()
+                .map(|dir| {
+                    let (t, folders, working_only) = (&t, &folders, ask.working);
+                    s.spawn(move || {
+                        let shown = dir.display().to_string();
+                        let mut problems = Vec::new();
+                        let mut sess = match Session::open(dir) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                return (
+                                    shown.clone(),
+                                    Err(json!(e.with("folder", &shown))),
+                                    problems,
+                                );
+                            }
+                        };
+                        let c = sess.catalogue().clone();
+                        if c.manifest.project == t.catalogue {
+                            return (shown, Ok((None, Vec::new(), Vec::new())), problems);
+                        }
+                        let mut r = crate::reps::Disk::new(
+                            crate::reps::Index::scan(&crate::reps::tops(dir, folders)),
+                            dir,
+                        );
+                        let w = rows_in(&c, t, &mut r, &At::Working, &mut problems);
+                        let rel = if working_only {
+                            Vec::new()
+                        } else {
+                            released_rows(&mut sess, t, &mut r, &mut problems, &shown)
+                        };
+                        (
+                            shown,
+                            Ok((Some(c.manifest.project.clone()), w, rel)),
+                            problems,
+                        )
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("a where-used thread doesn't panic"))
+                .collect::<Vec<Searched>>()
+        }));
+    }
+    for (shown, r, mut p) in results {
+        problems.append(&mut p);
+        match r {
+            Err(e) => problems.push(e),
+            Ok((None, _, _)) => {}
+            Ok((Some(project), w, rel)) => {
+                searched.push(shown.clone());
+                working.extend(tag(w, &project, &shown));
+                released.extend(tag(rel, &project, &shown));
             }
-        };
-        let c = s.catalogue().clone();
-        if c.manifest.project == t.catalogue {
-            continue; // another checkout of this catalogue
-        }
-        searched.push(shown.clone());
-        let mut r = crate::reps::Disk::new(
-            crate::reps::Index::scan(&crate::reps::tops(dir, &folders)),
-            dir,
-        );
-        working.extend(tag(
-            rows_in(&c, &t, &mut r, &At::Working, &mut problems),
-            &c.manifest.project,
-            &shown,
-        ));
-        if !ask.working {
-            let rr = released_rows(&mut s, &t, &mut r, &mut problems, &shown);
-            released.extend(tag(rr, &c.manifest.project, &shown));
         }
     }
     Ok(json!({

@@ -87,21 +87,21 @@ pub fn fabrication(board: &str, s: &BoardShapes, version: &str) -> Result<Vec<Fi
                 ryu_gerber::gerber::write(&lf.layer, &sw).map_err(|e| gerber_error(e, &name))?;
             Ok(File {
                 name,
-                function: lf.function.to_owned(),
+                function: lf.function.clone(),
                 text,
             })
         })
         .collect::<Result<_>>()?;
-    for (d, function) in fab::drills(s).iter().zip(["pth", "npth"]) {
+    for (function, d) in fab::drills(s) {
         if d.holes.is_empty() {
             continue;
         }
         let name = format!("{board}-{function}.drl");
         let text =
-            ryu_gerber::excellon::write(d, &sw, SLOTS).map_err(|e| gerber_error(e, &name))?;
+            ryu_gerber::excellon::write(&d, &sw, SLOTS).map_err(|e| gerber_error(e, &name))?;
         out.push(File {
             name,
-            function: function.to_owned(),
+            function,
             text,
         });
     }
@@ -174,7 +174,7 @@ pub fn package(
         });
     }
     let listed = |f: &File| json!({"name": f.name, "function": f.function, "blake3": hash(&f.text), "bytes": f.text.len()});
-    let manifest = json!({
+    let mut manifest = json!({
         "schema": 1,
         "board": format!("board/{id}"),
         "board_revision": b.revision,
@@ -189,6 +189,10 @@ pub fn package(
         "files": files.iter().map(listed).collect::<Vec<_>>(),
         "ryueda": version,
     });
+    if let Some(st) = &file.stackup {
+        manifest["copper_layers"] = json!(st.copper());
+        manifest["stackup"] = json!(st);
+    }
     files.push(File {
         name: MANIFEST.to_owned(),
         function: "manifest".into(),

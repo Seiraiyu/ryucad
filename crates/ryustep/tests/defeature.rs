@@ -113,6 +113,16 @@ const MAX_SIZE: f64 = 2e-3;
 /// SolidWorks 2026 also refuses them as one Delete and Patch; their work
 /// continues in ryukei 23, "SolidWorks parity on blend deletes"
 /// (per-feature partial deletes, fast refusals).
+///
+/// Plan 23.B caps each deleted set's whole ladder at one gap
+/// (`Scope::Gap`, `1 << 26` units). Census VIII sized it at four times the
+/// largest ladder that builds: the bent rod's rim (plan 19.A), 9,871,261
+/// units, whose first build spends 9.6 M refusing `Uncertain` before its
+/// retry builds. FTC 07 rd's and FTC 10 rb's refused ladders spend 26.9 M
+/// and 17.1 M, mostly in builds of 9 to 14 M that refuse `Uncertain` the
+/// same way, so the gap is above them. They refuse as on main, and the
+/// design's 10 s bar is unmet (the owner's choice, 2026-11-18; making
+/// those builds refuse sooner is a later follow-up).
 const KNOWN_REFUSED: &[(&str, u32)] = &[("nist_ftc_07", 652), ("nist_ftc_10", 652)];
 
 /// How a body's delete ended, for [`Tally::count`].
@@ -771,6 +781,15 @@ fn ftc_07s_and_ftc_10s_blends_are_deleted() {
 /// STC 10 and CTC 02 with PMI stay out as 22.A left them (moved to
 /// ryukei 23). SolidWorks 2026 deletes CTC 02 with PMI in one operation,
 /// and refuses STC 10 and FTC 07 AP242.
+///
+/// Plan 23.A releases a pin a narrowed build's walk failed at (design
+/// 919): CTC 02 with PMI #295's rung 3 asks its pinned cylinder
+/// `e153cd0e` released once `1294043e`, given room twice, fails there.
+/// The released build's walk finds two closures (planes `06252748` and
+/// `ad25abb3`, or the cylinder and `1294043e`; census VIII, #658), so it
+/// still refuses `GapNotHealed` and stays out, one capped build later
+/// (moved to ryukei 24).
+/// The 18 defeature as on main.
 const PINNED_DEFEATURED: &[(&str, u64)] = &[
     ("nist_ctc_01_asme1_ap203.stp", 148),
     ("nist_ctc_01_asme1_rd.stp", 13),
@@ -790,6 +809,16 @@ const PINNED_DEFEATURED: &[(&str, u64)] = &[
     ("nist_stc_06_asme1_ap242-e3.stp", 5079),
     ("nist_stc_08_asme1_ap242-e3.stp", 1781),
     ("nist_stc_09_asme1_ap242-e3.stp", 4622),
+];
+
+/// The pinned bodies a one-operation delete can't make that SolidWorks
+/// 2026 also refuses as one Delete and Patch (design 919): each must
+/// refuse typed, never build, and never run past the deadline (plan 23.B).
+/// Their refused ladders (STC 10's 23.9 M units, FTC 07 AP242's 22.3 M)
+/// are under the gap's `1 << 26`, so they refuse as on main.
+const PINNED_REFUSED: &[(&str, u64)] = &[
+    ("nist_ftc_07_asme1_ap242-e2.stp", 13541),
+    ("nist_stc_10_asme1_ap242-e2.stp", 3044),
 ];
 
 /// Where `scripts/fetch-corpus.sh` keeps the pinned corpus.
@@ -907,8 +936,12 @@ fn pinned_bodies_defeature() {
             let must = PINNED_DEFEATURED
                 .iter()
                 .any(|(f, r)| name.ends_with(f) && *r == rep);
+            let refuses = PINNED_REFUSED
+                .iter()
+                .any(|(f, r)| name.ends_with(f) && *r == rep);
             if blends == 0 {
                 assert!(!must, "{name} #{rep}: must defeature (plans 18.C, 19.A)");
+                assert!(!refuses, "{name} #{rep}: has blends to refuse (plan 23.B)");
                 none += 1;
                 continue;
             }
@@ -916,6 +949,10 @@ fn pinned_bodies_defeature() {
                 .install(|| within_deadline(|w| delete_blends_with(OpKey(0x13d), &body, &spec, w)))
             {
                 Ok((o, _)) => {
+                    assert!(
+                        !refuses,
+                        "{name} #{rep}: refuses as SolidWorks does (plan 23.B)"
+                    );
                     assert_eq!(check(&o), [], "{name} #{rep}");
                     // Pairs the body couldn't be checked at before the
                     // delete may stay unchecked (#264); anything else is
@@ -950,6 +987,7 @@ fn pinned_bodies_defeature() {
                     refused += 1;
                 }
                 Err(Error::Cancelled) => {
+                    assert!(!refuses, "{name} #{rep}: must refuse typed (plan 23.B)");
                     assert!(
                         !must,
                         "{name} #{rep}: must defeature (plans 18.C, 19.A), past the deadline"

@@ -391,6 +391,10 @@ class Code(str, Enum):
     DRC_EDGE_CLEARANCE = "drc_edge_clearance"
     DRC_COURTYARD_OVERLAP = "drc_courtyard_overlap"
     DRC_COURTYARD_OPEN = "drc_courtyard_open"
+    BOARD_STACKUP_INVALID = "board_stackup_invalid"
+    BOARD_LAYER_NOT_FOUND = "board_layer_not_found"
+    DRC_VIA_SPAN = "drc_via_span"
+    DRC_HOLE_CLEARANCE = "drc_hole_clearance"
     DRC_FAILED = "drc_failed"
     ITEM_NOT_FOUND = "item_not_found"
     ITEM_CLASS_UNKNOWN = "item_class_unknown"
@@ -402,6 +406,12 @@ class Code(str, Enum):
     BOM_UNLINKED = "bom_unlinked"
     BOM_LINE_TWICE = "bom_line_twice"
     BOM_CYCLE = "bom_cycle"
+    IMPORT_CONFLICT = "import_conflict"
+    IMPORT_MISSING = "import_missing"
+    IMPORT_MAPPING_INVALID = "import_mapping_invalid"
+    ITEM_HISTORY_LABEL_FOREIGN = "item_history_label_foreign"
+    PART_NUMBER_TAKEN = "part_number_taken"
+    LEDGER_UNAVAILABLE = "ledger_unavailable"
 
 
 #: Each code's exit class.
@@ -786,6 +796,10 @@ EXIT: dict[Code, int] = {
     Code.DRC_EDGE_CLEARANCE: 1,
     Code.DRC_COURTYARD_OVERLAP: 1,
     Code.DRC_COURTYARD_OPEN: 1,
+    Code.BOARD_STACKUP_INVALID: 1,
+    Code.BOARD_LAYER_NOT_FOUND: 1,
+    Code.DRC_VIA_SPAN: 1,
+    Code.DRC_HOLE_CLEARANCE: 1,
     Code.DRC_FAILED: 1,
     Code.ITEM_NOT_FOUND: 1,
     Code.ITEM_CLASS_UNKNOWN: 1,
@@ -797,4 +811,10 @@ EXIT: dict[Code, int] = {
     Code.BOM_UNLINKED: 1,
     Code.BOM_LINE_TWICE: 1,
     Code.BOM_CYCLE: 1,
+    Code.IMPORT_CONFLICT: 1,
+    Code.IMPORT_MISSING: 1,
+    Code.IMPORT_MAPPING_INVALID: 1,
+    Code.ITEM_HISTORY_LABEL_FOREIGN: 1,
+    Code.PART_NUMBER_TAKEN: 1,
+    Code.LEDGER_UNAVAILABLE: 4,
 }

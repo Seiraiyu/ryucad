@@ -35,8 +35,8 @@ impl Bytes<'_> {
 }
 
 fn put(files: &mut BTreeMap<String, Vec<u8>>, path: &str, kind: &str, mut v: Value) {
+    v["format"] = json!(ryueda::conn::format_of(kind, &v));
     v["kind"] = json!(kind);
-    v["format"] = json!(1);
     files.insert(path.to_owned(), ryueda::canonical::to_string(&v).into_bytes());
 }
 
@@ -108,12 +108,34 @@ fuzz_target!(|data: &[u8]| {
         json!({"start": [0, 0], "edges": [{"type": "line", "to": [w, 0]}, {"type": "line", "to": [w, h]},
             {"type": "line", "to": [0, h]}, {"type": "line", "to": [0, 0]}]})
     };
-    put(&mut files, "boards/f/board.json", "ryueda.board", json!({"name": "F", "design": "d", "preset": "jlc-2l", "outline": outline}));
+    let mut board = json!({"name": "F", "design": "d", "preset": "jlc-2l", "outline": outline});
+    // 2, 4 or 6 copper layers (ryueda 7.A), now and then a 32-layer one.
+    let layers = [2usize, 4, 6, 32][b.next() % 4];
+    if layers > 2 {
+        let st = ryueda::board::stackup::even(&ryueda::board::preset::JLC_2L, layers.min(6)).unwrap();
+        board["stackup"] = if layers == 32 {
+            let cu = json!({"kind": "copper", "thickness_nm": 10_000});
+            let mut l = vec![cu.clone()];
+            for _ in 1..32 {
+                l.push(json!({"kind": "dielectric", "thickness_nm": 40_000}));
+                l.push(cu.clone());
+            }
+            json!({"layers": l})
+        } else {
+            serde_json::to_value(st).unwrap()
+        };
+    }
+    put(&mut files, "boards/f/board.json", "ryueda.board", board);
+    // Any name `CopperLayer::parse` takes, the board's or not.
+    const LAYERS: [&str; 8] = ["top", "bottom", "in1", "in2", "in3", "in4", "in7", "in30"];
     for i in 0..5 {
         if b.next() % 4 != 0 {
             let rot = if b.next() % 2 == 0 { (b.next() as i64 % 4) * 90_000 } else { b.next() as i64 * 1_409 };
-            put(&mut files, &format!("boards/f/placements/r{i}.json"), "ryueda.placement",
-                json!({"at": [b.coord(), b.coord()], "rotation_mdeg": rot}));
+            let mut pl = json!({"at": [b.coord(), b.coord()], "rotation_mdeg": rot});
+            if b.next() % 3 == 0 {
+                pl["side"] = json!("bottom");
+            }
+            put(&mut files, &format!("boards/f/placements/r{i}.json"), "ryueda.placement", pl);
         }
     }
     let nets = nets();
@@ -121,12 +143,20 @@ fuzz_target!(|data: &[u8]| {
         let n = b.next() % (b.next() % 6 + 2);
         let points: Vec<Value> = (0..n).map(|_| json!([b.coord(), b.coord()])).collect();
         put(&mut files, &format!("boards/f/tracks/t{i}.json"), "ryueda.track", json!({
-            "net": nets[b.next() % nets.len()], "layer": if b.next() % 2 == 0 { "top" } else { "bottom" },
+            "net": nets[b.next() % nets.len()], "layer": LAYERS[b.next() % LAYERS.len()],
             "width_nm": b.length(), "points": points}));
     }
     for i in 0..b.next() % 4 {
-        put(&mut files, &format!("boards/f/vias/v{i}.json"), "ryueda.via", json!({
-            "net": nets[b.next() % nets.len()], "at": [b.coord(), b.coord()], "drill_nm": b.length(), "diameter_nm": b.length()}));
+        let mut via = json!({
+            "net": nets[b.next() % nets.len()], "at": [b.coord(), b.coord()], "drill_nm": b.length(), "diameter_nm": b.length()});
+        // A span: through, or from and to any layer, either way round.
+        for end in ["from", "to"] {
+            let k = b.next() % (LAYERS.len() + 2);
+            if k < LAYERS.len() {
+                via[end] = json!(LAYERS[k]);
+            }
+        }
+        put(&mut files, &format!("boards/f/vias/v{i}.json"), "ryueda.via", via);
     }
     for i in 0..b.next() % 3 {
         put(&mut files, &format!("boards/f/holes/h{i}.json"), "ryueda.hole", json!({"at": [b.coord(), b.coord()], "drill_nm": b.length()}));

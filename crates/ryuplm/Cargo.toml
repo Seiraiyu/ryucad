@@ -12,10 +12,20 @@ blake3 = { version = "1", features = ["pure"] }
 clap = { version = "4", features = ["derive"] }
 # Item IDs and project IDs.
 getrandom = "0.3"
+# Mapping files' regex transforms: ryupdm's own regex crate.
+regex-lite = "0.1"
+# XLSX's XML (`import::xlsx`): pure Rust, as ryudfm reads ODB++'s. Its
+# zip is read by ryupdm's bounded reader.
+roxmltree = "0.21"
 # Release history and tags, read through ryupdm's own gix.
 gix = { version = "0.89", default-features = false, features = ["sha1", "revision"] }
 ryu-doc = { path = "../ryu-doc" }
 ryu-git = { path = "../ryu-git" }
+# The hosted service's client: the ledger's numbers (design 936),
+# asked by the CLI process only, never the daemon; `ryuplm review` and
+# `where-used --org` (design 938). HTTPS on rustls, as ryucad's and
+# ryueda's.
+ryu-review = { path = "../ryu-review" }
 ryu-session = { path = "../ryu-session" }
 # AML names and lifecycles, shared with ryueda's part data (no project).
 ryueda-parts = { path = "../ryueda-parts" }
@@ -40,8 +50,15 @@ testing = []
 
 [dev-dependencies]
 assert_cmd = "2"
+# The ledger's stand-in (`ryu_review::testing::Ledger`).
+ryu-review = { path = "../ryu-review", features = ["testing"] }
 ryuplm = { path = ".", default-features = false, features = ["testing"] }
 tempfile = "3"
+
+# One `syncfs` after a large write (`write::write_all`); already in the
+# build through ryu-session.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
 
 # musl's allocator is slow under multithreaded allocation, as for ryucad,
 # ryueda and ryudfm.

@@ -480,6 +480,76 @@ fn clearance_matches_every_pair_judged() {
     debug_assertions,
     ignore = "release only: booleans of seeded shapes take minutes in a debug build"
 )]
+fn hole_clearance_matches_every_wall_judged() {
+    for case in 0..CASES {
+        let mut l = seeded(0x686f_6c67 + case, 120, false);
+        add_holes(&mut l, case + 60, 30);
+        let d = 1_000_000;
+        let run = |threads: usize| {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap()
+                .install(|| {
+                    let c = Copper::new(&l, BodyOptions::default());
+                    let got: Vec<Vec<_>> = (0..2)
+                        .map(|layer| {
+                            c.hole_clearance(layer, d)
+                                .iter()
+                                .map(|g| (g.hole, g.piece, g.distance.nm, g.joined))
+                                .collect()
+                        })
+                        .collect();
+                    (c, got)
+                })
+        };
+        let (c, got) = run(1);
+        assert_eq!(got, run(8).1, "case {case}: one thread and eight");
+        for (layer, got) in got.iter().enumerate() {
+            let mut want = Vec::new();
+            for (hk, h) in &l.holes {
+                if !(h.span.0 <= layer && layer <= h.span.1) {
+                    continue;
+                }
+                let wall = h.shape.body();
+                let plated_here =
+                    h.plated && !h.backdrilled.iter().any(|s| s.0 <= layer && layer <= s.1);
+                let joined = if plated_here {
+                    c.island_of(&Node::Hole(*hk))
+                } else {
+                    None
+                };
+                for (k, it) in &l.items {
+                    if it.layer != layer {
+                        continue;
+                    }
+                    for (i, body) in c.piece_bodies(k) {
+                        let Some(island) = c.island_of(&Node::Piece(*k, i)) else {
+                            continue;
+                        };
+                        if joined == Some(island) || measure::closer(&body, &wall, d) == Verdict::No
+                        {
+                            continue;
+                        }
+                        // As the engine does, a pair with no distance is skipped.
+                        let Some(dist) = measure::distance(&body, &wall) else {
+                            continue;
+                        };
+                        want.push((*hk, (*k, i), dist.nm, joined));
+                    }
+                }
+            }
+            want.sort_by_key(|x| (x.2, x.0, x.1));
+            assert_eq!(*got, want, "case {case}, layer {layer}");
+        }
+    }
+}
+
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "release only: booleans of seeded shapes take minutes in a debug build"
+)]
 fn quiet_edits_match_a_rebuild() {
     for case in 0..CASES {
         // Positive shapes only, so most inserts and removals are quiet;

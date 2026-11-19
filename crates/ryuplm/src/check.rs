@@ -4,7 +4,7 @@
 use crate::error::{Code, Error, Result};
 use crate::judge::Context;
 use crate::session::Session;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use std::path::PathBuf;
 
 pub const SCHEMA: u64 = 1;
@@ -21,7 +21,64 @@ pub fn elsewhere(within: &[String]) -> Vec<PathBuf> {
     out
 }
 
-pub fn report(session: &mut Session, within: &[String]) -> Result<Value> {
+/// What tells one fault from another across revisions: its code, the item
+/// it names (else its file), and where in it.
+type Key = (String, String, String);
+
+/// The faults a base revision raised, by [`key`].
+type Keys = std::collections::BTreeSet<Key>;
+
+fn key(f: &crate::fault::Fault) -> Key {
+    let d = &f.error.details;
+    let s = |k: &str| d[k].as_str().unwrap_or("").to_owned();
+    let at = if d["item"].is_string() {
+        s("item")
+    } else {
+        s("path")
+    };
+    (
+        json!(f.error.code).as_str().unwrap_or("").to_owned(),
+        at,
+        s("pointer"),
+    )
+}
+
+/// The catalogue's faults at `rev`, by [`key`], and the commit `rev`
+/// names; `None` for the faults when that commit holds no catalogue here.
+fn base(session: &mut Session, rev: &str, within: &[String]) -> Result<(String, Option<Keys>)> {
+    let (repo, _) = crate::release::history(session)?;
+    let commit = crate::reps::commit_hex(repo.gix(), rev)?;
+    let files: std::collections::BTreeMap<String, Vec<u8>> =
+        ryupdm::history::files_for::<crate::Plm>(repo.gix(), &commit, repo.prefix())?;
+    if !files.contains_key(crate::catalogue::MANIFEST) {
+        return Ok((commit, None));
+    }
+    let cat = crate::load::Catalogue::load(&files)?;
+    let cx = Context {
+        elsewhere: elsewhere(within),
+        here: Some(session.root().to_path_buf()),
+    };
+    let mut faults = crate::judge::all(&files, &cat, &cx);
+    let mut reps = crate::bom::disk(session, within);
+    let index = reps.index.clone();
+    let others = crate::numbers::others(session.root(), &cx.elsewhere);
+    faults.extend(crate::bom::findings(
+        &cat,
+        &index,
+        &mut reps,
+        &others,
+        &crate::reps::At::Commit(commit.clone()),
+    ));
+    Ok((commit, Some(faults.iter().map(key).collect())))
+}
+
+/// `{schema, faults, errors, warnings, release?, against?}`. With
+/// `against`, each fault says whether it is `new` since that revision
+/// (none there with its code, item and pointer), and `against` holds the
+/// revision, its commit, and `diff` and `bom diff` from it to the working
+/// files; `absent: true` instead when that commit has no catalogue here.
+pub fn report(session: &mut Session, within: &[String], against: Option<&str>) -> Result<Value> {
+    let old = against.map(|r| base(session, r, within)).transpose()?;
     let cx = Context {
         elsewhere: elsewhere(within),
         here: Some(session.root().to_path_buf()),
@@ -35,36 +92,66 @@ pub fn report(session: &mut Session, within: &[String]) -> Result<Value> {
         &index,
         &mut reps,
         &others,
+        &crate::reps::At::Working,
     ));
     let release = crate::release::findings(session)?;
     let errors = faults.iter().filter(|f| f.is_error()).count()
         + release.iter().filter(|f| f["severity"] == "error").count();
     let warnings = faults.len() + release.len() - errors;
-    let mut r = json!({
-        "schema": SCHEMA,
-        "faults": crate::fault::list(&faults),
-        "errors": errors,
-        "warnings": warnings,
-    });
+    // Built by moving: `json!` would copy every fault again. With
+    // `against`, each fault says whether it is new since then.
+    let listed: Vec<Value> = faults
+        .into_iter()
+        .map(|f| match &old {
+            Some((_, was)) => {
+                let new = was.as_ref().is_none_or(|w| !w.contains(&key(&f)));
+                let mut v = f.into_json();
+                v["new"] = json!(new);
+                v
+            }
+            None => f.into_json(),
+        })
+        .collect();
+    let mut r = Map::new();
+    r.insert("errors".into(), json!(errors));
+    r.insert("faults".into(), Value::Array(listed));
+    r.insert("schema".into(), json!(SCHEMA));
+    r.insert("warnings".into(), json!(warnings));
+    let mut r = Value::Object(r);
     // Only when there are release findings, as ryueda's.
     if !release.is_empty() {
-        r["release"] = json!(release);
+        r["release"] = Value::Array(release);
+    }
+    if let (Some(rev), Some((commit, was))) = (against, &old) {
+        r["against"] = match was {
+            None => json!({"rev": rev, "commit": commit, "absent": true}),
+            Some(_) => json!({
+                "rev": rev,
+                "commit": commit,
+                "items": crate::diff::diff(session, Some(rev), None)?,
+                "bom": crate::bom_diff::diff(session, None, Some(rev), None, within)?,
+            }),
+        };
     }
     Ok(r)
 }
 
-pub fn check(session: &mut Session, within: &[String]) -> Result<Value> {
-    let r = report(session, within)?;
+pub fn check(session: &mut Session, within: &[String], against: Option<&str>) -> Result<Value> {
+    let r = report(session, within, against)?;
     let (e, w) = (
         r["errors"].as_u64().unwrap_or(0),
         r["warnings"].as_u64().unwrap_or(0),
     );
     if e > 0 {
-        return Err(Error::new(
+        // The report moved in, not copied by `with`.
+        let mut err = Error::new(
             Code::CheckFailed,
             format!("check found {e} error(s) and {w} warning(s)"),
-        )
-        .with("report", r));
+        );
+        let mut details = Map::new();
+        details.insert("report".into(), r);
+        err.details = Value::Object(details);
+        return Err(err);
     }
     Ok(r)
 }
@@ -78,7 +165,14 @@ mod tests {
     #[test]
     fn check_reports_errors_and_warnings() {
         let (_d, root) = catalogue();
-        let ok = ask(&root, Request::Check { within: vec![] }).unwrap();
+        let ok = ask(
+            &root,
+            Request::Check {
+                within: vec![],
+                against: None,
+            },
+        )
+        .unwrap();
         assert_eq!(
             (
                 ok["errors"].clone(),
@@ -97,7 +191,14 @@ mod tests {
             ),
         )
         .unwrap();
-        let e = ask(&root, Request::Check { within: vec![] }).unwrap_err();
+        let e = ask(
+            &root,
+            Request::Check {
+                within: vec![],
+                against: None,
+            },
+        )
+        .unwrap_err();
         assert_eq!(e.code, crate::error::Code::CheckFailed);
         let r = &e.details["report"];
         assert_eq!(r["errors"], 1);

@@ -44,11 +44,12 @@ pub fn textconv(
 ) -> bool {
     match kind {
         crate::config::KIND => {
-            // Numbering schemes (format 5), a line each; a format 1
-            // `{pattern}` stays with the generic flattener.
+            // Numbering schemes (format 5), a line each, and the ledger
+            // (format 6); a format 1 `{pattern}` alone stays with the
+            // generic flattener.
             if rest
                 .get("part_number")
-                .is_some_and(|p| p.get("schemes").is_some())
+                .is_some_and(|p| p.get("schemes").is_some() || p.get("ledger").is_some())
                 && let Some(Value::Object(mut pn)) = rest.remove("part_number")
             {
                 if let Some(Value::Array(schemes)) = pn.remove("schemes") {
@@ -163,6 +164,35 @@ fn released_by(by: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_ledger_has_a_line() {
+        use serde_json::json;
+        let flat = |path: &str, v: &Value, out: &mut Vec<String>| out.push(format!("{path} = {v}"));
+        for (pn, want) in [
+            (
+                json!({"ledger": true, "schemes": [{"name": "mech", "pattern": "M-\\d+", "next": "M-{seq:3}"}]}),
+                vec![
+                    r#"part_number.schemes.mech = {"next":"M-{seq:3}","pattern":"M-\\d+"}"#,
+                    "part_number.ledger = true",
+                ],
+            ),
+            (json!({"ledger": true}), vec!["part_number.ledger = true"]),
+        ] {
+            let mut rest: Map<String, Value> =
+                json!({"part_number": pn}).as_object().unwrap().clone();
+            let (mut lines, mut last) = (Vec::new(), Vec::new());
+            assert!(textconv(
+                crate::config::KIND,
+                &mut rest,
+                &mut lines,
+                &mut last,
+                &flat
+            ));
+            assert_eq!(lines, want);
+            assert!(rest.is_empty(), "{rest:?}");
+        }
+    }
 
     #[test]
     fn records_merge_whole_and_a_locks_labels_are_one_value() {

@@ -470,6 +470,7 @@ mod tests {
             &design,
             Some(&["30".into(), "20".into()]),
             None,
+            None,
             Some("b"),
             None,
         )
@@ -478,7 +479,13 @@ mod tests {
         let a = s.board_check(&id).unwrap();
         let b = s.board_check(&id).unwrap();
         assert!(std::sync::Arc::ptr_eq(&a, &b), "kept");
-        crate::board::cmd::edit(&mut s, "b", Some("C"), None, None, None).unwrap();
+        crate::board::cmd::edit(&mut s, "b", Some("C"), None, None, None, None, None).unwrap();
+        // --layers and --stackup together (the protocol allows it; the
+        // CLI's flags conflict) are refused, not one quietly winning.
+        let both = serde_json::json!({"layers": []});
+        let e = crate::board::cmd::edit(&mut s, "b", None, None, None, Some(4), Some(&both), None)
+            .unwrap_err();
+        assert_eq!(e.code, crate::error::Code::InvalidParam);
         let c = s.board_check(&id).unwrap();
         assert!(
             !std::sync::Arc::ptr_eq(&a, &c),

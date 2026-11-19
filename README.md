@@ -114,6 +114,21 @@ Two more products in this repo share ryucad's files, sessions and CLI convention
 - **ryueda** is electronics CAD for agents, from schematic to a fabricated board. It has symbol, footprint and component libraries, and imports KiCad's: on davids-m4 (Apple M4) it imported KiCad 9.0.9's 10,217 symbols and 15,361 footprints. It has hierarchical blocks, connectivity, the flattened netlist and ERC, and a schematic engine (`ryusch`) that lays out and draws schematics, pages them into PDFs, and lints how readable they are. Boards are placed and routed by command, checked by DRC, and exported as Gerber X2, Excellon, a BOM and pick and place. A live session and a window (`ryueda open`) show an agent's work as it happens. Git diffs and merges ryueda's files by value, with a compare view and a conflict panel. Part data, releases of designs and library parts, BOMs and where-used complete it.
 - **ryudfm** is design-for-manufacturing for boards, also on its own line. It reads ODB++ exactly into integer nanometres, then inspects and renders it. On cox-worker-4 (AMD Opteron 6380) it reads and shapes a 338,087-feature board in 0.71 to 0.76 s. Its copper measurement engine is under way.
 
+### PLM: ryuplm
+
+**ryuplm** is product lifecycle management beside PDM, on ryupdm's core, with a release line of its own (`ryuplm-vX.Y.Z` tags, `install-ryuplm.sh`, `install-ryuplm.ps1`). It manages the items a company makes, buys and ships, whether or not a CAD or EDA project ever touches them: screws, labels, packaging, firmware, kits.
+
+- **Catalogues in Git:** one canonical JSON file per item, merged and diffed field by field by ryuplm's own Git drivers, and released through ryupdm (revisions, labels, release records, the commit guard).
+- **Part numbers:** named numbering schemes per class, the next number filled locally, legacy numbers kept as written (a warning), and old numbers found after a renumber.
+- **AMLs, classes and declared properties,** judged by `check`.
+- **BOMs** of an item's own lines joined with the lines of its linked ryucad assemblies and ryueda designs, BOM diffs between revisions, and where-used across checkouts and their releases.
+- **Imports from any CSV or spreadsheet** through a mapping the user or their agent commits (`imports/<name>.json`): provenance on every field, and re-imports that change only what changed and report conflicts instead of overwriting.
+- A daemon that holds a catalogue in memory for agents, at 100,000 items.
+
+```sh
+curl -fsSL https://github.com/Seiraiyu/ryucad/releases/download/ryuplm-v0.1.0/install-ryuplm.sh | sh
+```
+
 ## Install
 
 Prebuilt binaries for Linux (x86_64 and aarch64), macOS (Apple silicon) and Windows (x64) come with each release. Each release has the `ryucad` command (static on Linux) and the desktop app, `ryucad-app` (on Linux it needs glibc 2.35 or newer and a desktop). The installers verify checksums and put both in `~/.ryucad/bin`. They add it to your PATH and register ryucad's Git drivers. They also let you open a project folder in the app from your desktop: "Open in ryucad" on folders in Explorer, an application entry on Linux that also opens `ryucad.json`, and `~/Applications/ryucad.app` on macOS. Running one again updates.
@@ -181,6 +196,7 @@ Every command answers one JSON document: `{"ok", "result" | "error", "warnings"}
 | App | `ryucad-app` | The live viewer |
 | PDM | `ryupdm` | Local PDM: properties, releases, BOMs, where-used, approvals, dependencies |
 | Electronics | `ryueda`, `ryusch`, `ryudfm`, `ryu-board`, `ryu-copper` | Electronics CAD, schematics, and board DFM |
+| PLM | `ryuplm` | Catalogues of items, numbering schemes, AMLs, BOMs across CAD and EDA, where-used and imports |
 | Testing | `ryukei-testkit`, `ryukei-bench`, `step-hunt`, `fuzz/` | Seeded property tests, golden hashes on every platform, 34 fuzz targets, corpora of real files, and head-to-head comparisons with OCCT and SMLib |
 
 The default build has no C++ dependency; OCCT and SMLib appear only behind features of `ryukei-bench`. Design documents and roadmaps live in the Coxswain planning project `ryucad-ryukei`, not in this repo.
@@ -213,6 +229,7 @@ Each release is tested end to end on a Mac, Linux and Windows before it is tagge
 | ryupdm | | Teams and hosting (6), release packages (7) |
 | ryueda | The board (7) | Routing, outputs and MCAD, design import, verification |
 | ryudfm | The copper engine (1) | Rules and waivers, fabrication and assembly checks |
+| ryuplm | Its first release (ryuplm-release 1) | Items in the app and the hosted pages (1), part numbers from a ledger (2), documents (3), ECOs (4) |
 
 Roadmaps are plans, not commitments, and versions aren't assigned ahead of time.
 
@@ -229,8 +246,8 @@ cargo build && cargo run -p ryucad-app -- <project folder>   # the app needs ryu
 
 `CLAUDE.md` lists every test suite, benchmark and bar. The devcontainer (`devcontainer up --workspace-folder .`) adds OCCT, SMLib, lib3mf, OpenUSD and KiCad for the head-to-head tests.
 
-Releases are cut by pushing a tag `vX.Y.Z` (or `vX.Y.Z-pre.N`). The version comes from the tag, and the `Release` workflow builds, tests and publishes every target with `SHA256SUMS` and both installers. ryueda and ryudfm have their own tags (`ryueda-v…`, `ryudfm-v…`) and workflows.
+Releases are cut by pushing a tag `vX.Y.Z` (or `vX.Y.Z-pre.N`). The version comes from the tag, and the `Release` workflow builds, tests and publishes every target with `SHA256SUMS` and both installers. ryueda, ryudfm and ryuplm have their own tags (`ryueda-v…`, `ryudfm-v…`, `ryuplm-v…`) and workflows.
 
 ## License
 
-ryucad is licensed under the [Apache License, Version 2.0](LICENSE), and so is everything else in this repository: ryukei, ryupdm, ryueda and ryudfm. Third-party fonts and test files keep their own licences, listed in [NOTICE](NOTICE). The hosted review service at [review.seiraiyu.com](https://review.seiraiyu.com) is a separate, paid product.
+ryucad is licensed under the [Apache License, Version 2.0](LICENSE), and so is everything else in this repository: ryukei, ryupdm, ryueda, ryudfm and ryuplm. Third-party fonts and test files keep their own licences, listed in [NOTICE](NOTICE). The hosted review service at [review.seiraiyu.com](https://review.seiraiyu.com) is a separate, paid product.

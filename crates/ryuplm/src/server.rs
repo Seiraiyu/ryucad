@@ -49,6 +49,7 @@ pub fn init(root: &Path, unit: Option<Unit>) -> Result<Value> {
 fn info(session: &Session) -> Value {
     let c = session.catalogue();
     json!({
+        "schema": crate::OUTPUT_SCHEMA,
         "root": session.root(),
         "project": c.manifest.project,
         "default_unit": c.manifest.default_unit,
@@ -79,7 +80,11 @@ fn guarded<T>(
 ) -> Result<T> {
     let session = match slot {
         Some(s) => s,
-        None => slot.insert(Session::open(root)?),
+        None => {
+            let s = slot.insert(Session::open(root)?);
+            s.opened_now();
+            s
+        }
     };
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(session))) {
         Ok(r) => r,
@@ -158,8 +163,26 @@ fn dispatch(
             number,
             class,
             text,
+            state,
+            make_buy,
+            faults,
+            sort,
+            offset,
             limit,
-        } => items::list(session, number, class, text, limit),
+        } => items::list(
+            session,
+            &items::ListAsk {
+                number,
+                class,
+                text,
+                state,
+                make_buy,
+                faults,
+                sort,
+                offset,
+                limit,
+            },
+        )?,
         Request::ItemEdit {
             item,
             fields,
@@ -251,12 +274,63 @@ fn dispatch(
                 working,
             },
         )?,
+        Request::RepsList { rev, within } => crate::reach::list(session, rev.as_deref(), &within)?,
+        Request::Index { out, rev, within } => {
+            crate::index::write(session, &out, rev.as_deref(), &within)?
+        }
+        Request::ImportGuess {
+            file,
+            sheet,
+            delimiter,
+            encoding,
+            records,
+            save,
+        } => crate::import::guess::answer(
+            session,
+            std::path::Path::new(&file),
+            sheet,
+            delimiter,
+            encoding,
+            records,
+            save,
+        )?,
+        Request::ImportList {} => crate::import::list(session)?,
+        Request::NumberLocal { next, class, item } => {
+            crate::numbers::local(session, next.as_deref(), class.as_deref(), item.as_deref())?
+        }
+        Request::ImportCheck { name, file, limit } => {
+            crate::import::preview::check(session, &name, std::path::Path::new(&file), limit)?
+        }
+        Request::ImportRun {
+            name,
+            file,
+            dry_run,
+            prefer,
+            limit,
+            numbers,
+            expected_revision,
+        } => {
+            let prefer = prefer
+                .as_deref()
+                .map(crate::import::run::Prefer::parse)
+                .transpose()?;
+            crate::import::run::run(
+                session,
+                &name,
+                std::path::Path::new(&file),
+                dry_run,
+                prefer,
+                limit,
+                &numbers,
+                expected_revision.as_deref(),
+            )?
+        }
         Request::SettingsShow {} => settings::show(session)?,
         Request::SettingsEdit {
             change,
             expected_revision,
         } => settings::edit(session, change, expected_revision.as_deref())?,
-        Request::Check { within } => check::check(session, &within)?,
+        Request::Check { within, against } => check::check(session, &within, against.as_deref())?,
         Request::ReleasePropose {
             items,
             all,
@@ -289,6 +363,7 @@ fn dispatch(
         Request::ReleaseCheck {} => release::check(session)?,
         Request::ReleaseSync {} => release::sync(session)?,
         Request::Diff { from, to } => diff::diff(session, from.as_deref(), to.as_deref())?,
+        Request::Resolve { refs, rev } => crate::refs::resolve(session, &refs, rev.as_deref())?,
         Request::ActivityLog { limit, before } => {
             let entries = live.map_or_else(Vec::new, |l| l.log.page(limit.unwrap_or(50), before));
             json!({ "entries": entries })
@@ -415,5 +490,6 @@ pub(crate) mod tests {
         assert_eq!(v["items"], 0);
         assert_eq!(v["revision"].as_str().unwrap().len(), 32);
         assert_eq!(v["default_unit"], "mm");
+        assert_eq!(v["schema"], 1);
     }
 }

@@ -15,6 +15,10 @@ pub const PLACEMENTS: &str = "placements";
 pub const BOARD_KIND: &str = "ryueda.board";
 pub const PLACEMENT_KIND: &str = "ryueda.placement";
 pub const FORMAT: u64 = 1;
+/// The newest format read; a file is written at 2 only when it holds
+/// what format 1 can't (a stackup, a bottom placement, an inner track, a
+/// via's span).
+pub const NEWEST: u64 = 2;
 pub const TRACKS: &str = "tracks";
 pub const VIAS: &str = "vias";
 pub const HOLES: &str = "holes";
@@ -22,39 +26,100 @@ pub const TRACK_KIND: &str = "ryueda.track";
 pub const VIA_KIND: &str = "ryueda.via";
 pub const HOLE_KIND: &str = "ryueda.hole";
 
-/// A copper layer of a two-layer board.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// A copper layer by its position in the stackup: the top, the `k`th
+/// inner layer from the top (1 or more), or the bottom.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CopperLayer {
     Top,
+    Inner(u8),
     Bottom,
 }
 
 impl CopperLayer {
-    /// Its index in the copper layout's layers.
-    pub fn index(self) -> usize {
+    /// Its index among `n` copper layers; `None` for an inner layer the
+    /// stackup lacks.
+    pub fn index(self, n: usize) -> Option<usize> {
         match self {
-            CopperLayer::Top => 0,
-            CopperLayer::Bottom => 1,
+            CopperLayer::Top => Some(0),
+            CopperLayer::Bottom => Some(n.max(2) - 1),
+            CopperLayer::Inner(k) => {
+                let k = usize::from(k);
+                (k >= 1 && k + 1 < n).then_some(k)
+            }
         }
     }
 
-    /// Its shapes layer: `copper.top` or `copper.bottom`.
-    pub fn name(self) -> &'static str {
-        match self {
-            CopperLayer::Top => "copper.top",
-            CopperLayer::Bottom => "copper.bottom",
+    /// The layer at `index` of `n`.
+    pub fn at(index: usize, n: usize) -> CopperLayer {
+        if index == 0 {
+            CopperLayer::Top
+        } else if index + 1 >= n {
+            CopperLayer::Bottom
+        } else {
+            CopperLayer::Inner(index as u8)
         }
     }
 
-    /// `top`, `bottom`, `copper.top` or `copper.bottom`.
+    /// `top`, `in<k>` or `bottom`: how files and commands name it.
+    pub fn short(self) -> String {
+        match self {
+            CopperLayer::Top => "top".into(),
+            CopperLayer::Bottom => "bottom".into(),
+            CopperLayer::Inner(k) => format!("in{k}"),
+        }
+    }
+
+    /// Its shapes layer: `copper.top`, `copper.in1`, `copper.bottom`.
+    pub fn name(self) -> String {
+        format!("copper.{}", self.short())
+    }
+
+    /// `top`, `in1` … `in32`, `bottom`, each with or without `copper.`.
     pub fn parse(text: &str) -> Option<CopperLayer> {
-        match text {
-            "top" | "copper.top" => Some(CopperLayer::Top),
-            "bottom" | "copper.bottom" => Some(CopperLayer::Bottom),
-            _ => None,
+        let t = text.strip_prefix("copper.").unwrap_or(text);
+        match t {
+            "top" => Some(CopperLayer::Top),
+            "bottom" => Some(CopperLayer::Bottom),
+            _ => {
+                let k = t.strip_prefix("in")?;
+                if k.is_empty() || k.starts_with('0') || !k.bytes().all(|b| b.is_ascii_digit()) {
+                    return None;
+                }
+                let k: u8 = k.parse().ok()?;
+                (usize::from(k) + 2 <= super::stackup::MAX_COPPER).then_some(CopperLayer::Inner(k))
+            }
         }
     }
+}
+
+impl Serialize for CopperLayer {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        s.serialize_str(&self.short())
+    }
+}
+
+impl<'de> Deserialize<'de> for CopperLayer {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        d: D,
+    ) -> std::result::Result<CopperLayer, D::Error> {
+        let text = String::deserialize(d)?;
+        // Files name it bare: `top`, never `copper.top`.
+        (!text.starts_with("copper."))
+            .then(|| CopperLayer::parse(&text))
+            .flatten()
+            .ok_or_else(|| {
+                serde::de::Error::custom(format!(
+                    "{text} isn't a copper layer (top, in1 …, bottom)"
+                ))
+            })
+    }
+}
+
+/// A board file as an answer prints it, at the format it is written in.
+pub fn value<T: Serialize>(t: &T, kind: &str) -> serde_json::Value {
+    let v = serde_json::to_value(t).expect("file types serialize");
+    let format = crate::conn::format_of(kind, &v);
+    crate::doc::to_value(t, kind, format)
 }
 
 /// A track: a polyline of straight segments drawn with a round pen.
@@ -68,7 +133,7 @@ pub struct Track {
     pub points: Vec<Point>,
 }
 
-/// A plated through via.
+/// A plated via: through the board, or blind or buried over a span.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Via {
@@ -76,6 +141,22 @@ pub struct Via {
     pub at: Point,
     pub drill_nm: i64,
     pub diameter_nm: i64,
+    /// The first and last copper layers it joins; the top and the bottom
+    /// when absent (a through via).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<CopperLayer>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<CopperLayer>,
+}
+
+impl Via {
+    /// Its span as layer indices of `n`, if both layers exist and `from`
+    /// lies above `to`.
+    pub fn span(&self, n: usize) -> Option<(usize, usize)> {
+        let f = self.from.unwrap_or(CopperLayer::Top).index(n)?;
+        let t = self.to.unwrap_or(CopperLayer::Bottom).index(n)?;
+        (f < t).then_some((f, t))
+    }
 }
 
 /// An unplated drilled hole.
@@ -96,6 +177,8 @@ pub struct Board {
     pub outline: Contour,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cutouts: Vec<Contour>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stackup: Option<super::stackup::Stackup>,
 }
 
 /// One closed contour: from `start`, each edge to its `to`; closed when
@@ -126,6 +209,31 @@ pub struct Placement {
     pub at: Point,
     #[serde(default)]
     pub rotation_mdeg: i64,
+    /// The side the part sits on; written only for the bottom.
+    #[serde(default, skip_serializing_if = "PlacementSide::is_top")]
+    pub side: PlacementSide,
+}
+
+/// The side of the board a part sits on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlacementSide {
+    #[default]
+    Top,
+    Bottom,
+}
+
+impl PlacementSide {
+    pub fn is_top(&self) -> bool {
+        *self == PlacementSide::Top
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            PlacementSide::Top => "top",
+            PlacementSide::Bottom => "bottom",
+        }
+    }
 }
 
 impl Contour {
@@ -223,8 +331,96 @@ mod tests {
     }
 
     #[test]
+    fn copper_layers_are_named_by_position() {
+        for (text, layer, at4) in [
+            ("top", CopperLayer::Top, 0),
+            ("in1", CopperLayer::Inner(1), 1),
+            ("in2", CopperLayer::Inner(2), 2),
+            ("bottom", CopperLayer::Bottom, 3),
+        ] {
+            assert_eq!(CopperLayer::parse(text), Some(layer));
+            assert_eq!(CopperLayer::parse(&format!("copper.{text}")), Some(layer));
+            assert_eq!(layer.index(4), Some(at4));
+            assert_eq!(layer.name(), format!("copper.{text}"));
+            assert_eq!(serde_json::to_value(layer).unwrap(), json!(text));
+            assert_eq!(
+                serde_json::from_value::<CopperLayer>(json!(text)).unwrap(),
+                layer
+            );
+            assert_eq!(CopperLayer::at(at4, 4), layer);
+        }
+        assert_eq!(CopperLayer::Inner(1).index(2), None);
+        assert_eq!(CopperLayer::Inner(3).index(4), None);
+        assert_eq!(CopperLayer::Bottom.index(2), Some(1));
+        for bad in ["in0", "in", "in01", "in33", "inner", "IN1"] {
+            assert_eq!(CopperLayer::parse(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn files_keep_format_1_until_they_hold_something_new() {
+        let t = |layer: &str| json!({"net": "a", "layer": layer, "width_nm": 1, "points": [[0, 0], [1, 1]]});
+        assert_eq!(crate::conn::format_of(TRACK_KIND, &t("top")), 1);
+        assert_eq!(crate::conn::format_of(TRACK_KIND, &t("in1")), 2);
+        assert_eq!(
+            crate::conn::format_of(VIA_KIND, &json!({"net": "a", "at": [0, 0]})),
+            1
+        );
+        assert_eq!(
+            crate::conn::format_of(VIA_KIND, &json!({"net": "a", "at": [0, 0], "to": "in1"})),
+            2
+        );
+        assert_eq!(crate::conn::format_of(BOARD_KIND, &json!({"name": "b"})), 1);
+        assert_eq!(
+            crate::conn::format_of(BOARD_KIND, &json!({"name": "b", "stackup": {}})),
+            2
+        );
+        assert_eq!(
+            crate::conn::format_of(PLACEMENT_KIND, &json!({"at": [0, 0]})),
+            1
+        );
+        assert_eq!(
+            crate::conn::format_of(PLACEMENT_KIND, &json!({"at": [0, 0], "side": "bottom"})),
+            2
+        );
+        assert_eq!(crate::conn::format_of(HOLE_KIND, &json!({"at": [0, 0]})), 1);
+        assert_eq!(crate::merge::newest(TRACK_KIND), Some(2));
+        assert_eq!(crate::merge::newest(HOLE_KIND), Some(1));
+    }
+
+    #[test]
+    fn a_placements_side_is_written_only_on_the_bottom() {
+        let top = Placement {
+            at: [1, 2],
+            rotation_mdeg: 0,
+            side: PlacementSide::Top,
+        };
+        assert_eq!(
+            value(&top, PLACEMENT_KIND),
+            json!({"kind": PLACEMENT_KIND, "format": 1, "at": [1, 2], "rotation_mdeg": 0})
+        );
+        let bottom = Placement {
+            side: PlacementSide::Bottom,
+            ..top.clone()
+        };
+        let v = value(&bottom, PLACEMENT_KIND);
+        assert_eq!(v["side"], "bottom");
+        assert_eq!(v["format"], 2);
+        let back: Placement = doc::from_value(v, "p.json", PLACEMENT_KIND, NEWEST).unwrap();
+        assert_eq!(back, bottom);
+        let old: Placement = doc::from_value(
+            json!({"kind": PLACEMENT_KIND, "format": 1, "at": [0, 0]}),
+            "p.json",
+            PLACEMENT_KIND,
+            NEWEST,
+        )
+        .unwrap();
+        assert_eq!(old.side, PlacementSide::Top);
+    }
+
+    #[test]
     fn unknown_fields_are_refused() {
-        let v = json!({"kind": PLACEMENT_KIND, "format": 1, "at": [0, 0], "side": "top"});
+        let v = json!({"kind": PLACEMENT_KIND, "format": 1, "at": [0, 0], "flip": true});
         let e = doc::from_value::<Placement>(v, "p.json", PLACEMENT_KIND, FORMAT).unwrap_err();
         assert_eq!(e.code, crate::error::Code::InvalidDocument);
     }
@@ -251,7 +447,7 @@ mod tests {
         let track: Track =
             doc::from_value(t.clone(), "boards/b/tracks/t1.json", TRACK_KIND, FORMAT).unwrap();
         assert_eq!(track.layer, CopperLayer::Bottom);
-        assert_eq!(track.layer.index(), 1);
+        assert_eq!(track.layer.index(2), Some(1));
         assert_eq!(track.layer.name(), "copper.bottom");
         assert_eq!(doc::to_value(&track, TRACK_KIND, FORMAT), t);
         let v = json!({"kind": VIA_KIND, "format": 1, "net": "sda", "at": [5, 6],
@@ -263,7 +459,7 @@ mod tests {
         let hole: Hole =
             doc::from_value(h.clone(), "boards/b/holes/h1.json", HOLE_KIND, FORMAT).unwrap();
         assert_eq!(doc::to_value(&hole, HOLE_KIND, FORMAT), h);
-        let bad = json!({"kind": TRACK_KIND, "format": 1, "net": "x", "layer": "inner",
+        let bad = json!({"kind": TRACK_KIND, "format": 1, "net": "x", "layer": "in0",
                          "width_nm": 1, "points": [[0, 0], [1, 1]]});
         assert!(doc::from_value::<Track>(bad, "t.json", TRACK_KIND, FORMAT).is_err());
         let b = Id::parse("b", "board").unwrap();

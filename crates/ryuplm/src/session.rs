@@ -14,6 +14,18 @@ pub struct Session {
     stamps: Stamps,
     /// The release branch as read, by its refs' key (ryueda's `Session::pdm`).
     pub pdm: Option<(String, ryupdm::history::Releases)>,
+    /// Set by [`Session::opened_now`]: the next refresh is skipped, since
+    /// opening has just read every file (at 100,000 items a second scan
+    /// costs as much as the answer).
+    fresh: bool,
+    /// Counts catalogue loads: what was derived from the catalogue (the
+    /// listing) is good while it stands. Hashing every file for
+    /// [`Session::revision`] would cost more than a list window.
+    generation: u64,
+    /// The item list as last built ([`crate::listing`]), and how many
+    /// were built.
+    listing: Option<crate::listing::Listing>,
+    listings: u64,
 }
 
 pub fn path_of(root: &Path, rel: &str) -> PathBuf {
@@ -67,10 +79,30 @@ pub fn tracked(root: &Path) -> Vec<(String, std::fs::Metadata)> {
         // Files directly under items/ are tracked too, so a misplaced one
         // is reported, not missed.
         out.extend(files(top));
-        for d in dirs(top) {
-            out.extend(files(&format!("{top}/{d}")));
-        }
+        // Each shard listed on its own thread, gathered in order: 100,000
+        // items' metadata took most of a second one folder at a time.
+        let shards: Vec<String> = dirs(top)
+            .into_iter()
+            .map(|d| format!("{top}/{d}"))
+            .collect();
+        let per = shards.len().div_ceil(8).max(1);
+        let listed: Vec<Vec<(String, std::fs::Metadata)>> = std::thread::scope(|s| {
+            let handles: Vec<_> = shards
+                .chunks(per)
+                .map(|c| {
+                    let files = &files;
+                    s.spawn(move || c.iter().flat_map(|d| files(d)).collect::<Vec<_>>())
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("a listing thread doesn't panic"))
+                .collect()
+        });
+        out.extend(listed.into_iter().flatten());
     }
+    // Mapping files (`imports/<name>.json`): one level, no shards.
+    out.extend(files(crate::import::IMPORTS));
     out
 }
 
@@ -103,6 +135,10 @@ impl Session {
             catalogue,
             stamps,
             pdm: None,
+            fresh: false,
+            generation: 0,
+            listing: None,
+            listings: 0,
         })
     }
 
@@ -114,12 +150,37 @@ impl Session {
         &self.catalogue
     }
 
+    /// Marks a session opened for the request about to be answered: its
+    /// files were read just now, so that request's refresh is skipped.
+    pub fn opened_now(&mut self) {
+        self.fresh = true;
+    }
+
     pub fn refresh_changes(&mut self) -> Result<Vec<(String, &'static str)>> {
+        if std::mem::take(&mut self.fresh) {
+            return Ok(Vec::new());
+        }
         let changes = self.stamps.scan(&self.root, listed(&self.root))?;
         if !changes.is_empty() {
             self.catalogue = load(&self.root, &self.stamps)?;
+            self.generation += 1;
         }
         Ok(changes)
+    }
+
+    /// How many times the catalogue has been read again since opening.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// The listing held, taken out, and how many have been built.
+    pub fn take_listing(&mut self) -> (Option<crate::listing::Listing>, u64) {
+        (self.listing.take(), self.listings)
+    }
+
+    pub fn keep_listing(&mut self, listing: crate::listing::Listing) {
+        self.listings = self.listings.max(listing.built());
+        self.listing = Some(listing);
     }
 
     pub fn reload(&mut self) -> Result<()> {

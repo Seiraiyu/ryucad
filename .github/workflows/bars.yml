@@ -1,0 +1,61 @@
+name: Bars
+
+# Dispatch only: a crate's strict bars on the persistent self-hosted runner,
+# a quieter machine than a shared worker (ryuplm-release 1.A, design 934).
+# Each run prints the load and the CPU beside its numbers.
+
+on:
+  workflow_dispatch:
+    inputs:
+      crate:
+        description: The crate whose bar test runs
+        default: ryuplm
+      test:
+        description: The test target
+        default: bar
+      bars:
+        description: The strict switch's variable
+        default: RYUPLM_BARS
+      runs:
+        description: How many times to run it
+        default: "5"
+      runner:
+        description: The self-hosted runner's label
+        type: choice
+        default: cpp-v3-runner-1
+        options:
+          - cpp-v3-runner-1
+          - arc-runner-x86
+
+permissions:
+  contents: read
+
+jobs:
+  bars:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 120
+    env:
+      CRATE: ${{ inputs.crate }}
+      TEST: ${{ inputs.test }}
+      BARS: ${{ inputs.bars }}
+      RUNS: ${{ inputs.runs }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: |
+          if ! command -v rustup >/dev/null; then
+            curl -fsSL https://sh.rustup.rs | sh -s -- -y --default-toolchain none
+            echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+            export PATH="$HOME/.cargo/bin:$PATH"
+          fi
+          rustup toolchain install
+      - name: Build
+        run: cargo test -p "$CRATE" --release --test "$TEST" --no-run
+      - name: Bars
+        run: |
+          lscpu | grep 'Model name' || true
+          nproc
+          for k in $(seq 1 "$RUNS"); do
+            echo "== run $k: $(uptime)"
+            env "$BARS=1" cargo test -p "$CRATE" --release --test "$TEST" -- --nocapture --test-threads=1 || echo "== run $k FAILED"
+          done

@@ -40,17 +40,53 @@ pub fn random(taken: impl Fn(&str) -> bool) -> Result<Id> {
     random_from(std::env::var(SEED_VAR).ok().as_deref(), taken)
 }
 
+/// The `k`th draw of seed `seed`: what [`random_from`] tries `k`th.
+pub fn seeded_bits(seed: &str, k: u64) -> u64 {
+    let mut h = blake3::Hasher::new();
+    h.update(b"ryuplm.id.1\0");
+    h.update(seed.as_bytes());
+    h.update(&k.to_le_bytes());
+    u64::from_le_bytes(h.finalize().as_bytes()[..8].try_into().expect("8 bytes"))
+}
+
+/// The IDs [`random_from`] gives seed `seed` when each is taken before the
+/// next is asked for, in order, in one pass: it tries draws from 0 every
+/// time, so asking it for `n` costs `n²/2` hashes, too slow for the bars'
+/// 100,000 items. The same IDs, so seeded catalogues don't change.
+pub struct Seeded<'a> {
+    seed: &'a str,
+    k: u64,
+    taken: std::collections::HashSet<String>,
+}
+
+impl<'a> Seeded<'a> {
+    pub fn new(seed: &'a str) -> Seeded<'a> {
+        Seeded {
+            seed,
+            k: 0,
+            taken: Default::default(),
+        }
+    }
+}
+
+impl Iterator for Seeded<'_> {
+    type Item = Id;
+    fn next(&mut self) -> Option<Id> {
+        loop {
+            let t = text(seeded_bits(self.seed, self.k));
+            self.k += 1;
+            if self.taken.insert(t.clone()) {
+                return Some(Id::parse(&t, "item").expect("a generated ID parses"));
+            }
+        }
+    }
+}
+
 /// [`random`], with the seed given.
 pub fn random_from(seed: Option<&str>, taken: impl Fn(&str) -> bool) -> Result<Id> {
     for k in 0u64.. {
         let bits = match seed {
-            Some(seed) => {
-                let mut h = blake3::Hasher::new();
-                h.update(b"ryuplm.id.1\0");
-                h.update(seed.as_bytes());
-                h.update(&k.to_le_bytes());
-                u64::from_le_bytes(h.finalize().as_bytes()[..8].try_into().expect("8 bytes"))
-            }
+            Some(seed) => seeded_bits(seed, k),
             None => {
                 let mut b = [0u8; 8];
                 getrandom::fill(&mut b)
@@ -102,6 +138,15 @@ mod tests {
         assert!(generated(id.as_str()));
         assert_eq!(random_from(Some("seed"), |_| false).unwrap(), id);
         let next = random_from(Some("seed"), |s| s == id.as_str()).unwrap();
+        let mut made: Vec<Id> = Vec::new();
+        for _ in 0..50 {
+            made.push(random_from(Some("seed"), |s| made.iter().any(|m| m.as_str() == s)).unwrap());
+        }
+        assert_eq!(
+            Seeded::new("seed").take(50).collect::<Vec<_>>(),
+            made,
+            "one pass, the same IDs"
+        );
         assert_ne!(next, id);
         assert!(!generated("k3v9q2m8x4c1"));
         assert!(!generated("k3v9q2m8x4c1i"));
