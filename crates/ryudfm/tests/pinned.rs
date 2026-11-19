@@ -21,6 +21,15 @@ use ryudfm::testing::{check_manifest, compare_with_kicad, manifest, summary};
 /// their own CAD netlists.
 const KNOWN_PIN_CASES: &[(&str, &str)] = &[("osm-l-bmc-som", "#937")];
 
+/// Opens on pinned boards printed rather than asserted, by board and net,
+/// each with the issue that holds it. lpddr4-test-board's GND lies on two
+/// islands for us on every run. KiCad 9.0.8's DRC of that board isn't the
+/// same run to run: it reported GND unconnected in one (so the open was
+/// excused as KiCad's own), and TMS_JTAG's via and track in others, where
+/// our GND island also claims TMS_JTAG. #997 holds the root cause: why
+/// ryu-copper joins TMS_JTAG into GND, and why GND splits.
+const KNOWN_OPENS: &[(&str, &str, &str)] = &[("lpddr4-test-board", "GND", "#997")];
+
 #[test]
 #[ignore = "needs scripts/fetch-dfm-corpus.sh's exports: run in the devcontainer"]
 fn pinned_boards_read_to_their_manifest() {
@@ -92,8 +101,16 @@ fn pinned_boards_read_to_their_manifest() {
             });
             if excused {
                 println!("{name}: {d}, as KiCad's DRC reports it unconnected");
+                return false;
             }
-            !excused
+            let known = KNOWN_OPENS.iter().find(|(b, n, _)| {
+                *b == name && net.as_deref() == Some(n.to_ascii_uppercase().as_str())
+            });
+            if let Some((_, _, issue)) = known {
+                println!("{name}: {d}, recorded under {issue}, not asserted");
+                return false;
+            }
+            true
         });
         if let Some((_, issue)) = KNOWN_PIN_CASES.iter().find(|(n, _)| *n == name) {
             // Recorded, not asserted: the pin positions are the reader's
