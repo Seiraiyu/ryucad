@@ -218,6 +218,32 @@ pub fn judge(r: &RulesFile, preset: &Preset, classes: &BTreeSet<Id>) -> Vec<Faul
         }
         judge_set(s, preset, &at, true, &mut out);
     }
+    for (id, w) in &r.waivers {
+        if NOT_WAIVABLE.contains(&w.code) {
+            out.push(
+                Fault::error(
+                    Code::FindingNotWaivable,
+                    format!(
+                        "waiver {id}: {} can't be waived",
+                        serde_json::json!(w.code).as_str().unwrap_or("")
+                    ),
+                )
+                .with("pointer", format!("/waivers/{id}")),
+            );
+        }
+        if id.len() != 16
+            || !id.bytes().all(|b| b.is_ascii_hexdigit())
+            || w.reason.trim().is_empty()
+        {
+            out.push(
+                Fault::error(
+                    Code::InvalidDocument,
+                    format!("waiver {id} needs a finding's ID (16 hex digits) and a reason"),
+                )
+                .with("pointer", format!("/waivers/{id}")),
+            );
+        }
+    }
     out
 }
 
@@ -505,6 +531,87 @@ pub fn of(p: &crate::project::Project, b: &super::load::BoardFiles) -> crate::er
     Ok(Rules::new(preset, rules, &n))
 }
 
+/// Codes a waiver can't waive: a short is a different circuit from the
+/// schematic; an unbuildable footprint leaves copper out of the check.
+pub const NOT_WAIVABLE: [Code; 2] = [Code::NetShort, Code::BoardFootprintUnsupported];
+
+/// A finding's measurement, for codes that have one, and whether a larger
+/// value is worse (a drill over the maximum) or a smaller one (the rest).
+pub fn measurement(code: Code, details: &serde_json::Value) -> Option<(i64, bool)> {
+    let get = |k: &str| details[k].as_i64();
+    match code {
+        Code::DrcClearance
+        | Code::DrcMaskClearance
+        | Code::DrcHoleClearance
+        | Code::DrcEdgeClearance
+        | Code::DrcHoleSpacing => Some((get("distance_nm")?, false)),
+        Code::DrcTrackWidth => Some((get("width_nm")?, false)),
+        Code::DrcAnnularRing => Some((get("ring_nm")?, false)),
+        Code::DrcDrill => {
+            let d = get("drill_nm")?;
+            Some((d, get("max_nm").is_some_and(|m| d > m)))
+        }
+        _ => None,
+    }
+}
+
+/// Marks each finding a waiver holds; a finding that got worse than its
+/// waiver's limit stays an error with `details.waiver_exceeded`. Returns
+/// the waivers no finding used, as `waiver_unused` warnings.
+pub fn apply_waivers(
+    findings: &mut [crate::board::drc::Finding],
+    waivers: &BTreeMap<String, Waiver>,
+    board: &str,
+) -> Vec<crate::board::drc::Finding> {
+    let mut used = BTreeSet::new();
+    for f in findings.iter_mut() {
+        let Some(w) = waivers.get(&f.id) else {
+            continue;
+        };
+        if NOT_WAIVABLE.contains(&f.code) {
+            continue;
+        }
+        used.insert(f.id.clone());
+        let worse = match (w.limit, measurement(f.code, &f.details)) {
+            (Some(limit), Some((now, larger_worse))) => {
+                if larger_worse {
+                    now > limit
+                } else {
+                    now < limit
+                }
+            }
+            _ => false,
+        };
+        let about = serde_json::json!({"reason": w.reason, "by": w.by, "limit": w.limit});
+        if worse {
+            if let Some(d) = f.details.as_object_mut() {
+                let mut x = about.clone();
+                x["code"] = serde_json::json!(Code::WaiverExceeded);
+                d.insert("waiver_exceeded".into(), x);
+            }
+        } else {
+            f.waived = Some(about);
+        }
+    }
+    waivers
+        .iter()
+        .filter(|(id, w)| !used.contains(*id) && !NOT_WAIVABLE.contains(&w.code))
+        .map(|(id, w)| {
+            crate::board::drc::finding(
+                Code::WaiverUnused,
+                crate::fault::Severity::Warning,
+                board,
+                vec![format!("{board}:waiver/{id}")],
+                format!(
+                    "waiver {id} ({}) waives a finding the board doesn't have",
+                    w.reason
+                ),
+                serde_json::json!({"waiver": id, "code": w.code, "refs": w.refs}),
+            )
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -684,5 +791,112 @@ mod tests {
         assert_eq!(v["board"]["clearance_nm"]["source"], "preset:jlc-2l");
         assert_eq!(v["classes"]["power"]["clearance_nm"]["value"], 250000);
         assert_eq!(v["nets"]["rail:vin"], "power");
+    }
+    fn finding(
+        code: Code,
+        refs: &[&str],
+        details: serde_json::Value,
+    ) -> crate::board::drc::Finding {
+        crate::board::drc::finding(
+            code,
+            crate::fault::Severity::Error,
+            "b",
+            refs.iter().map(|r| (*r).to_owned()).collect(),
+            "m".into(),
+            details,
+        )
+    }
+
+    fn waiver(f: &crate::board::drc::Finding, limit: Option<i64>) -> (String, Waiver) {
+        (
+            f.id.clone(),
+            Waiver {
+                code: f.code,
+                refs: f.refs.clone(),
+                reason: "measured".into(),
+                by: "agent".into(),
+                limit,
+            },
+        )
+    }
+
+    #[test]
+    fn a_waiver_holds_at_and_over_its_limit_and_not_under() {
+        let gap = |d: i64| {
+            finding(
+                Code::DrcClearance,
+                &["b:R1/1", "b:R2/1"],
+                serde_json::json!({"distance_nm": d, "rule_nm": 100_000}),
+            )
+        };
+        let waivers: BTreeMap<String, Waiver> =
+            [waiver(&gap(90_000), Some(90_000))].into_iter().collect();
+        for (d, waived) in [(95_000, true), (90_000, true), (89_999, false)] {
+            let mut f = vec![gap(d)];
+            let unused = apply_waivers(&mut f, &waivers, "b");
+            assert!(unused.is_empty());
+            assert_eq!(f[0].waived.is_some(), waived, "{d}");
+            assert_eq!(f[0].is_error(), !waived, "{d}");
+            if !waived {
+                assert_eq!(f[0].details["waiver_exceeded"]["limit"], 90_000);
+                assert_eq!(f[0].details["waiver_exceeded"]["code"], "waiver_exceeded");
+            }
+        }
+    }
+
+    #[test]
+    fn a_drill_over_the_maximum_is_worse_when_larger() {
+        let big = |d: i64| {
+            finding(
+                Code::DrcDrill,
+                &["b:hole/h1"],
+                serde_json::json!({"drill_nm": d, "min_nm": 500_000, "max_nm": 6_300_000}),
+            )
+        };
+        let w: BTreeMap<String, Waiver> = [waiver(&big(6_400_000), Some(6_400_000))]
+            .into_iter()
+            .collect();
+        let mut f = vec![big(6_500_000)];
+        apply_waivers(&mut f, &w, "b");
+        assert!(f[0].waived.is_none());
+        let mut f = vec![big(6_350_000)];
+        apply_waivers(&mut f, &w, "b");
+        assert!(f[0].waived.is_some());
+    }
+
+    #[test]
+    fn an_unused_waiver_is_a_warning_and_shorts_are_not_waived() {
+        let short = finding(Code::NetShort, &["b:R1/1"], serde_json::Value::Null);
+        let w: BTreeMap<String, Waiver> = [
+            waiver(&short, None),
+            (
+                "0123456789abcdef".into(),
+                Waiver {
+                    code: Code::DrcClearance,
+                    refs: vec![],
+                    reason: "gone".into(),
+                    by: "agent".into(),
+                    limit: None,
+                },
+            ),
+        ]
+        .into_iter()
+        .collect();
+        let mut f = vec![short.clone()];
+        let unused = apply_waivers(&mut f, &w, "b");
+        assert!(f[0].waived.is_none(), "a short is never waived");
+        assert_eq!(unused.len(), 1);
+        assert_eq!(unused[0].code, Code::WaiverUnused);
+        assert!(!unused[0].is_error());
+        assert_eq!(unused[0].refs, ["b:waiver/0123456789abcdef"]);
+        let mut file = RulesFile::default();
+        file.waivers = w;
+        let faults = judge(&file, &JLC_2L, &classes());
+        assert!(
+            faults
+                .iter()
+                .any(|x| x.error.code == Code::FindingNotWaivable),
+            "{faults:?}"
+        );
     }
 }

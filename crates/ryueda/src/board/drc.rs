@@ -37,11 +37,15 @@ pub struct Finding {
     pub message: String,
     #[serde(skip_serializing_if = "Value::is_null")]
     pub details: Value,
+    /// The waiver that waives it (`rules.json`'s), when it holds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub waived: Option<Value>,
 }
 
 impl Finding {
+    /// An error not waived.
     pub fn is_error(&self) -> bool {
-        self.severity == Severity::Error
+        self.severity == Severity::Error && self.waived.is_none()
     }
 }
 
@@ -81,6 +85,7 @@ pub fn finding(
         refs,
         message,
         details,
+        waived: None,
     }
 }
 
@@ -1075,7 +1080,15 @@ impl BoardCheck {
     }
 
     pub fn warnings(&self) -> usize {
-        self.findings.len() - self.errors()
+        self.findings
+            .iter()
+            .filter(|f| f.severity == Severity::Warning)
+            .count()
+    }
+
+    /// Errors a waiver holds.
+    pub fn waived(&self) -> usize {
+        self.findings.iter().filter(|f| f.waived.is_some()).count()
     }
 }
 
@@ -1329,7 +1342,10 @@ pub fn check_shapes(p: &Project, b: &BoardFiles, shapes: Arc<BoardShapes>) -> Re
     };
     let mut findings: Vec<Finding> = RULES.par_iter().flat_map_iter(|r| r(&ctx)).collect();
     sort(&mut findings);
-    let findings = unique(findings);
+    let mut findings = unique(findings);
+    let unused = super::rules::apply_waivers(&mut findings, &rules.file.waivers, &board);
+    findings.extend(unused);
+    sort(&mut findings);
     Ok(BoardCheck {
         shapes: shapes.clone(),
         conn,
