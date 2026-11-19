@@ -7,7 +7,9 @@
 //! canonically and reads back; the CSV and XLSX readers on any bytes never
 //! panic, nor does a small source planned through the seeded import, nor
 //! the JSON and XML readers and their surveys, nor a seeded history
-//! planned from any bytes, nor a date read by any pattern.
+//! planned from any bytes, nor a date read by any pattern; a reference
+//! that parses prints back the same and stands or doesn't without
+//! panicking.
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
@@ -16,7 +18,7 @@ use std::collections::BTreeMap;
 fuzz_target!(|data: &[u8]| {
     let Some((&mode, rest)) = data.split_first() else { return };
     let id = ryuplm::id::Id::parse("k3v9q2m8x4c1p", "item").unwrap();
-    match mode % 13 {
+    match mode % 14 {
         0 => {
             if let Ok(item) = ryuplm::item::Item::read(&id, rest) {
                 let text = item.to_text();
@@ -127,6 +129,20 @@ fuzz_target!(|data: &[u8]| {
                 let _ = ryuplm::import::rows::Table::from_records(r);
             }
             let _ = ryuplm::import::xml::survey(rest, None);
+        }
+        12 => {
+            // A reference: what parses prints back as it was read, and is
+            // judged against the seeded structure without panicking.
+            if let Ok(s) = std::str::from_utf8(rest)
+                && let Some(r) = ryuplm::refs::Ref::parse(s)
+            {
+                assert_eq!(r.text(), s);
+                assert_eq!(ryuplm::refs::Ref::parse(&r.text()), Some(r.clone()));
+                let (f, _) = ryuplm::testing::structure("fuzz", 31);
+                if let Ok(c) = ryuplm::load::Catalogue::load(&f) {
+                    let _ = ryuplm::refs::standing(&c, &r);
+                }
+            }
         }
         _ => {
             // A seeded history planned from any bytes, and any first line

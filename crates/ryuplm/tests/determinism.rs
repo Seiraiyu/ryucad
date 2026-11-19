@@ -84,6 +84,31 @@ fn structure_answers_the_same_everywhere() {
             .str(&serde_json::to_string(&rows).unwrap())
             .str(&serde_json::to_string(&problems).unwrap());
     }
+    // The index (design 938): every byte of it, and references' standing.
+    let mut all = ryuplm::judge::all(&files, &cat, &Default::default());
+    all.extend(ryuplm::bom::joined(&cat, &mut reps, &at));
+    let mut out = Vec::new();
+    ryuplm::index::render(
+        &ryuplm::index::Parts {
+            cat: &cat,
+            src: &files,
+            releases: &Default::default(),
+            has_repo: false,
+            faults: &all,
+            rev: "working",
+            commit: None,
+        },
+        &mut reps,
+        &at,
+        &mut out,
+    )
+    .unwrap();
+    g.section("index").bytes(&out);
+    for id in cat.items.keys().take(40) {
+        let r = ryuplm::refs::Ref::Item(id.clone());
+        g.section("resolve")
+            .str(&serde_json::to_string(&ryuplm::refs::standing(&cat, &r)).unwrap());
+    }
     g.finish();
 }
 
