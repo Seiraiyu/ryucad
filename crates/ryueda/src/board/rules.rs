@@ -243,6 +243,11 @@ pub struct Rules {
 pub const PLACEMENT_GRID_NM: i64 = 100_000;
 
 impl Rules {
+    /// A preset's rules alone: no rules.json, no classes.
+    pub fn plain(preset: &Preset) -> Rules {
+        Rules::from_parts(std::sync::Arc::new(preset.clone()), None, BTreeMap::new())
+    }
+
     pub fn from_parts(
         preset: std::sync::Arc<Preset>,
         file: Option<RulesFile>,

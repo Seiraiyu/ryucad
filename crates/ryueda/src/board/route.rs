@@ -165,7 +165,7 @@ pub fn track_add(
     let unit = p.manifest.default_unit;
     let b = &p.boards[&id];
     let file = board_of(b)?;
-    let preset = super::preset::by_name(&file.preset).unwrap_or(super::preset::DEFAULT);
+    let rules = super::rules::of(p, b)?;
     let nets = nets(p, &file.design)?;
     let mut taken: BTreeSet<String> = b.tracks.keys().map(ToString::to_string).collect();
     let mut w = Writes::default();
@@ -177,7 +177,7 @@ pub fn track_add(
         let net = net_of(&nets, &file.design, net)?;
         let layer = layer_of(field(a, "layer"), super::stackup::copper_count(file))?;
         let width = match field(a, "width") {
-            None => preset.default_track_width_nm,
+            None => rules.track_width_default(Some(net.as_str())).value,
             Some(v) => positive(v, unit, "width")?,
         };
         let path = field(a, "path").and_then(Value::as_array).ok_or_else(|| {
@@ -348,7 +348,7 @@ pub fn via_add(
     let unit = p.manifest.default_unit;
     let b = &p.boards[&id];
     let file = board_of(b)?;
-    let preset = super::preset::by_name(&file.preset).unwrap_or(super::preset::DEFAULT);
+    let rules = super::rules::of(p, b)?;
     let nets = nets(p, &file.design)?;
     let mut taken: BTreeSet<String> = b.vias.keys().map(ToString::to_string).collect();
     let mut w = Writes::default();
@@ -366,11 +366,11 @@ pub fn via_add(
             b,
         )?;
         let drill = match field(a, "drill") {
-            None => preset.default_via_drill_nm,
+            None => rules.via_default(Some(net.as_str())).0.drill_nm,
             Some(v) => positive(v, unit, "drill")?,
         };
         let diameter = match field(a, "diameter") {
-            None => preset.default_via_diameter_nm,
+            None => rules.via_default(Some(net.as_str())).0.diameter_nm,
             Some(v) => positive(v, unit, "diameter")?,
         };
         let vid = new_id(field(a, "id").and_then(Value::as_str), "via", |s| {

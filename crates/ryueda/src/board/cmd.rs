@@ -336,6 +336,10 @@ pub fn drc(session: &mut Session, board: &str, codes: &[String]) -> Result<Value
     if board_of(&session.project().boards[&id]).is_ok_and(|f| f.stackup.is_some()) {
         v["layer_rules"] = c.preset.layer_rules_json();
     }
+    // ryueda 7.B: the board's own rules, resolved, when it has them.
+    if session.project().boards[&id].rules.is_some() {
+        v["board_rules"] = c.rules.to_json();
+    }
     if errors > 0 {
         return Err(Error::new(
             Code::CheckFailed,
