@@ -377,6 +377,68 @@ pub fn import_run(
     }
 }
 
+/// What `ryuplm number` asks.
+pub enum Ask {
+    /// `count` numbers of `scheme` (or of the one that applies, by
+    /// `class`), reserved without creating items.
+    Next {
+        scheme: Option<String>,
+        class: Option<String>,
+        count: u64,
+        days: Option<u64>,
+    },
+    /// Numbers typed by hand, reserved to this catalogue, all or none.
+    Reserve { numbers: Vec<String>, days: Option<u64> },
+    /// Who holds a number in the organization.
+    Who { number: String },
+    /// The live reservations: this catalogue's, or the organization's
+    /// with `all`; only the caller's with `mine`.
+    List {
+        mine: bool,
+        all: bool,
+        after: Option<String>,
+    },
+}
+
+/// `ryuplm number`: the ledger asked directly, for a catalogue whose
+/// ledger is on. The answer is the service's, plus `repo`. There is
+/// nothing local to fall back to, so a ledger that can't be asked, or a
+/// catalogue whose ledger is off, is `ledger_unavailable`.
+pub fn number(send: &mut Sender, open: &dyn Fn() -> Result<Ledger>, ask: Ask) -> Result<Value> {
+    let (next, class) = match &ask {
+        Ask::Next { scheme, class, .. } => (Some(scheme.clone().unwrap_or_default()), class.clone()),
+        _ => (None, None),
+    };
+    let local = send(Request::NumberLocal {
+        next,
+        class,
+        item: None,
+    })?;
+    if local["ledger"] != json!(true) {
+        return Err(off());
+    }
+    let catalogue = local["catalogue"].as_str().unwrap_or_default().to_owned();
+    let l = open()?;
+    let mut v = match ask {
+        Ask::Next { count, days, .. } => l.next(
+            &catalogue,
+            local["template"].as_str().unwrap_or_default(),
+            count,
+            local["floor"].as_u64().unwrap_or(0),
+            days,
+        )?,
+        Ask::Reserve { numbers, days } => l.reserve(&catalogue, &numbers, days)?,
+        Ask::Who { number } => l.who(&number)?,
+        Ask::List { mine, all, after } => {
+            l.list((!all).then_some(catalogue.as_str()), mine, after.as_deref())?
+        }
+    };
+    if let Some(o) = v.as_object_mut() {
+        o.insert("repo".into(), json!(l.slug()));
+    }
+    Ok(v)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

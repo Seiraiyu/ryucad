@@ -276,6 +276,8 @@ fn every_protocol_method_has_a_command() {
         ("import.check", &["import", "check"]),
         ("import.run", &["import", "run"]),
         ("import.list", &["import", "list"]),
+        // Read by the CLI before it asks the ledger (ryuplm 2.B).
+        ("number.local", &["number", "next"]),
         ("settings.show", &["settings", "show"]),
         ("settings.edit", &["settings", "edit"]),
         ("check", &["check"]),

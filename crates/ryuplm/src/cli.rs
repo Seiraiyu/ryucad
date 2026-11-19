@@ -92,6 +92,11 @@ enum Command {
     /// mapping (imports/<name>.json) the user or agent writes.
     #[command(subcommand)]
     Import(ImportCmd),
+    /// The organization's ledger of part numbers (design 936), for a
+    /// catalogue whose ledger is on: reserve numbers, reserve by hand, who
+    /// holds a number, the live reservations.
+    #[command(subcommand)]
+    Number(NumberCmd),
     /// Every item whose own lines or representations' lines use ITEM:
     /// here, in other catalogues' checkouts, and in their releases.
     WhereUsed {
@@ -241,6 +246,43 @@ enum ImportCmd {
     },
     /// The mapping files, and how many items each has made.
     List,
+}
+
+#[derive(Subcommand)]
+enum NumberCmd {
+    /// Reserve the next COUNT numbers of SCHEME (or of the one that
+    /// applies) without creating items.
+    Next {
+        scheme: Option<String>,
+        #[arg(long)]
+        class: Option<String>,
+        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u64).range(1..=100_000))]
+        count: u64,
+        /// Days each stays reserved, 1 to 365 (30 by default).
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=365))]
+        days: Option<u64>,
+    },
+    /// Reserve numbers typed by hand to this catalogue, all or none.
+    Reserve {
+        #[arg(required = true)]
+        numbers: Vec<String>,
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=365))]
+        days: Option<u64>,
+    },
+    /// Who holds NUMBER in the organization.
+    Who { number: String },
+    /// This catalogue's live reservations, 1,000 a page.
+    List {
+        /// Only the ones you reserved.
+        #[arg(long)]
+        mine: bool,
+        /// The whole organization's, not just this catalogue's.
+        #[arg(long)]
+        all: bool,
+        /// The page after this number (the last page's `after`).
+        #[arg(long)]
+        after: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -866,13 +908,15 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
         Command::Participants => (root()?, Request::ParticipantList {}),
         Command::Undo { entry } => (root()?, Request::Undo { entry: *entry }),
         Command::Redo { entry } => (root()?, Request::Redo { entry: *entry }),
-        // Version, Init, Watch, Daemon, Git and Merge are not requests.
+        // Version, Init, Watch, Daemon, Git, Merge and Number are not
+        // requests.
         Command::Version
         | Command::Init { .. }
         | Command::Watch { .. }
         | Command::Daemon(_)
         | Command::Git(_)
-        | Command::Merge(_) => return Ok(None),
+        | Command::Merge(_)
+        | Command::Number(_) => return Ok(None),
     }))
 }
 
@@ -947,6 +991,35 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
                 *count,
                 Duration::from_secs(*timeout),
             )
+        }
+        Command::Number(cmd) => {
+            let root = find_root(&here)?;
+            let ask = match cmd {
+                NumberCmd::Next { scheme, class, count, days } => ryuplm::ledger::Ask::Next {
+                    scheme: scheme.clone(),
+                    class: class.clone(),
+                    count: *count,
+                    days: *days,
+                },
+                NumberCmd::Reserve { numbers, days } => ryuplm::ledger::Ask::Reserve {
+                    numbers: numbers.clone(),
+                    days: *days,
+                },
+                NumberCmd::Who { number } => ryuplm::ledger::Ask::Who { number: number.clone() },
+                NumberCmd::List { mine, all, after } => ryuplm::ledger::Ask::List {
+                    mine: *mine,
+                    all: *all,
+                    after: after.clone(),
+                },
+            };
+            let mut sent = Vec::new();
+            let out = {
+                let mut send_one = |r: Request| send(cli, &root, r, &mut sent);
+                let open = || ryuplm::ledger::Ledger::open(&root);
+                ryuplm::ledger::number(&mut send_one, &open, ask)
+            };
+            warnings.extend(sent);
+            out
         }
         cmd => {
             let Some((root, req)) = request(cmd, &here)? else {

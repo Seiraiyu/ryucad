@@ -128,3 +128,46 @@ fn without_the_ledger_no_call_is_made() {
     assert!(fake.seen.lock().unwrap().is_empty());
     ok(&c, &fake.url, &["daemon", "stop"]);
 }
+
+#[test]
+fn number_commands() {
+    let c = catalogue(true);
+    let (fake, state) = Ledger::start("acme/widgets");
+    let u = fake.url.as_str();
+    let v = ok(&c, u, &["number", "next", "--count", "3"]);
+    assert_eq!(v["result"]["numbers"], json!(["MECH-00001", "MECH-00002", "MECH-00003"]));
+    assert_eq!(v["result"]["repo"], "acme/widgets");
+    ok(&c, u, &["number", "reserve", "100-0042 rev", "100-0043", "--days", "7"]);
+    assert!(fake.seen.lock().unwrap().last().unwrap().body.contains("\"days\":7"));
+    let v = ok(&c, u, &["number", "who", "100-0042 rev"]);
+    assert_eq!(v["result"]["holders"][0]["kind"], "reserved");
+    let v = ok(&c, u, &["number", "list"]);
+    assert_eq!(v["result"]["reservations"].as_array().unwrap().len(), 5);
+    // Held for another catalogue's item: refused, naming the holder.
+    state.lock().unwrap().bound.insert(
+        "B-1".into(),
+        ("fedcba9876543210fedcba9876543210".into(), "k3v9q2m8x4c1p".into()),
+    );
+    let (code, v) = run(&c, u, &["number", "reserve", "B-1"]);
+    assert_eq!((code, v["error"]["code"].as_str()), (1, Some("part_number_taken")), "{v}");
+    assert_eq!(v["error"]["details"]["service"]["taken"][0]["holders"][0]["item"], "k3v9q2m8x4c1p");
+    // Offline: nothing local to fall back to.
+    let (code, v) = run(&c, OFFLINE, &["number", "who", "B-1"]);
+    assert_eq!((code, v["error"]["code"].as_str()), (4, Some("ledger_unavailable")), "{v}");
+    let (code, _) = run(&c, u, &["number", "next", "--count", "0"]);
+    assert_eq!(code, 2);
+    ok(&c, u, &["daemon", "stop"]);
+}
+
+#[test]
+fn number_commands_need_the_ledger_on() {
+    let c = catalogue(false);
+    let (fake, _) = Ledger::start("acme/widgets");
+    let (code, v) = run(&c, &fake.url, &["number", "list"]);
+    assert_eq!(
+        (code, v["error"]["code"].as_str(), v["error"]["details"]["why"].as_str()),
+        (4, Some("ledger_unavailable"), Some("ledger_off"))
+    );
+    assert!(fake.seen.lock().unwrap().is_empty());
+    ok(&c, &fake.url, &["daemon", "stop"]);
+}
