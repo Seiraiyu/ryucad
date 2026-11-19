@@ -212,9 +212,10 @@ fn where_used_across_the_organization_asks_the_service() {
     // Another schema is refused, never half read.
     let two = Fake::start(vec![json("GET", &path, 200, j!({"schema": 2}))]);
     let (code, v) = ryuplm(&root, &two.url, &["where-used", &id, "--org"]);
+    // review_failed is not the agent's fault: exit 4 (Code::exit_code).
     assert_eq!(
         (code, &v["error"]["code"]),
-        (1, &j!("review_failed")),
+        (4, &j!("review_failed")),
         "{v}"
     );
     // --org asks the service only: the local flags don't go with it.
