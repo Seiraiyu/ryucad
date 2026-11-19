@@ -647,6 +647,9 @@ fn lines(
     let Some(b) = &m.bom else { return Ok(()) };
     let name = m.name.as_str();
     let mut refusals = Vec::new();
+    if b.level.is_some() {
+        refusals.extend(listings_differ(rows));
+    }
     let root: Option<Id> = match &b.root {
         Some(r) => Some(
             by_key
@@ -804,6 +807,72 @@ fn lines(
         .with("refusals", &refusals));
     }
     Ok(())
+}
+
+/// An indented BOM lists a subassembly's children again under each place
+/// it is used. Each later listing must name the same children under the
+/// same find numbers as the first listing that has any; a listing with
+/// none only names the subassembly again (question 1220). Quantities and
+/// refdes of a repeated placement are [`lines`]' own check, so one row is
+/// refused once. Refused at the first row that differs, or at the repeat's
+/// own row when it leaves a child out.
+fn listings_differ(rows: &[Mapped]) -> Vec<super::rows::Refusal> {
+    type Child<'a> = (&'a str, Option<&'a str>);
+    type Listing<'a> = (u64, Vec<(Child<'a>, u64)>);
+    // Each row opens a listing of its own key; a row with a parent joins
+    // the parent's latest listing.
+    let mut listings: BTreeMap<&str, Vec<Listing>> = BTreeMap::new();
+    for r in rows {
+        let rec = &r.record;
+        if let Some(pk) = &rec.parent
+            && let Some(open) = listings.get_mut(pk.as_str()).and_then(|v| v.last_mut())
+        {
+            open.1
+                .push(((rec.key.as_str(), rec.find.as_deref()), rec.at));
+        }
+        listings
+            .entry(rec.key.as_str())
+            .or_default()
+            .push((rec.at, Vec::new()));
+    }
+    let mut out = Vec::new();
+    for (key, ls) in &mut listings {
+        for (_, l) in ls.iter_mut() {
+            l.sort();
+        }
+        let mut listed = ls.iter().filter(|(_, l)| !l.is_empty());
+        let Some((_, first)) = listed.next() else {
+            continue;
+        };
+        let names: Vec<Child> = first.iter().map(|(c, _)| *c).collect();
+        let child = |c: &Child| format!("{:?} (find {:?})", c.0, c.1);
+        for (at, again) in listed {
+            if let Some((c, row)) = again.iter().find(|(c, _)| names.binary_search(c).is_err()) {
+                out.push(super::rows::Refusal::at(
+                    *row,
+                    None,
+                    format!(
+                        "{key:?} is listed again with {}, which its first listing doesn't have",
+                        child(c)
+                    ),
+                ));
+            } else if let Some(c) = names
+                .iter()
+                .find(|c| again.binary_search_by(|(a, _)| a.cmp(c)).is_err())
+            {
+                out.push(super::rows::Refusal::at(
+                    *at,
+                    None,
+                    format!(
+                        "{key:?} is listed again without {}, which its first listing has",
+                        child(c)
+                    ),
+                ));
+            }
+        }
+    }
+    out.sort_by_key(|r| r.row);
+    out
 }
 
 /// `import_missing` for each item this import made whose key the source
@@ -1361,6 +1430,50 @@ pub(crate) mod tests {
         .err()
         .map(|e| e.code);
         assert_eq!(e, Some(Code::InvalidDocument));
+    }
+
+    #[test]
+    fn an_indented_bom_refuses_a_subassembly_listed_two_ways() {
+        let f = files(&[]);
+        let cat = Catalogue::load(&f).unwrap();
+        let config = Config::read_in(&f, "ryuplm").unwrap();
+        let run = |csv: &str| {
+            plan(
+                &f,
+                &cat,
+                &config,
+                &indented(),
+                &rows(&indented(), csv),
+                None,
+                100,
+            )
+        };
+        let refused_at = |csv: &str| {
+            run(csv)
+                .err()
+                .map(|e| (e.code, e.details["refusals"][0]["row"].clone()))
+        };
+        // Rows: header 1, TOP 2, A 3, A1 4, A2 5, B 6, A again 7.
+        let head = "Lvl,PN,Qty,Find\n0,TOP,,\n1,A,1,10\n2,A1,2,10\n2,A2,1,20\n1,B,1,20\n2,A,1,10\n";
+        // The same children, in another order: one subassembly.
+        assert!(run(&format!("{head}3,A2,1,20\n3,A1,2,10\n")).is_ok());
+        // Listed once with its children, then only named: it passes.
+        assert!(run(head).is_ok());
+        // A child under another find number.
+        assert_eq!(
+            refused_at(&format!("{head}3,A1,2,30\n3,A2,1,20\n")),
+            Some((Code::InvalidDocument, json!(8)))
+        );
+        // An extra child.
+        assert_eq!(
+            refused_at(&format!("{head}3,A1,2,10\n3,A2,1,20\n3,A3,1,30\n")),
+            Some((Code::InvalidDocument, json!(10)))
+        );
+        // A missing child: refused at the repeat's own row.
+        assert_eq!(
+            refused_at(&format!("{head}3,A1,2,10\n")),
+            Some((Code::InvalidDocument, json!(7)))
+        );
     }
 
     #[test]
