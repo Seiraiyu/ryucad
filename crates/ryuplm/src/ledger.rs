@@ -9,6 +9,7 @@
 use crate::error::{Code, Error, Result};
 use crate::proto::Request;
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 /// Overrides the `review.url` preference.
@@ -287,6 +288,95 @@ pub fn numbered(
     }
 }
 
+/// `import.run` (not a dry run): on a catalogue whose ledger is on, a dry
+/// run at the catalogue's revision says how many numbers each scheme
+/// needs (`would_reserve`), the ledger hands them out in one `next` call
+/// per scheme, and the run takes them at that same revision. A dry run,
+/// a request already carrying numbers, and any request on a catalogue
+/// whose ledger is off are sent unchanged. When the ledger can't be
+/// asked, the run numbers locally and `warnings` says why.
+pub fn import_run(
+    send: &mut Sender,
+    open: &dyn Fn() -> Result<Ledger>,
+    req: Request,
+    warnings: &mut Vec<String>,
+) -> Result<Value> {
+    let (name, file, prefer, limit, expected) = match req {
+        Request::ImportRun {
+            name,
+            file,
+            dry_run: false,
+            prefer,
+            limit,
+            expected_revision,
+            numbers,
+        } if numbers.is_empty() => (name, file, prefer, limit, expected_revision),
+        other => return send(other),
+    };
+    let request = |dry_run: bool, numbers: BTreeMap<String, Vec<String>>, at: Option<String>| {
+        Request::ImportRun {
+            name: name.clone(),
+            file: file.clone(),
+            dry_run,
+            prefer: prefer.clone(),
+            limit,
+            expected_revision: at,
+            numbers,
+        }
+    };
+    let local = send(Request::NumberLocal {
+        next: None,
+        class: None,
+        item: None,
+    })?;
+    if local["ledger"] != json!(true) {
+        return send(request(false, BTreeMap::new(), expected));
+    }
+    let at = expected.or_else(|| local["revision"].as_str().map(str::to_owned));
+    let dry = send(request(true, BTreeMap::new(), at.clone()))?;
+    let wanted: Vec<Value> = dry["would_reserve"].as_array().cloned().unwrap_or_default();
+    if wanted.is_empty() {
+        return send(request(false, BTreeMap::new(), at));
+    }
+    let catalogue = local["catalogue"].as_str().unwrap_or_default().to_owned();
+    let mut given: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut expires = Value::Null;
+    let asked = open().and_then(|l| {
+        for w in &wanted {
+            let v = l.next(
+                &catalogue,
+                w["template"].as_str().unwrap_or_default(),
+                w["count"].as_u64().unwrap_or(0),
+                w["floor"].as_u64().unwrap_or(0),
+                None,
+            )?;
+            let numbers: Vec<String> = serde_json::from_value(v["numbers"].clone()).map_err(|e| {
+                Error::new(Code::ReviewFailed, format!("the ledger's numbers don't read: {e}"))
+            })?;
+            given.insert(w["scheme"].as_str().unwrap_or_default().to_owned(), numbers);
+            expires = v["expires_at"].clone();
+        }
+        Ok(())
+    });
+    match asked {
+        Ok(()) => {
+            let (count, requests) = (given.values().map(Vec::len).sum::<usize>(), given.len());
+            let mut out = send(request(false, given, at))?;
+            out["ledger"] = json!({"reserved": true, "numbers": count, "requests": requests,
+                                   "expires_at": expires});
+            Ok(out)
+        }
+        Err(e) if e.code == Code::LedgerUnavailable => {
+            warnings.push(warning(&e));
+            let mut out = send(request(false, BTreeMap::new(), at))?;
+            out["ledger"] =
+                json!({"reserved": false, "code": "ledger_unavailable", "why": e.details["why"]});
+            Ok(out)
+        }
+        Err(e) => Err(e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -453,5 +543,76 @@ mod tests {
             expected_revision: None,
         };
         assert_eq!(numbered(&mut send, &never, both, &mut w).unwrap_err().code, Code::Usage);
+    }
+
+    fn import(root: &Path, dry_run: bool) -> Request {
+        Request::ImportRun {
+            name: "erp".into(),
+            file: root.join("master.csv").display().to_string(),
+            dry_run,
+            prefer: None,
+            limit: Some(3),
+            expected_revision: None,
+            numbers: Default::default(),
+        }
+    }
+
+    pub(crate) fn assigning(root: &Path, rows: usize) {
+        std::fs::create_dir_all(root.join("imports")).unwrap();
+        std::fs::write(
+            root.join("imports/erp.json"),
+            crate::canonical::to_string(&json!({"format": 1, "kind": "ryuplm.import",
+                "reader": {"type": "csv"}, "key": "ID", "fields": {"name": {"from": "Name"}},
+                "numbers": "assign", "scheme": "mech"})),
+        )
+        .unwrap();
+        let mut csv = String::from("ID,Name\n");
+        for k in 0..rows {
+            csv += &format!("{k},Part {k}\n");
+        }
+        std::fs::write(root.join("master.csv"), csv).unwrap();
+    }
+
+    #[test]
+    fn an_import_reserves_its_numbers_in_one_call_per_scheme() {
+        let (_d, root) = catalogue(true);
+        assigning(&root, 1000);
+        let mut send = sender(&root);
+        let (fake, _state) = Fake::start("acme/widgets");
+        let url = fake.url.clone();
+        let open = move || -> Result<Ledger> { Ok(Ledger::at(&url, "t", "acme/widgets")) };
+        let mut w = Vec::new();
+        // A dry run reserves nothing and says what a run would.
+        let dry = import_run(&mut send, &open, import(&root, true), &mut w).unwrap();
+        assert_eq!(
+            dry["would_reserve"],
+            json!([{"scheme": "mech", "template": "MECH-{seq:5}", "count": 1000, "floor": 0}])
+        );
+        assert!(fake.seen.lock().unwrap().is_empty());
+        let v = import_run(&mut send, &open, import(&root, false), &mut w).unwrap();
+        assert_eq!(v["created"]["count"], 1000);
+        assert_eq!(
+            (&v["ledger"]["reserved"], &v["ledger"]["numbers"], &v["ledger"]["requests"]),
+            (&json!(true), &json!(1000), &json!(1))
+        );
+        let seen = fake.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert!(seen[0].body.contains("\"count\":1000"), "{}", seen[0].body);
+        assert!(w.is_empty(), "{w:?}");
+    }
+
+    #[test]
+    fn an_import_numbers_locally_when_the_ledger_cant_be_asked() {
+        let (_d, root) = catalogue(true);
+        assigning(&root, 2);
+        let mut send = sender(&root);
+        let down = || -> Result<Ledger> { Ok(Ledger::at("http://127.0.0.1:9", "t", "acme/widgets")) };
+        let mut w = Vec::new();
+        let v = import_run(&mut send, &down, import(&root, false), &mut w).unwrap();
+        assert_eq!(v["created"]["count"], 2);
+        assert_eq!(v["ledger"]["reserved"], false);
+        assert_eq!(w.len(), 1);
+        let shown = send(Request::ItemShow { item: "MECH-00002".into() }).unwrap();
+        assert_eq!(shown["item"]["name"], "Part 1");
     }
 }
