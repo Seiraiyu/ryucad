@@ -274,6 +274,7 @@ fn dispatch(
                 working,
             },
         )?,
+        Request::RepsList { rev, within } => crate::reach::list(session, rev.as_deref(), &within)?,
         Request::ImportGuess {
             file,
             sheet,

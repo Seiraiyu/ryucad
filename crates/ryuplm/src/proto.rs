@@ -201,6 +201,14 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         working: bool,
     },
+    #[serde(rename = "reps.list")]
+    RepsList {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+        /// Folders searched besides the work tree and `pdm.dependents`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        within: Vec<String>,
+    },
     #[serde(rename = "import.guess")]
     ImportGuess {
         /// An absolute path: the CLI makes it one.

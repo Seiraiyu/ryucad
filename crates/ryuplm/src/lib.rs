@@ -40,6 +40,7 @@ pub mod notify;
 pub mod numbers;
 pub mod pdm;
 pub mod proto;
+pub mod reach;
 pub mod refs;
 pub mod release;
 pub mod reps;

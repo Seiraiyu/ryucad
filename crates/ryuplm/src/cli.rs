@@ -110,6 +110,17 @@ enum Command {
         #[arg(long)]
         working: bool,
     },
+    /// The projects this catalogue reaches, without reading them: each
+    /// ryucad or ryueda project its links name, each other catalogue its
+    /// lines name, and the folder each was found in.
+    Reps {
+        /// A Git revision of the catalogue: the working files by default.
+        #[arg(long, value_name = "REV")]
+        rev: Option<String>,
+        /// Also look under this folder.
+        #[arg(long = "in", value_name = "DIR")]
+        within: Vec<String>,
+    },
     /// Items added, removed and changed between two revisions.
     Diff {
         from: Option<String>,
@@ -711,6 +722,13 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
                 within: absolute(here, within),
                 no_dependents: *no_dependents,
                 working: *working,
+            },
+        ),
+        Command::Reps { rev, within } => (
+            root()?,
+            Request::RepsList {
+                rev: rev.clone(),
+                within: absolute(here, within),
             },
         ),
         Command::Bom(BomCmd::Show {
