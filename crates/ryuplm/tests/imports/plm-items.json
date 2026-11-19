@@ -1,0 +1,14 @@
+{
+  "export": {"system": "Demo PLM", "generated": "2026-11-18"},
+  "items": [
+    {"id": "IT-1", "number": "MECH-00101", "name": "Bracket", "description": "Bracket, bent, 2 mm",
+     "weight": 0.120, "makeBuy": "make", "sources": []},
+    {"id": "IT-2", "number": "100-0101", "name": "Screw", "description": "Screw M3 × 6",
+     "weight": 0.0011, "tolerance": 1.50E-2, "makeBuy": "buy",
+     "sources": [{"manufacturer": "Fastener Demo", "mpn": "FD-M3-6", "status": "active"},
+                 {"manufacturer": "Bolt Demo", "mpn": "BD-36", "status": "nrnd"}]},
+    {"id": "IT-3", "number": "AB100101", "name": "Label", "description": null,
+     "weight": 0.0005, "makeBuy": "buy", "obsolete": false,
+     "sources": [{"manufacturer": "Label Demo", "mpn": "LD-1", "status": "active"}]}
+  ]
+}

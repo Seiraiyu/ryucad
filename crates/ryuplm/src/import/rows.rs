@@ -20,15 +20,22 @@ pub struct Table {
 pub struct Row {
     pub at: u64,
     pub cells: Vec<String>,
+    /// Where a tree reader found the row: its record's JSON Pointer, its
+    /// JSON Lines line, or its element's line and column (design 935).
+    /// `None` for CSV and XLSX, whose row number says where.
+    pub place: Option<String>,
 }
 
 /// Why a source, a row or a cell doesn't read: where, and why. `row` 0 is
-/// the file or the mapping as a whole.
+/// the file or the mapping as a whole; `place` is a tree reader's place
+/// for the row.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct Refusal {
     pub row: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub column: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub place: Option<String>,
     pub message: String,
 }
 
@@ -37,6 +44,7 @@ impl Refusal {
         Refusal {
             row: 0,
             column: None,
+            place: None,
             message: message.into(),
         }
     }
@@ -45,8 +53,15 @@ impl Refusal {
         Refusal {
             row,
             column: column.map(str::to_owned),
+            place: None,
             message: message.into(),
         }
+    }
+
+    /// This refusal with `place`.
+    pub fn placed(mut self, place: Option<&str>) -> Refusal {
+        self.place = place.map(str::to_owned);
+        self
     }
 }
 
@@ -57,6 +72,9 @@ impl From<Refusal> for crate::error::Error {
                 .with("row", r.row);
         if let Some(c) = &r.column {
             e = e.with("column", c);
+        }
+        if let Some(p) = &r.place {
+            e = e.with("place", p);
         }
         e
     }
@@ -73,6 +91,14 @@ pub struct Record {
     pub quantity: Option<String>,
     pub find: Option<String>,
     pub refdes: Option<String>,
+}
+
+/// One record from a tree reader: where it is, and its leaf values by
+/// path relative to the record, in the order the record holds them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Leaves {
+    pub place: String,
+    pub cells: Vec<(String, String)>,
 }
 
 impl Table {
@@ -131,9 +157,85 @@ impl Table {
                 cells.truncate(width);
             }
             cells.resize(width, String::new());
-            rows.push(Row { at, cells });
+            rows.push(Row {
+                at,
+                cells,
+                place: None,
+            });
         }
         Ok(Table { columns, rows })
+    }
+
+    /// The table of a tree reader's records (design 935): every path any
+    /// record has, in the order first seen, is a column; each record is a
+    /// row numbered from 1 in document order, its missing paths empty.
+    pub fn from_records(records: Vec<Leaves>) -> Result<Table, Refusal> {
+        if records.len() > super::MAX_ROWS {
+            return Err(Refusal::file("more than 2,000,000 records"));
+        }
+        let mut columns: Vec<String> = Vec::new();
+        let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut rows = Vec::with_capacity(records.len());
+        // The last row each column was given in: a path twice in one
+        // record (two XML attributes sharing a local name) is refused, not
+        // kept as whichever came last.
+        let mut given: Vec<u64> = Vec::new();
+        for (i, rec) in records.into_iter().enumerate() {
+            let at = i as u64 + 1;
+            let mut cells = vec![String::new(); columns.len()];
+            for (path, value) in rec.cells {
+                let c = match index.get(&path) {
+                    Some(&c) => c,
+                    None => {
+                        if columns.len() == super::MAX_COLUMNS {
+                            return Err(Refusal::at(at, None, "more than 16,384 columns")
+                                .placed(Some(rec.place.as_str())));
+                        }
+                        index.insert(path.clone(), columns.len());
+                        columns.push(path);
+                        cells.push(String::new());
+                        given.push(0);
+                        columns.len() - 1
+                    }
+                };
+                if given[c] == at {
+                    return Err(Refusal::at(
+                        at,
+                        Some(columns[c].as_str()),
+                        format!(
+                            "{} is in this record twice (names are local: two attributes sharing a local name?)",
+                            columns[c]
+                        ),
+                    )
+                    .placed(Some(rec.place.as_str())));
+                }
+                given[c] = at;
+                cells[c] = value;
+            }
+            rows.push(Row {
+                at,
+                cells,
+                place: Some(rec.place),
+            });
+        }
+        let width = columns.len();
+        for r in &mut rows {
+            r.cells.resize(width, String::new());
+        }
+        Ok(Table { columns, rows })
+    }
+
+    /// Each refusal at a row given that row's place, when its reader gave
+    /// one (`import::prepare` calls this on `records::map`'s refusals).
+    pub fn place(&self, refusals: &mut [Refusal]) {
+        for r in refusals
+            .iter_mut()
+            .filter(|r| r.row > 0 && r.place.is_none())
+        {
+            if let Ok(i) = self.rows.binary_search_by_key(&r.row, |x| x.at) {
+                r.place.clone_from(&self.rows[i].place);
+            }
+        }
     }
 
     /// The index of column `name`.
@@ -191,5 +293,43 @@ mod tests {
         assert_eq!(e.row, 2);
         let e = Table::from_raw(raw(&[(1, &["A"])]), 3).unwrap_err();
         assert_eq!(e.row, 0);
+    }
+
+    #[test]
+    fn records_make_a_table_of_their_paths() {
+        let t = Table::from_records(vec![
+            Leaves {
+                place: "/items/0".into(),
+                cells: vec![("/pn".into(), "A".into()), ("/qty".into(), "2".into())],
+            },
+            Leaves {
+                place: "/items/1".into(),
+                cells: vec![
+                    ("/mfr/name".into(), "Acme".into()),
+                    ("/pn".into(), "B".into()),
+                ],
+            },
+        ])
+        .unwrap();
+        assert_eq!(t.columns, ["/pn", "/qty", "/mfr/name"]);
+        assert_eq!(t.rows[0].cells, ["A", "2", ""]);
+        assert_eq!(t.rows[1].cells, ["B", "", "Acme"]);
+        assert_eq!(
+            (t.rows[1].at, t.rows[1].place.as_deref()),
+            (2, Some("/items/1"))
+        );
+        let mut r = vec![Refusal::at(2, Some("/pn"), "bad"), Refusal::file("whole")];
+        t.place(&mut r);
+        assert_eq!(r[0].place.as_deref(), Some("/items/1"));
+        assert_eq!(r[1].place, None);
+        let e: crate::error::Error = r.remove(0).into();
+        assert_eq!(e.details["place"], "/items/1");
+        // CSV rows have no place, and their refusals serialize as before.
+        let csv = Table::from_raw(raw(&[(1, &["A"]), (2, &["x"])]), 1).unwrap();
+        assert_eq!(csv.rows[0].place, None);
+        assert_eq!(
+            serde_json::to_string(&Refusal::at(2, None, "m")).unwrap(),
+            r#"{"row":2,"message":"m"}"#
+        );
     }
 }

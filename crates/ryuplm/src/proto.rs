@@ -188,6 +188,9 @@ pub enum Request {
         delimiter: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         encoding: Option<String>,
+        /// JSON and XML: where the records are, instead of the proposal.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        records: Option<String>,
         /// Save the proposal as `imports/<save>.json`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         save: Option<String>,
@@ -438,6 +441,7 @@ mod tests {
                 sheet: None,
                 delimiter: Some(";".into()),
                 encoding: None,
+                records: None,
                 save: Some("erp".into()),
             },
             Request::ImportCheck {

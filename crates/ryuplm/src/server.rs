@@ -260,6 +260,7 @@ fn dispatch(
             sheet,
             delimiter,
             encoding,
+            records,
             save,
         } => crate::import::guess::answer(
             session,
@@ -267,6 +268,7 @@ fn dispatch(
             sheet,
             delimiter,
             encoding,
+            records,
             save,
         )?,
         Request::ImportList {} => crate::import::list(session)?,

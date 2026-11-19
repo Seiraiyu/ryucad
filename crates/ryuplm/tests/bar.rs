@@ -1,7 +1,9 @@
 //! Design 734's bars, release only (a step in full.yml): 100,000 items
 //! loaded by a cold daemon in 2 s; check over them in 1 s; a 100,000-row
 //! first import in 20 s; re-importing it unchanged in 5 s, writing
-//! nothing; where-used across 10 checkouts of 10,000 items in 1 s. With
+//! nothing; where-used across 10 checkouts of 10,000 items in 1 s.
+//! Design 935's: 100,000 JSON records and 100,000 XML records each read
+//! into a table in 2 s, and imported first within the CSV's 20 s. With
 //! `RYUPLM_BARS=1` the bars are asserted as they are, else ten times
 //! looser (a shared CI runner is no measuring instrument). Run with
 //! `--nocapture` to see the times.
@@ -177,6 +179,130 @@ fn a_hundred_thousand_row_import() {
         (again["unchanged"].clone(), again["written"].clone()),
         (json!(100_000), json!(0))
     );
+}
+
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "release only: the bars time a release build"
+)]
+fn a_bom_of_two_hundred_thousand_children() {
+    // One top record holding every line, as a nested BOM exported from one
+    // assembly is (design 935): twice the flat records, read within their
+    // 2 s. A reader that is quadratic in a parent's children takes about
+    // 7 s here.
+    use ryuplm::import::mapping::Mapping;
+    let mut xml = String::from("<Bom><Item pn=\"TOP\"><Uses>");
+    for k in 0..200_000 {
+        xml += &format!(
+            "<Item pn=\"P-{k:06}\" qty=\"{}\"><Name>Part {k}</Name></Item>",
+            1 + k % 3
+        );
+    }
+    xml += "</Uses></Item></Bom>";
+    let m = Mapping::from_json(
+        "bom",
+        &json!({"format": 2, "kind": "ryuplm.import",
+            "reader": {"type": "xml", "records": "/Bom/Item", "children": "Uses/Item"},
+            "key": "@pn", "fields": {"number": {"from": "@pn"}, "name": {"from": "Name"}},
+            "bom": {"level": "#level", "quantity": "@qty"}}),
+    )
+    .unwrap();
+    let t = Instant::now();
+    let table = ryuplm::import::read_table(xml.as_bytes(), &m.reader).unwrap();
+    within(
+        "a BOM of 200,000 xml children read",
+        t.elapsed(),
+        Duration::from_secs(2),
+    );
+    assert_eq!(table.rows.len(), 200_001);
+}
+
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "release only: the bars time a release build"
+)]
+fn a_hundred_thousand_tree_records() {
+    use ryuplm::import::mapping::{Mapping, ReaderKind};
+    // Unseeded, as the CSV import's bar is.
+    // SAFETY: no test in this file sets the seed.
+    unsafe { std::env::remove_var("RYUPLM_ID_SEED") };
+    let mut csv = String::from("ID,Number,Name,Description,Maker,MPN,Note\n");
+    for k in 0..100_000 {
+        csv += &format!(
+            "{k},P-{k:06},Part {k},\"Part number {k}, made up\",Maker {},M{k},n{}\n",
+            k % 50,
+            k % 7
+        );
+    }
+    let erp = Mapping::from_json(
+        "erp",
+        &json!({"format": 1, "kind": "ryuplm.import", "reader": {"type": "csv"}, "key": "ID",
+            "fields": {"number": {"from": "Number"}, "name": {"from": "Name"}, "description": {"from": "Description"},
+                "aml.0.manufacturer": {"from": "Maker"}, "aml.0.mpn": {"from": "MPN"}}, "class": "part"}),
+    )
+    .unwrap();
+    let (json_text, xml_text) = ryuplm::testing::csv_as_trees(&csv);
+    for (kind, ext, bytes) in [
+        (ReaderKind::Json, "json", json_text.into_bytes()),
+        (ReaderKind::Xml, "xml", xml_text.into_bytes()),
+    ] {
+        let m = ryuplm::testing::tree_mapping(&erp, kind);
+        let t = Instant::now();
+        let table = ryuplm::import::read_table(&bytes, &m.reader).unwrap();
+        within(
+            &format!("100,000 {ext} records read"),
+            t.elapsed(),
+            Duration::from_secs(2),
+        );
+        assert_eq!(table.rows.len(), 100_000);
+        #[cfg(target_os = "linux")]
+        if let Ok(s) = std::fs::read_to_string("/proc/self/status")
+            && let Some(l) = s.lines().find(|l| l.starts_with("VmHWM"))
+        {
+            println!(
+                "after the {ext} read, the process's peak memory: {}",
+                l.trim_start_matches("VmHWM:").trim()
+            );
+        }
+        drop(table);
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().canonicalize().unwrap();
+        ryuplm::server::init(&root, None).unwrap();
+        let mut slot = None;
+        ask(
+            &mut slot,
+            &root,
+            Request::SettingsEdit {
+                change: serde_json::from_value(json!({"class": "part"})).unwrap(),
+                expected_revision: None,
+            },
+        );
+        let src = root.join(format!("master.{ext}"));
+        std::fs::write(&src, &bytes).unwrap();
+        std::fs::create_dir_all(root.join("imports")).unwrap();
+        std::fs::write(root.join("imports/erp.json"), m.to_text()).unwrap();
+        let t = Instant::now();
+        let first = ask(
+            &mut slot,
+            &root,
+            Request::ImportRun {
+                name: "erp".into(),
+                file: src.display().to_string(),
+                dry_run: false,
+                prefer: None,
+                limit: Some(10),
+                expected_revision: None,
+            },
+        );
+        within(
+            &format!("first import of 100,000 {ext} records"),
+            t.elapsed(),
+            Duration::from_secs(20),
+        );
+        assert_eq!(first["created"]["count"], 100_000);
+    }
 }
 
 #[test]

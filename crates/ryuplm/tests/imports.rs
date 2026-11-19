@@ -1,8 +1,10 @@
-//! The committed import fixtures (design 734): an Altium-shaped and a
-//! KiCad-shaped BOM, an indented BOM, an item master workbook with legacy
-//! numbers in three schemes and its parent/child structure, and a Latin-1
-//! spreadsheet, each read through a mapping written for it. Written by
-//! us, nothing from a customer or vendor. `UPDATE_FIXTURES=1` writes them.
+//! The committed import fixtures (designs 734 and 935): an Altium-shaped
+//! and a KiCad-shaped BOM, an indented BOM, an item master workbook with
+//! legacy numbers in three schemes and its parent/child structure, a
+//! Latin-1 spreadsheet, a PLM's JSON item export, a JSON Lines dump and a
+//! nested XML BOM in windows-1252, each read through a mapping written for
+//! it. Written by us, nothing from a customer or vendor.
+//! `UPDATE_FIXTURES=1` writes them.
 
 use ryuplm::proto::Request;
 use ryuplm::testing::{Cell, xlsx};
@@ -40,6 +42,55 @@ DE-0003;Gehäuse;150 × 80;Aluminium eloxiert\n";
 fn latin1(s: &str) -> Vec<u8> {
     s.chars()
         .map(|c| u8::try_from(u32::from(c)).expect("Latin-1"))
+        .collect()
+}
+
+/// A PLM-shaped JSON item export: an AML as an array of sources, numbers
+/// as written (`0.120`, `1.50E-2`), an escaped `×`, a null description.
+const PLM_ITEMS: &str = r#"{
+  "export": {"system": "Demo PLM", "generated": "2026-11-18"},
+  "items": [
+    {"id": "IT-1", "number": "MECH-00101", "name": "Bracket", "description": "Bracket, bent, 2 mm",
+     "weight": 0.120, "makeBuy": "make", "sources": []},
+    {"id": "IT-2", "number": "100-0101", "name": "Screw", "description": "Screw M3 × 6",
+     "weight": 0.0011, "tolerance": 1.50E-2, "makeBuy": "buy",
+     "sources": [{"manufacturer": "Fastener Demo", "mpn": "FD-M3-6", "status": "active"},
+                 {"manufacturer": "Bolt Demo", "mpn": "BD-36", "status": "nrnd"}]},
+    {"id": "IT-3", "number": "AB100101", "name": "Label", "description": null,
+     "weight": 0.0005, "makeBuy": "buy", "obsolete": false,
+     "sources": [{"manufacturer": "Label Demo", "mpn": "LD-1", "status": "active"}]}
+  ]
+}
+"#;
+
+/// A JSON Lines dump with CRLF line ends and a blank line.
+const DUMP: &str = "{\"sku\": \"DE-0101\", \"title\": \"Mutter M4\", \"qty_on_hand\": 120}\r\n{\"sku\": \"DE-0102\", \"title\": \"Scheibe \u{d8} 4,3\", \"qty_on_hand\": 0}\r\n\r\n{\"sku\": \"DE-0103\", \"title\": \"Geh\u{e4}usedeckel\", \"qty_on_hand\": 7}\r\n";
+
+/// A nested XML BOM in a namespace, written as windows-1252.
+const NESTED: &str = r#"<?xml version="1.0" encoding="windows-1252"?>
+<bom:Export xmlns:bom="urn:example:demo-bom" generated="2026-11-18">
+  <bom:Item number="ASM-2000">
+    <bom:Description>Pumpe, komplett</bom:Description>
+    <bom:Components>
+      <bom:Component number="ASM-2100" qty="1" find="10">
+        <bom:Description>Laufrad – Baugruppe</bom:Description>
+        <bom:Components>
+          <bom:Component number="PRT-2110" qty="1" find="10"><bom:Description>Laufrad</bom:Description></bom:Component>
+          <bom:Component number="PRT-2120" qty="6" find="20"><bom:Description>Schraube M4 × 10</bom:Description></bom:Component>
+        </bom:Components>
+      </bom:Component>
+      <bom:Component number="PRT-2200" qty="1" find="20"><bom:Description>Gehäuse</bom:Description></bom:Component>
+    </bom:Components>
+  </bom:Item>
+</bom:Export>
+"#;
+
+fn cp1252(s: &str) -> Vec<u8> {
+    s.chars()
+        .map(|c| match c {
+            '–' => 0x96,
+            c => u8::try_from(u32::from(c)).expect("in windows-1252"),
+        })
         .collect()
 }
 
@@ -155,6 +206,36 @@ fn mappings() -> Vec<(&'static str, Value)> {
             "fields": {"number": {"from": "Teilenummer"}, "name": {"from": "Benennung"}, "properties.size": {"from": "Größe"}},
             "class": "machined", "numbers": "keep"}),
         ),
+        (
+            "plm-json",
+            json!({"format": 2, "kind": "ryuplm.import",
+            "reader": {"type": "json", "file": "plm-items*.json", "records": "/items"},
+            "key": "/id",
+            "fields": {"number": {"from": "/number"}, "name": {"from": "/name"}, "description": {"from": "/description"},
+                "properties.weight": {"from": "/weight"}, "make_buy": {"from": "/makeBuy"},
+                "aml.0.manufacturer": {"from": "/sources/0/manufacturer"}, "aml.0.mpn": {"from": "/sources/0/mpn"},
+                "aml.0.status": {"from": "/sources/0/status"},
+                "aml.1.manufacturer": {"from": "/sources/1/manufacturer"}, "aml.1.mpn": {"from": "/sources/1/mpn"},
+                "aml.1.status": {"from": "/sources/1/status"}},
+            "class": "machined", "numbers": "keep"}),
+        ),
+        (
+            "jsonl",
+            json!({"format": 2, "kind": "ryuplm.import",
+            "reader": {"type": "json", "file": "dump*.jsonl", "lines": true},
+            "key": "/sku",
+            "fields": {"number": {"from": "/sku"}, "name": {"from": "/title"}},
+            "class": "machined", "numbers": "keep"}),
+        ),
+        (
+            "nested-xml",
+            json!({"format": 2, "kind": "ryuplm.import",
+            "reader": {"type": "xml", "file": "nested-bom*.xml", "records": "/Export/Item", "children": "Components/Component"},
+            "key": "@number",
+            "fields": {"number": {"from": "@number"}, "description": {"from": "Description"}},
+            "class": "machined", "numbers": "keep",
+            "bom": {"level": "#level", "quantity": "@qty", "find": "@find"}}),
+        ),
     ]
 }
 
@@ -165,6 +246,9 @@ fn fixtures() -> Vec<(String, Vec<u8>)> {
         ("indented-bom.csv".to_owned(), INDENTED.as_bytes().to_vec()),
         ("item-master.xlsx".to_owned(), master()),
         ("latin1-items.csv".to_owned(), latin1(LATIN1)),
+        ("plm-items.json".to_owned(), PLM_ITEMS.as_bytes().to_vec()),
+        ("dump.jsonl".to_owned(), DUMP.as_bytes().to_vec()),
+        ("nested-bom.xml".to_owned(), cp1252(NESTED)),
     ];
     for (n, m) in mappings() {
         f.push((
@@ -366,4 +450,47 @@ fn each_fixture_imports_through_its_mapping_and_again_writes_nothing() {
         .filter_map(|f| f["code"].as_str())
         .collect();
     assert!(!codes.contains(&"part_number_unschemed"), "{c}");
+}
+
+#[test]
+fn each_tree_fixture_imports_through_its_mapping_and_again_writes_nothing() {
+    let (_d, root) = catalogue();
+    let show =
+        |item: &str| ask(&root, Request::ItemShow { item: item.into() }).unwrap()["item"].clone();
+    let p = run(&root, "plm-json", "plm-items.json");
+    assert_eq!(p["created"]["count"], 3, "{p}");
+    let screw = show("100-0101");
+    assert_eq!(screw["description"], "Screw M3 × 6");
+    assert_eq!(screw["aml"].as_array().unwrap().len(), 2, "{screw}");
+    assert_eq!(screw["aml"][1]["mpn"], "BD-36");
+    assert_eq!(
+        screw["extra"]["plm-json"],
+        json!({"/tolerance": "1.50E-2"}),
+        "a number's digits as written"
+    );
+    assert_eq!(show("MECH-00101")["properties"]["weight"], json!(0.12));
+    assert_eq!(
+        show("AB100101")["extra"]["plm-json"],
+        json!({"/obsolete": "false"})
+    );
+    let j = run(&root, "jsonl", "dump.jsonl");
+    assert_eq!(j["created"]["count"], 3, "{j}");
+    assert_eq!(show("DE-0103")["name"], "Gehäusedeckel");
+    let n = run(&root, "nested-xml", "nested-bom.xml");
+    assert_eq!(
+        (
+            n["created"]["count"].clone(),
+            n["lines"]["added"]["count"].clone()
+        ),
+        (json!(5), json!(4)),
+        "{n}"
+    );
+    assert_eq!(bom(&root, "ASM-2000")["lines"].as_array().unwrap().len(), 2);
+    assert_eq!(bom(&root, "ASM-2100")["lines"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        show("ASM-2100")["description"],
+        "Laufrad – Baugruppe",
+        "windows-1252"
+    );
+    assert_eq!(show("PRT-2120")["description"], "Schraube M4 × 10");
 }
