@@ -1332,7 +1332,7 @@ mod tests {
             "b",
             CopperLayer::Inner(1),
             250 * UM,
-            &[(2 * MM, 1 * MM), (18 * MM, 1 * MM)],
+            &[(2 * MM, MM), (18 * MM, MM)],
         );
         let conn = connect::connect("b", &s);
         let f = mask_clearance(&conn, &s, &preset::JLC_2L);

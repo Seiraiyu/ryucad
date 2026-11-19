@@ -505,7 +505,7 @@ fn hole_clearance_matches_every_wall_judged() {
         };
         let (c, got) = run(1);
         assert_eq!(got, run(8).1, "case {case}: one thread and eight");
-        for layer in 0..2 {
+        for (layer, got) in got.iter().enumerate() {
             let mut want = Vec::new();
             for (hk, h) in &l.holes {
                 if !(h.span.0 <= layer && layer <= h.span.1) {
@@ -540,7 +540,7 @@ fn hole_clearance_matches_every_wall_judged() {
                 }
             }
             want.sort_by_key(|x| (x.2, x.0, x.1));
-            assert_eq!(got[layer], want, "case {case}, layer {layer}");
+            assert_eq!(*got, want, "case {case}, layer {layer}");
         }
     }
 }

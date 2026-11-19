@@ -261,7 +261,7 @@ mod tests {
             "a",
             crate::board::file::CopperLayer::Inner(1),
             250 * UM,
-            &[(1 * MM, 1 * MM), (9 * MM, 1 * MM)],
+            &[(MM, MM), (9 * MM, MM)],
         );
         s.layers
             .entry("copper.in1".into())

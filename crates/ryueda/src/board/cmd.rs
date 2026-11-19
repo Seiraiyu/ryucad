@@ -102,6 +102,7 @@ pub fn answer(p: &Project, id: &Id) -> Value {
     v
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn create(
     session: &mut Session,
     name: &str,
@@ -168,6 +169,7 @@ pub fn create(
     Ok(v)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn edit(
     session: &mut Session,
     board: &str,
@@ -397,10 +399,13 @@ fn rotation(v: Option<&Value>) -> Result<i64> {
 }
 
 /// `board place`: one part, or several all or nothing.
+/// One part placed from flags: its reference, `at`, rotation and side.
+pub type PlaceOne<'a> = (&'a str, &'a [String; 2], Option<&'a str>, Option<&'a str>);
+
 pub fn place(
     session: &mut Session,
     board: &str,
-    one: Option<(&str, &[String; 2], Option<&str>, Option<&str>)>,
+    one: Option<PlaceOne>,
     ops: Option<&Value>,
     expected: Option<&str>,
 ) -> Result<Value> {
