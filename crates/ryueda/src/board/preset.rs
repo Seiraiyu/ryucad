@@ -152,9 +152,20 @@ impl Preset {
 }
 
 impl Preset {
-    /// The preset as its document: canonical JSON with its kind and format.
+    /// The preset as its document: canonical JSON with its kind and
+    /// format. A built-in's own stackup (which a constant can't hold) is
+    /// written into it.
     pub fn document(&self) -> serde_json::Value {
-        crate::doc::to_value(self, KIND, FORMAT)
+        let full = Preset {
+            stackup: self.stackup.clone().or_else(|| self.builtin_stackup()),
+            ..self.clone()
+        };
+        crate::doc::to_value(&full, KIND, FORMAT)
+    }
+
+    /// A built-in's stackup, which its constant can't hold (a `Vec`).
+    fn builtin_stackup(&self) -> Option<super::stackup::Stackup> {
+        (self.stackup.is_none() && self.name == "jlc-4l").then(jlc_4l_stackup)
     }
 
     /// A preset from its document (a project's `presets/<id>.json`).
@@ -181,8 +192,8 @@ impl Preset {
     /// two copper layers round one FR-4 core filling the board's thickness.
     pub fn stackup(&self) -> super::stackup::Stackup {
         use super::stackup::{StackLayer, Stackup};
-        if let Some(s) = &self.stackup {
-            return s.clone();
+        if let Some(s) = self.stackup.clone().or_else(|| self.builtin_stackup()) {
+            return s;
         }
         let cu = StackLayer::Copper {
             thickness_nm: self.copper_thickness_nm,
@@ -315,11 +326,98 @@ pub const JLC_2L: Preset = Preset {
     assembly: Some(JLC_ASSEMBLY),
 };
 
+/// JLCPCB's multilayer process at 1.6 mm with its standard 4-layer
+/// stackup, read by the coxswain from
+/// https://jlcpcb.com/capabilities/pcb-capabilities on 2026-11-19 (ryueda
+/// 7.B):
+///
+/// - "Min. track width and spacing (1 oz)": "Multilayer: 0.09 / 0.09 mm
+///   (3.5 / 3.5 mil)"; the page has no inner-layer row (inner copper is
+///   0.5 oz by default). One clearance rule, 0.09 mm.
+/// - Via: "Multilayer: 0.15 mm hole size / 0.25 mm via diameter" (0.1/0.2
+///   mm is only for boards 1 mm or thinner with ENIG/OSP). PTH drill:
+///   "Multilayer: 0.15 – 6.3 mm". "Min. Non-plated holes": "0.50mm".
+/// - PTH annular ring, multilayer 1 oz: "absolute minimum 0.15 mm", "0.20
+///   mm or above" recommended: the floor is 0.15 mm. A via's ring is its
+///   least geometry's, (0.25 - 0.15) / 2 = 0.05 mm, as `jlc-2l`'s.
+/// - "Via Hole-to-Hole Spacing": "0.2mm"; "Pad Hole-to-Hole Spacing":
+///   "0.45mm". "Copper clearance from routed board edges: ≧0.2 mm".
+/// - "Soldermask Expansion": "1:1"; "Keep at least 0.09 mm clearance
+///   between soldermask openings and neighboring traces."
+/// - Hole to track, every layer count: "Via hole to Track": "0.2mm";
+///   "PTH to Track": "0.35mm is recommended, minimum 0.28mm"; "NPTH to
+///   Track": "0.2mm". Inner layers: "Inner layer via hole to copper
+///   clearance": "0.2mm"; "Inner layer PTH pad hole to copper clearance":
+///   "0.3mm".
+/// - Blind and buried vias are HDI's
+///   (https://jlcpcb.com/pcb-fabrication/hdi-pcb, "4–24 layers"): this
+///   standard process makes none.
+///
+/// The stackup is [`jlc_4l_stackup`]. ryueda's defaults (a 0.2 mm track, a
+/// 0.30 mm drill in a 0.60 mm via) are its own and meet every rule above.
+pub const JLC_4L: Preset = Preset {
+    name: Cow::Borrowed("jlc-4l"),
+    mask_expansion_nm: 0,
+    paste_margin_nm: 0,
+    default_track_width_nm: 200_000,
+    default_via_drill_nm: 300_000,
+    default_via_diameter_nm: 600_000,
+    board_thickness_nm: 1_600_000,
+    copper_thickness_nm: 35_000,
+    track_width_min_nm: 90_000,
+    clearance_nm: 90_000,
+    drill_min_nm: 150_000,
+    drill_max_nm: 6_300_000,
+    npth_drill_min_nm: 500_000,
+    via_diameter_min_nm: 250_000,
+    annular_ring_min_nm: 150_000,
+    via_annular_ring_min_nm: 50_000,
+    hole_spacing_nm: 450_000,
+    via_hole_spacing_nm: 200_000,
+    edge_clearance_nm: 200_000,
+    mask_trace_clearance_nm: 90_000,
+    via_hole_clearance_nm: 200_000,
+    pth_hole_clearance_nm: 280_000,
+    npth_hole_clearance_nm: 200_000,
+    blind_vias: false,
+    inner_via_hole_clearance_nm: Some(200_000),
+    inner_pth_hole_clearance_nm: Some(300_000),
+    stackup: None,
+    assembly: Some(JLC_ASSEMBLY),
+};
+
+/// JLC04161H-7628, read by the coxswain from https://jlcpcb.com/impedance
+/// on 2026-11-19: top copper 0.035 mm, "Prepreg 7628" 0.21040 mm, inner
+/// copper 0.0152 mm, core 1.065 mm ("1.1 mm H/HOZ with copper"), inner
+/// copper 0.0152 mm, prepreg 0.21040 mm, bottom copper 0.035 mm (about 1.59
+/// mm). 7628's εr is 4.4 by the page's prepreg table; the core's 4.6.
+pub fn jlc_4l_stackup() -> super::stackup::Stackup {
+    use super::stackup::{StackLayer, Stackup};
+    let cu = |t: i64| StackLayer::Copper { thickness_nm: t };
+    let di = |t: i64, m: &str, er: i64| StackLayer::Dielectric {
+        thickness_nm: t,
+        material: Some(m.to_owned()),
+        er_ppm: Some(er),
+        loss_ppm: None,
+    };
+    Stackup {
+        layers: vec![
+            cu(35_000),
+            di(210_400, "7628", 4_400_000),
+            cu(15_200),
+            di(1_065_000, "core", 4_600_000),
+            cu(15_200),
+            di(210_400, "7628", 4_400_000),
+            cu(35_000),
+        ],
+    }
+}
+
 /// The preset a new board takes.
 pub const DEFAULT: &Preset = &JLC_2L;
 
 /// Every preset this ryueda knows.
-pub const ALL: [&Preset; 1] = [&JLC_2L];
+pub const ALL: [&Preset; 2] = [&JLC_2L, &JLC_4L];
 
 /// The preset a board names; stage 5 knows one.
 pub fn by_name(name: &str) -> Option<&'static Preset> {
@@ -354,8 +452,46 @@ mod tests {
             assert_eq!(doc["kind"], KIND);
             assert_eq!(doc["format"], FORMAT);
             let back = Preset::from_document(&doc, "presets/x.json").unwrap();
-            assert_eq!(&back, p, "{}", p.name);
+            // A built-in's stackup is written into its document.
+            assert_eq!(back.stackup(), p.stackup(), "{}", p.name);
+            let bare = |x: &Preset| Preset {
+                stackup: None,
+                ..x.clone()
+            };
+            assert_eq!(bare(&back), bare(p), "{}", p.name);
         }
+    }
+
+    #[test]
+    fn jlc_4l_has_four_layers_and_its_inner_hole_clearances() {
+        let p = &JLC_4L;
+        assert_eq!(by_name("jlc-4l"), Some(p));
+        let s = p.stackup();
+        assert_eq!(s.copper(), 4);
+        assert!(crate::board::stackup::judge(&s).is_empty());
+        let t = s.thickness();
+        assert!((1_500_000..=1_700_000).contains(&t), "{t}");
+        assert_eq!(p.hole_clearance(HoleKind::Pth, true), 300_000);
+        assert_eq!(
+            p.hole_clearance(HoleKind::Pth, false),
+            p.pth_hole_clearance_nm
+        );
+        assert_eq!(p.hole_clearance(HoleKind::Via, true), 200_000);
+        assert!(!p.blind_vias);
+        assert!(p.default_track_width_nm >= p.track_width_min_nm);
+        assert!(p.via_diameter_min_nm - p.drill_min_nm >= 2 * p.via_annular_ring_min_nm);
+        assert_eq!(
+            JLC_2L.hole_clearance(HoleKind::Pth, true),
+            JLC_2L.pth_hole_clearance_nm
+        );
+        assert_eq!(
+            JLC_4L.document()["stackup"]["layers"]
+                .as_array()
+                .unwrap()
+                .len(),
+            7
+        );
+        assert!(JLC_2L.document().get("stackup").is_none());
     }
 
     #[test]
@@ -369,6 +505,7 @@ mod tests {
     #[test]
     fn the_one_preset_is_found_by_name() {
         assert_eq!(by_name("jlc-2l"), Some(&JLC_2L));
+        assert_eq!(by_name("jlc-4l"), Some(&JLC_4L));
         assert_eq!(by_name("acme-6l"), None);
         assert_eq!(DEFAULT.name, "jlc-2l");
     }

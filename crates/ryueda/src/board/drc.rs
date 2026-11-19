@@ -7,7 +7,7 @@ use super::connect::{self, Connectivity};
 use super::layout::Key;
 use super::load::BoardFiles;
 use super::occ::{self, Occ};
-use super::preset::{self, Preset};
+use super::preset::{self, HoleKind, Preset};
 use super::shapes::BoardShapes;
 use crate::error::{Code, Result};
 use crate::fault::Severity;
@@ -1019,33 +1019,39 @@ pub fn hole_clearance(c: &Connectivity, s: &BoardShapes, preset: &Preset) -> Vec
                 && matches!(&h.of, super::shapes::HoleOf::Pad { occ: o, pad: p } if o == occ && p == pad)
         })
     };
-    let rule_of = |k: &Key| match k {
-        Key::ViaDrill(_) => preset.via_hole_clearance_nm,
-        Key::PadDrill { occ, pad } if plated_pad(occ, pad) => preset.pth_hole_clearance_nm,
-        _ => preset.npth_hole_clearance_nm,
+    let n = c.built.layout.layers.len();
+    // The rule of a hole on a layer: its kind's, inner or outer.
+    let rule_of = |k: &Key, layer: usize| {
+        let inner = layer != 0 && layer + 1 != n;
+        let kind = match k {
+            Key::ViaDrill(_) => HoleKind::Via,
+            Key::PadDrill { occ, pad } if plated_pad(occ, pad) => HoleKind::Pth,
+            _ => HoleKind::Npth,
+        };
+        preset.hole_clearance(kind, inner)
     };
     let own = |hole: &Key, item: &Key| match (hole, item) {
         (Key::ViaDrill(a), Key::Via(b, _)) => a == b,
         (Key::PadDrill { occ: a, pad: b }, Key::Pad { occ: x, pad: y, .. }) => a == x && b == y,
         _ => false,
     };
-    let mut rules = vec![
-        preset.via_hole_clearance_nm,
-        preset.pth_hole_clearance_nm,
-        preset.npth_hole_clearance_nm,
-    ];
-    rules.sort_unstable();
-    rules.dedup();
     let nets = island_nets(c);
     type Best = (ryu_copper::connect::HoleGap<Key>, Nm);
     let mut best: BTreeMap<(String, String), Best> = BTreeMap::new();
     let mut layers: BTreeMap<(String, String), BTreeSet<usize>> = BTreeMap::new();
-    for layer in 0..c.built.layout.layers.len() {
+    for layer in 0..n {
+        let inner = layer != 0 && layer + 1 != n;
+        let mut rules: Vec<Nm> = [HoleKind::Via, HoleKind::Pth, HoleKind::Npth]
+            .into_iter()
+            .map(|k| preset.hole_clearance(k, inner))
+            .collect();
+        rules.sort_unstable();
+        rules.dedup();
         // Each rule judged at its own distance: every gap the engine
         // returns for `r` is under `r`, or uncertain.
         for &r in &rules {
             for g in c.copper.hole_clearance(layer, r) {
-                if rule_of(&g.hole) != r || own(&g.hole, &g.piece.0) {
+                if rule_of(&g.hole, layer) != r || own(&g.hole, &g.piece.0) {
                     continue;
                 }
                 if let Some(j) = &g.joined
@@ -1421,6 +1427,37 @@ mod tests {
             &[(2 * MM, 5 * MM), (10 * MM, 5 * MM)],
         );
         assert!(run(&s).is_empty(), "{:?}", run(&s));
+    }
+
+    #[test]
+    fn inner_layers_take_the_inner_pth_hole_clearance() {
+        // A through pad (1.1 mm, 1.0 mm drill) on four layers, and tracks of
+        // another net 290 µm from its wall on in1 and on top.
+        let at = (10 * MM, 5 * MM);
+        let y = at.1 + 500 * UM + 290 * UM + 125 * UM;
+        let mut s = board(20 * MM, 10 * MM);
+        s.through("j1", "1", at, 1100 * UM, 1000 * UM, Some("a"))
+            .layers(4);
+        s.track(
+            "ti",
+            "b",
+            CopperLayer::Inner(1),
+            250 * UM,
+            &[(2 * MM, y), (18 * MM, y)],
+        )
+        .track(
+            "tt",
+            "c",
+            CopperLayer::Top,
+            250 * UM,
+            &[(2 * MM, y), (18 * MM, y)],
+        );
+        let conn = connect::connect("b", &s);
+        let f = hole_clearance(&conn, &s, &preset::JLC_4L);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(f[0].refs, ["b:j1/1#hole", "b:track/ti"]);
+        assert_eq!(f[0].details["rule_nm"], 300 * UM);
+        assert!(hole_clearance(&conn, &s, &preset::JLC_2L).is_empty());
     }
 
     #[test]
