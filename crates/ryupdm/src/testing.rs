@@ -117,6 +117,20 @@ impl Product for Toy {
             .map(|n| BTreeMap::from([("name".to_owned(), json!(n))]))
             .unwrap_or_default())
     }
+
+    /// A thing's `carried` label is continued, as ryuplm continues an
+    /// item's legacy revision (design 935).
+    fn first_label(src: &dyn Source, part: &Id, scheme: crate::config::Scheme) -> String {
+        crate::read_json(src, &format!("things/{part}.json"))
+            .ok()
+            .flatten()
+            .and_then(|v| {
+                v["carried"]
+                    .as_str()
+                    .and_then(|c| crate::label::next(scheme, c))
+            })
+            .unwrap_or_else(|| crate::label::first(scheme))
+    }
 }
 
 /// A toy whose parts hold their own properties, as ryuplm's items do:
@@ -456,6 +470,42 @@ mod tests {
                 ("part_number_duplicate", "properties/a.json", Cause::Theirs),
                 ("part_number_duplicate", "properties/b.json", Cause::Ours),
             ]
+        );
+    }
+
+    #[test]
+    fn a_toy_continues_its_things_carried_label() {
+        use crate::history::Releases;
+        use crate::state::derive_for;
+        let mut f = project(&[
+            ("a", "{\"carried\": \"C\"}"),
+            ("b", "{\"carried\": \"X3\"}"),
+        ]);
+        let next = |f: &BTreeMap<String, Vec<u8>>, p: &str| {
+            derive_for::<Toy>(f, &id(p), &Releases::default()).next
+        };
+        assert_eq!(next(&f, "a").as_deref(), Some("D"));
+        assert_eq!(
+            next(&f, "b").as_deref(),
+            Some("A"),
+            "a label the scheme can't read"
+        );
+        let c = Toy::content(&f, &id("a")).unwrap();
+        f.insert("releases/a/D.json".into(), record("a", "D", &c));
+        let sequence = |f: &BTreeMap<String, Vec<u8>>| {
+            crate::check::run_for::<Toy>(f, None, None)
+                .unwrap()
+                .into_iter()
+                .filter(|x| x.code == "release_sequence")
+                .count()
+        };
+        assert_eq!(sequence(&f), 0, "D is a's first label");
+        assert_eq!(next(&f, "a").as_deref(), Some("E"));
+        f.insert("things/a.json".into(), b"{}".to_vec());
+        assert_eq!(
+            sequence(&f),
+            1,
+            "without the carried label, a first release is A"
         );
     }
 }

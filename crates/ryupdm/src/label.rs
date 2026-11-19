@@ -1,6 +1,7 @@
 //! Revision labels. A project picks one scheme, and every label is derived
-//! from it, never typed: a part's first release takes the first label and
-//! each later one the label after its latest record.
+//! from it, never typed: a part's first release takes the first label
+//! (or the one its product gives, `Product::first_label`) and each later
+//! one the label after its latest record.
 //!
 //! | Scheme | Sequence |
 //! |---|---|

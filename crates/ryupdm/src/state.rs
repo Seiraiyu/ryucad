@@ -236,7 +236,7 @@ pub fn of_for<P: Product>(
             config.revisions,
             label::index(config.revisions, &e.label).expect("placed") + 1,
         ),
-        None => label::first(config.revisions),
+        None => P::first_label(src, part, config.revisions),
     });
     let proposed = list
         .iter()

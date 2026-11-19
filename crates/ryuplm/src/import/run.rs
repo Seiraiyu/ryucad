@@ -4,6 +4,7 @@
 //! source reported and never deleted. Planned as a pure function over the
 //! catalogue, then written through `write::commit`.
 
+use super::history::Legacy;
 use super::mapping::{Mapping, Numbers};
 use super::records::Mapped;
 use crate::error::{Code, Error, Result};
@@ -53,6 +54,11 @@ pub struct Provenance {
     pub digest: String,
     pub values: BTreeMap<String, Value>,
     pub lines: Vec<ProvLine>,
+    /// A history import's legacy revisions as stored
+    /// (`{label, date?, state?, change?, author?, values, extra?}`), and
+    /// the carried one's label (design 935).
+    pub revisions: Vec<Value>,
+    pub carried: Option<String>,
 }
 
 impl Provenance {
@@ -72,6 +78,12 @@ impl Provenance {
                 })
                 .collect();
         }
+        if !self.revisions.is_empty() {
+            v["revisions"] = Value::Array(self.revisions.clone());
+        }
+        if let Some(c) = &self.carried {
+            v["carried"] = json!(c);
+        }
         v
     }
 
@@ -83,7 +95,7 @@ impl Provenance {
         let bad = || {
             ryu_doc::files::invalid(
                 &format!("/source/{name}"),
-                "provenance is {key, digest, values, lines?}",
+                "provenance is {key, digest, values, lines?, revisions?, carried?}",
             )
             .with("item", id)
         };
@@ -107,11 +119,42 @@ impl Provenance {
                 quantity: lt("quantity").ok_or_else(bad)?,
             });
         }
+        let mut revisions = Vec::new();
+        match o.get("revisions") {
+            None => {}
+            Some(Value::Array(list)) => {
+                for (i, r) in list.iter().enumerate() {
+                    if !r.get("label").is_some_and(Value::is_string)
+                        || !r.get("values").is_some_and(Value::is_object)
+                    {
+                        return Err(ryu_doc::files::invalid(
+                            &format!("/source/{name}/revisions/{i}"),
+                            "a revision is {label, date?, state?, change?, author?, values, extra?}",
+                        )
+                        .with("item", id));
+                    }
+                    revisions.push(r.clone());
+                }
+            }
+            Some(_) => return Err(bad()),
+        }
+        let carried = text("carried");
+        if let Some(c) = &carried
+            && !revisions.iter().any(|r| r["label"] == json!(c))
+        {
+            return Err(ryu_doc::files::invalid(
+                &format!("/source/{name}/carried"),
+                "carried names one of the revisions",
+            )
+            .with("item", id));
+        }
         Ok(Some(Provenance {
             key: text("key").ok_or_else(bad)?,
             digest: text("digest").ok_or_else(bad)?,
             values: values.iter().map(|(k, x)| (k.clone(), x.clone())).collect(),
             lines,
+            revisions,
+            carried,
         }))
     }
 }
@@ -122,6 +165,57 @@ pub fn digest(values: &BTreeMap<String, Value>, extra: &BTreeMap<String, String>
     h.update(b"ryuplm.import.1\0");
     h.update(crate::canonical::to_string(&json!({"extra": extra, "values": values})).as_bytes());
     h.finalize().to_hex().to_string()
+}
+
+/// [`digest`], with a history key's revisions and carried label in it
+/// (design 935), so an unchanged history writes nothing. Without a
+/// history it is [`digest`], so 0.C's digests don't move.
+pub fn digest_of(
+    values: &BTreeMap<String, Value>,
+    extra: &BTreeMap<String, String>,
+    history: Option<&Legacy>,
+) -> String {
+    let Some(h) = history else {
+        return digest(values, extra);
+    };
+    let mut x = blake3::Hasher::new();
+    x.update(b"ryuplm.import.history.1\0");
+    x.update(
+        crate::canonical::to_string(&json!({"carried": h.carried, "extra": extra,
+            "revisions": h.json(), "values": values}))
+        .as_bytes(),
+    );
+    x.finalize().to_hex().to_string()
+}
+
+/// The other history import whose revisions `item` holds, if any.
+fn other_history<'a>(item: &'a Item, name: &str) -> Option<&'a str> {
+    item.source
+        .iter()
+        .find(|(k, v)| *k != name && v.get("revisions").is_some())
+        .map(|(k, _)| k.as_str())
+}
+
+/// `import_missing` for each revision `stored` holds that the source's
+/// history `h` no longer has.
+fn gone_revisions(id: &Id, key: &str, stored: &[Value], h: &Legacy, t: &mut Tally) {
+    for s in stored {
+        let label = s["label"].as_str().unwrap_or_default();
+        if !h.revisions.iter().any(|r| r.label == label) {
+            t.missing.push(
+                Fault::warning(
+                    Code::ImportMissing,
+                    format!(
+                        "item {id}: revision {label:?} of key {key:?} is no longer in the source; it stays"
+                    ),
+                )
+                .with("item", id)
+                .with("key", key)
+                .with("revision", label)
+                .to_json(),
+            );
+        }
+    }
 }
 
 /// The item's value for target `t`, as a mapping's values hold it.
@@ -329,6 +423,22 @@ pub fn plan(
             untouched.entry(item.number.as_str()).or_default().push(id);
         }
     }
+    // Items with records keep their carried label (design 935).
+    let released = super::history::released(src)?;
+    // Rows reaching an item another history import holds.
+    let mut refused: Vec<super::rows::Refusal> = Vec::new();
+    let one_history = |id: &Id, r: &Mapped, refused: &mut Vec<super::rows::Refusal>| {
+        let other = r
+            .history
+            .as_ref()
+            .and_then(|_| other_history(&cat.items[id], name))?;
+        refused.push(super::rows::Refusal::at(
+            r.record.at,
+            Some(m.key.as_str()),
+            format!("item {id} holds import {other}'s revisions; an item takes one history"),
+        ));
+        Some(())
+    };
     let mut work: BTreeMap<Id, Item> = BTreeMap::new();
     let mut t = Tally::default();
     let mut seen: BTreeSet<String> = BTreeSet::new();
@@ -339,9 +449,15 @@ pub fn plan(
         if !seen.insert(key.clone()) {
             continue; // a BOM's later row for the same item: its line only
         }
-        let new_digest = digest(&r.values, &r.extra);
+        let new_digest = digest_of(&r.values, &r.extra, r.history.as_ref());
         if let Some(id) = by_key.get(key).cloned() {
+            if one_history(&id, r, &mut refused).is_some() {
+                continue;
+            }
             let p = prov.get_mut(&id).expect("indexed with its provenance");
+            if let Some(h) = &r.history {
+                gone_revisions(&id, key, &p.revisions, h, &mut t);
+            }
             if p.digest == new_digest {
                 t.unchanged += 1;
                 continue;
@@ -358,7 +474,13 @@ pub fn plan(
                 &mut t.conflicts,
             )?;
             p.values = stored;
-            p.digest = digest(&p.values, &r.extra);
+            if let Some(h) = &r.history {
+                p.revisions = super::history::merged(&p.revisions, &h.json());
+                if !released.contains(&id) {
+                    p.carried = h.carried.clone();
+                }
+            }
+            p.digest = digest_of(&p.values, &r.extra, r.history.as_ref());
             set_extra(&mut item, name, &r.extra);
             item.source.insert(name.to_owned(), p.to_json());
             if item != cat.items[&id] {
@@ -383,6 +505,9 @@ pub fn plan(
         };
         let (id, mut item, stored) = match adopt {
             Some(id) => {
+                if one_history(&id, r, &mut refused).is_some() {
+                    continue;
+                }
                 let mut item = cat.items[&id].clone();
                 let (stored, _) = three_way(
                     &id,
@@ -433,17 +558,36 @@ pub fn plan(
                 (id, item, r.values.clone())
             }
         };
+        let (revisions, carried) = match &r.history {
+            Some(h) if !released.contains(&id) => (h.json(), h.carried.clone()),
+            Some(h) => (h.json(), None),
+            None => (Vec::new(), None),
+        };
         let p = Provenance {
             key: key.clone(),
-            digest: digest(&stored, &r.extra),
+            digest: digest_of(&stored, &r.extra, r.history.as_ref()),
             values: stored,
             lines: Vec::new(),
+            revisions,
+            carried,
         };
         set_extra(&mut item, name, &r.extra);
         item.source.insert(name.to_owned(), p.to_json());
         by_key.insert(key.clone(), id.clone());
         prov.insert(id.clone(), p);
         work.insert(id, item);
+    }
+    if !refused.is_empty() {
+        let first = refused[0].message.clone();
+        return Err(Error::new(
+            Code::InvalidDocument,
+            format!(
+                "{} row(s) of {name} reach items another history holds: {first}",
+                refused.len()
+            ),
+        )
+        .with("import", name)
+        .with("refusals", &refused));
     }
     lines(cat, m, rows, &by_key, &mut prov, &mut work, prefer, &mut t)?;
     missing(cat, name, &seen, &by_key, &mut t);
@@ -1299,5 +1443,169 @@ pub(crate) mod tests {
         )
         .unwrap_err();
         assert_eq!(e.code, Code::InvalidDocument, "{e:?}");
+    }
+
+    #[test]
+    fn provenance_keeps_revisions_and_the_carried_label() {
+        let id = Id::parse("k3v9q2m8x4c1p", "item").unwrap();
+        let mut item = Item::new("A-1");
+        let p = Provenance {
+            key: "A-1".into(),
+            digest: "ff".into(),
+            values: BTreeMap::new(),
+            lines: Vec::new(),
+            revisions: vec![
+                json!({"label": "A", "values": {}}),
+                json!({"label": "B", "date": "2020-11-02", "values": {"number": "A-1"}}),
+            ],
+            carried: Some("B".into()),
+        };
+        item.source.insert("hist".into(), p.to_json());
+        assert_eq!(item.source["hist"]["carried"], "B");
+        assert_eq!(Provenance::of(&id, &item, "hist").unwrap(), Some(p));
+        let bad = |v: Value| {
+            let mut i = Item::new("A-1");
+            i.source.insert("hist".into(), v);
+            Provenance::of(&id, &i, "hist").unwrap_err().details["pointer"].clone()
+        };
+        assert_eq!(
+            bad(
+                json!({"key": "A-1", "digest": "ff", "values": {}, "revisions": [{"label": "A", "values": {}}], "carried": "C"})
+            ),
+            "/source/hist/carried"
+        );
+        assert_eq!(
+            bad(json!({"key": "A-1", "digest": "ff", "values": {}, "revisions": [{"values": {}}]})),
+            "/source/hist/revisions/0"
+        );
+        assert_eq!(
+            bad(json!({"key": "A-1", "digest": "ff", "values": {}, "revisions": {}})),
+            "/source/hist"
+        );
+    }
+
+    const HIST: &str = "PN,Rev,Released,Lifecycle,ECO,By\n\
+        100-0001,A,07/03/2019,Released,E1,Jo\n\
+        100-0001,B,2020-11-02,Released,E2,Jo\n\
+        100-0001,C,,In Work,E3,Al\n";
+
+    fn hist() -> Mapping {
+        Mapping::from_json("hist", &crate::import::mapping::tests::hist()).unwrap()
+    }
+
+    /// The master imported, then `HIST` on it.
+    fn with_history() -> BTreeMap<String, Vec<u8>> {
+        let mut f = files(&[]);
+        let (_, out) = planned(&f, &master(), CSV, None);
+        apply(&mut f, &out);
+        let (_, h) = planned(&f, &hist(), HIST, None);
+        apply(&mut f, &h);
+        f
+    }
+
+    fn labels(item: &Item, name: &str) -> Vec<String> {
+        item.source[name]["revisions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["label"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn a_history_joins_the_master_by_number_and_imports_again_writing_nothing() {
+        let mut f = files(&[]);
+        let (_, out) = planned(&f, &master(), CSV, None);
+        apply(&mut f, &out);
+        let (_, h) = planned(&f, &hist(), HIST, None);
+        assert_eq!(
+            (
+                h.report["adopted"]["count"].clone(),
+                h.report["created"]["count"].clone()
+            ),
+            (json!(1), json!(0)),
+            "{}",
+            h.report
+        );
+        let screw = h.items.values().find(|i| i.number == "100-0001").unwrap();
+        assert_eq!(labels(screw, "hist"), ["A", "B", "C"]);
+        assert_eq!(screw.source["hist"]["carried"], "B");
+        assert_eq!(screw.source["hist"]["revisions"][0]["date"], "2019-03-07");
+        assert!(
+            screw.source.contains_key("erp"),
+            "the master's provenance stays"
+        );
+        apply(&mut f, &h);
+        let (_, again) = planned(&f, &hist(), HIST, None);
+        assert_eq!(
+            (again.items.len(), again.report["unchanged"].clone()),
+            (0, json!(1))
+        );
+        assert_eq!(again.report["missing"], json!([]));
+    }
+
+    #[test]
+    fn revisions_follow_the_source_by_label_and_a_gone_one_stays() {
+        let f = with_history();
+        let changed = "PN,Rev,Released,Lifecycle,ECO,By\n\
+            100-0001,B,2020-11-03,Released,E2,Jo\n\
+            100-0001,C,09/01/2023,Released,E3,Al\n\
+            100-0001,D,,In Work,E4,Al\n";
+        let (_, out) = planned(&f, &hist(), changed, None);
+        let item = out.items.values().next().unwrap();
+        assert_eq!(labels(item, "hist"), ["A", "B", "C", "D"]);
+        assert_eq!(
+            item.source["hist"]["revisions"][1]["date"], "2020-11-03",
+            "replaced"
+        );
+        assert_eq!(item.source["hist"]["carried"], "C");
+        let missing = out.report["missing"].as_array().unwrap();
+        assert_eq!(missing.len(), 1, "{missing:?}");
+        assert_eq!(missing[0]["details"]["revision"], "A");
+        let mut g = f.clone();
+        apply(&mut g, &out);
+        let (_, again) = planned(&g, &hist(), changed, None);
+        assert_eq!(again.items.len(), 0);
+        assert_eq!(
+            again.report["missing"].as_array().unwrap().len(),
+            1,
+            "reported every run"
+        );
+    }
+
+    #[test]
+    fn a_released_item_keeps_its_carried_label() {
+        let mut f = with_history();
+        let cat = Catalogue::load(&f).unwrap();
+        let (id, _) = cat
+            .items
+            .iter()
+            .find(|(_, i)| i.number == "100-0001")
+            .unwrap();
+        f.insert(format!("releases/{id}/C.json"), b"{}".to_vec());
+        let more = format!("{HIST}100-0001,D,2024-02-01,Released,E4,Al\n");
+        let (_, out) = planned(&f, &hist(), &more, None);
+        let item = &out.items[id];
+        assert_eq!(labels(item, "hist"), ["A", "B", "C", "D"]);
+        assert_eq!(item.source["hist"]["carried"], "B", "held once released");
+    }
+
+    #[test]
+    fn an_item_takes_one_history_import() {
+        let f = with_history();
+        let other = Mapping::from_json("hist2", &crate::import::mapping::tests::hist()).unwrap();
+        let cat = Catalogue::load(&f).unwrap();
+        let config = Config::read_in(&f, "ryuplm").unwrap();
+        let e = plan(&f, &cat, &config, &other, &rows(&other, HIST), None, 100)
+            .err()
+            .unwrap();
+        assert_eq!(e.code, Code::InvalidDocument);
+        assert_eq!(
+            (
+                e.details["refusals"][0]["row"].clone(),
+                e.details["refusals"][0]["column"].clone()
+            ),
+            (json!(2), json!("PN"))
+        );
     }
 }

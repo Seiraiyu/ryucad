@@ -3,6 +3,7 @@
 //! layout means writing one of these, never code.
 
 use super::text::Encoding;
+use super::transform::DatePattern;
 use crate::catalogue::Manifest;
 use crate::error::{Code, Error, Result};
 use ryu_doc::files::{Obj, header_in, invalid};
@@ -72,6 +73,7 @@ pub struct Field {
     pub values: BTreeMap<String, String>,
     pub case: Option<Case>,
     pub unit: Option<String>,
+    pub date: Option<Vec<DatePattern>>,
 }
 
 impl PartialEq for Field {
@@ -83,6 +85,7 @@ impl PartialEq for Field {
             && self.values == o.values
             && self.case == o.case
             && self.unit == o.unit
+            && self.date == o.date
     }
 }
 
@@ -95,6 +98,7 @@ impl Field {
             values: BTreeMap::new(),
             case: None,
             unit: None,
+            date: None,
         }
     }
 }
@@ -117,6 +121,31 @@ pub struct Bom {
     pub refdes: Option<String>,
 }
 
+/// How a history orders an item's revisions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Order {
+    /// As the file lists them.
+    Source,
+    /// By date, then as the file lists them.
+    Date,
+}
+
+/// A history block (design 935): the mapping reads one row per (item,
+/// revision), and the item takes the carried revision's values.
+#[derive(Clone, Debug, PartialEq)]
+pub struct History {
+    /// The column holding the revision's label, kept as written.
+    pub revision: String,
+    pub date: Option<Field>,
+    pub state: Option<Field>,
+    pub change: Option<Field>,
+    pub author: Option<Field>,
+    pub order: Order,
+    /// Which revisions the legacy system released, as a class rule's
+    /// `when`; empty, every one is.
+    pub released: BTreeMap<String, String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Numbers {
     Keep,
@@ -132,6 +161,7 @@ pub struct Mapping {
     pub fields: BTreeMap<String, Field>,
     pub class: Vec<Rule>,
     pub bom: Option<Bom>,
+    pub history: Option<History>,
     pub numbers: Numbers,
 }
 
@@ -179,6 +209,97 @@ fn column(v: Value, at: &str) -> Result<String> {
         return Err(invalid(at, "a column's name"));
     }
     Ok(s)
+}
+
+/// The date patterns at `at`: a list of one or more.
+fn dates(v: Value, at: &str) -> Result<Vec<DatePattern>> {
+    let Value::Array(list) = v else {
+        return Err(invalid(at, "a list of date patterns"));
+    };
+    if list.is_empty() {
+        return Err(invalid(at, "a list of date patterns"));
+    }
+    list.into_iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let here = format!("{at}/{i}");
+            let s = text(p, &here)?;
+            DatePattern::parse(&s).map_err(|why| invalid(&here, &why))
+        })
+        .collect()
+}
+
+/// A field object at `at`: its column and transforms.
+fn field(body: &Value, at: &str) -> Result<Field> {
+    let mut fo = Obj::new(body, at)?;
+    let mut field = Field::from(&column(fo.take("from")?, &format!("{at}/from"))?);
+    if let Some(x) = fo.take_opt("trim") {
+        field.trim = x
+            .as_bool()
+            .ok_or_else(|| invalid(&format!("{at}/trim"), "true or false"))?;
+    }
+    if let Some(x) = fo.take_opt("regex") {
+        let s = text(x, &format!("{at}/regex"))?;
+        field.regex = Some(
+            regex_lite::Regex::new(&s)
+                .map_err(|e| invalid(&format!("{at}/regex"), &format!("not a regex: {e}")))?,
+        );
+    }
+    if let Some(x) = fo.take_opt("values") {
+        let m = x
+            .as_object()
+            .ok_or_else(|| invalid(&format!("{at}/values"), "an object of value to value"))?;
+        for (k, v) in m {
+            field.values.insert(
+                k.clone(),
+                v.as_str()
+                    .ok_or_else(|| invalid(&format!("{at}/values/{k}"), "expected a string"))?
+                    .to_owned(),
+            );
+        }
+    }
+    if let Some(x) = fo.take_opt("case") {
+        field.case = Some(match text(x, &format!("{at}/case"))?.as_str() {
+            "upper" => Case::Upper,
+            "lower" => Case::Lower,
+            _ => return Err(invalid(&format!("{at}/case"), "case is upper or lower")),
+        });
+    }
+    if let Some(x) = fo.take_opt("unit") {
+        field.unit = Some(text(x, &format!("{at}/unit"))?);
+    }
+    if let Some(x) = fo.take_opt("date") {
+        field.date = Some(dates(x, &format!("{at}/date"))?);
+    }
+    fo.finish()?;
+    if field.date.is_some() && field.unit.is_some() {
+        return Err(invalid(at, "a field takes date or unit, not both"));
+    }
+    Ok(field)
+}
+
+/// A field as a mapping writes it.
+fn field_json(f: &Field) -> Value {
+    let mut o = json!({"from": f.from});
+    if f.trim {
+        o["trim"] = json!(true);
+    }
+    if let Some(r) = &f.regex {
+        o["regex"] = json!(r.as_str());
+    }
+    if !f.values.is_empty() {
+        o["values"] = json!(f.values);
+    }
+    if let Some(c) = f.case {
+        o["case"] = json!(if c == Case::Upper { "upper" } else { "lower" });
+    }
+    if let Some(u) = &f.unit {
+        o["unit"] = json!(u);
+    }
+    if let Some(d) = &f.date {
+        o["date"] = d.iter().map(|p| json!(p.text)).collect();
+    }
+    o
 }
 
 impl Mapping {
@@ -358,46 +479,7 @@ impl Mapping {
                         "a target is number, name, description, unit, make_buy, properties.<name> or aml.<0-9>.manufacturer|mpn|status",
                     ));
                 }
-                let mut fo = Obj::new(body, &at)?;
-                let mut field = Field::from(&column(fo.take("from")?, &format!("{at}/from"))?);
-                if let Some(x) = fo.take_opt("trim") {
-                    field.trim = x
-                        .as_bool()
-                        .ok_or_else(|| invalid(&format!("{at}/trim"), "true or false"))?;
-                }
-                if let Some(x) = fo.take_opt("regex") {
-                    let s = text(x, &format!("{at}/regex"))?;
-                    field.regex = Some(regex_lite::Regex::new(&s).map_err(|e| {
-                        invalid(&format!("{at}/regex"), &format!("not a regex: {e}"))
-                    })?);
-                }
-                if let Some(x) = fo.take_opt("values") {
-                    let m = x.as_object().ok_or_else(|| {
-                        invalid(&format!("{at}/values"), "an object of value to value")
-                    })?;
-                    for (k, v) in m {
-                        field.values.insert(
-                            k.clone(),
-                            v.as_str()
-                                .ok_or_else(|| {
-                                    invalid(&format!("{at}/values/{k}"), "expected a string")
-                                })?
-                                .to_owned(),
-                        );
-                    }
-                }
-                if let Some(x) = fo.take_opt("case") {
-                    field.case = Some(match text(x, &format!("{at}/case"))?.as_str() {
-                        "upper" => Case::Upper,
-                        "lower" => Case::Lower,
-                        _ => return Err(invalid(&format!("{at}/case"), "case is upper or lower")),
-                    });
-                }
-                if let Some(x) = fo.take_opt("unit") {
-                    field.unit = Some(text(x, &format!("{at}/unit"))?);
-                }
-                fo.finish()?;
-                fields.insert(t.clone(), field);
+                fields.insert(t.clone(), field(body, &at)?);
             }
         }
         let mut class = Vec::new();
@@ -479,6 +561,70 @@ impl Mapping {
                 })
             }
         };
+        let history = match o.take_opt("history") {
+            None => None,
+            Some(h) => {
+                let mut ho = Obj::new(&h, "/history")?;
+                let revision = column(ho.take("revision")?, "/history/revision")?;
+                let mut part = |k: &str| -> Result<Option<Field>> {
+                    let at = format!("/history/{k}");
+                    ho.take_opt(k)
+                        .map(|x| match x {
+                            Value::String(c) if !c.trim().is_empty() => Ok(Field::from(&c)),
+                            Value::String(_) => Err(invalid(&at, "a column's name")),
+                            Value::Object(_) => field(&x, &at),
+                            _ => Err(invalid(&at, "a column's name, or a field")),
+                        })
+                        .transpose()
+                };
+                let (date, state, change, author) = (
+                    part("date")?,
+                    part("state")?,
+                    part("change")?,
+                    part("author")?,
+                );
+                let order = match ho.take_opt("order").as_ref().map(Value::as_str) {
+                    None | Some(Some("source")) => Order::Source,
+                    Some(Some("date")) => Order::Date,
+                    _ => return Err(invalid("/history/order", "order is source or date")),
+                };
+                let mut released = BTreeMap::new();
+                if let Some(w) = ho.take_opt("released") {
+                    let m = w.as_object().ok_or_else(|| {
+                        invalid("/history/released", "an object of column to value")
+                    })?;
+                    for (k, v) in m {
+                        released.insert(
+                            k.clone(),
+                            v.as_str()
+                                .ok_or_else(|| {
+                                    invalid(&format!("/history/released/{k}"), "expected a string")
+                                })?
+                                .to_owned(),
+                        );
+                    }
+                }
+                ho.finish()?;
+                if order == Order::Date && date.is_none() {
+                    return Err(invalid("/history/order", "order: date needs history.date"));
+                }
+                Some(History {
+                    revision,
+                    date,
+                    state,
+                    change,
+                    author,
+                    order,
+                    released,
+                })
+            }
+        };
+        if history.is_some() && bom.is_some() {
+            return Err(invalid(
+                "/history",
+                "a history mapping has no bom: revisions of structure aren't imported",
+            ));
+        }
         let numbers = match o.take_opt("numbers").as_ref().map(Value::as_str) {
             None | Some(Some("keep")) => Numbers::Keep,
             Some(Some("assign")) => Numbers::Assign(None),
@@ -503,6 +649,19 @@ impl Mapping {
             }
             _ => {}
         }
+        let dated = fields.values().any(|f| f.date.is_some())
+            || history.as_ref().is_some_and(|h| {
+                [&h.date, &h.state, &h.change, &h.author]
+                    .into_iter()
+                    .flatten()
+                    .any(|f| f.date.is_some())
+            });
+        if format < 2 && (history.is_some() || dated) {
+            return Err(invalid(
+                "/format",
+                "a history or a date transform needs format 2",
+            ));
+        }
         o.finish()?;
         Ok(Mapping {
             name: name.to_owned(),
@@ -511,6 +670,7 @@ impl Mapping {
             fields,
             class,
             bom,
+            history,
             numbers,
         })
     }
@@ -542,31 +702,13 @@ impl Mapping {
         if r.lines {
             reader["lines"] = json!(true);
         }
-        let format = if r.kind.tree() { FORMAT } else { 1 };
+        let format = if self.needs_format_2() { FORMAT } else { 1 };
         let mut v = json!({"format": format, "kind": KIND, "reader": reader, "key": self.key});
         if !self.fields.is_empty() {
             let f: Map<String, Value> = self
                 .fields
                 .iter()
-                .map(|(t, f)| {
-                    let mut o = json!({"from": f.from});
-                    if f.trim {
-                        o["trim"] = json!(true);
-                    }
-                    if let Some(r) = &f.regex {
-                        o["regex"] = json!(r.as_str());
-                    }
-                    if !f.values.is_empty() {
-                        o["values"] = json!(f.values);
-                    }
-                    if let Some(c) = f.case {
-                        o["case"] = json!(if c == Case::Upper { "upper" } else { "lower" });
-                    }
-                    if let Some(u) = &f.unit {
-                        o["unit"] = json!(u);
-                    }
-                    (t.clone(), o)
-                })
+                .map(|(t, f)| (t.clone(), field_json(f)))
                 .collect();
             v["fields"] = Value::Object(f);
         }
@@ -601,6 +743,33 @@ impl Mapping {
             }
             v["bom"] = o;
         }
+        if let Some(h) = &self.history {
+            let part = |f: &Field| {
+                if *f == Field::from(&f.from) {
+                    json!(f.from)
+                } else {
+                    field_json(f)
+                }
+            };
+            let mut o = json!({"revision": h.revision});
+            for (k, x) in [
+                ("date", &h.date),
+                ("state", &h.state),
+                ("change", &h.change),
+                ("author", &h.author),
+            ] {
+                if let Some(f) = x {
+                    o[k] = part(f);
+                }
+            }
+            if h.order == Order::Date {
+                o["order"] = json!("date");
+            }
+            if !h.released.is_empty() {
+                o["released"] = json!(h.released);
+            }
+            v["history"] = o;
+        }
         match &self.numbers {
             Numbers::Keep => v["numbers"] = json!("keep"),
             Numbers::Assign(s) => {
@@ -615,6 +784,14 @@ impl Mapping {
 
     pub fn to_text(&self) -> String {
         crate::canonical::to_string(&self.to_json())
+    }
+
+    /// Whether this mapping is written as format 2 (design 935): a tree
+    /// reader, a history, or a date transform, so an older ryuplm reads
+    /// it as `format_too_new`.
+    pub fn needs_format_2(&self) -> bool {
+        let dated = |f: &Field| f.date.is_some();
+        self.reader.kind.tree() || self.history.is_some() || self.fields.values().any(dated)
     }
 
     /// The mapping file `bytes` for mapping `name`: errors are
@@ -660,6 +837,16 @@ impl Mapping {
                     .flatten()
                     .map(String::as_str),
             );
+        }
+        if let Some(h) = &self.history {
+            c.insert(h.revision.as_str());
+            c.extend(
+                [&h.date, &h.state, &h.change, &h.author]
+                    .into_iter()
+                    .flatten()
+                    .map(|f| f.from.as_str()),
+            );
+            c.extend(h.released.keys().map(String::as_str));
         }
         c
     }
@@ -739,6 +926,40 @@ pub(crate) mod tests {
                 "aml.0.mpn": {"from": "MPN"}},
             "class": [{"when": {"Category": "Screws"}, "class": "fastener"}, {"class": "machined"}],
             "numbers": "keep"})
+    }
+
+    pub(crate) fn hist() -> Value {
+        json!({"format": 2, "kind": "ryuplm.import",
+            "reader": {"type": "csv", "file": "history*.csv"},
+            "key": "PN", "fields": {"number": {"from": "PN", "trim": true}},
+            "numbers": "keep",
+            "history": {"revision": "Rev",
+                "date": {"from": "Released", "date": ["DD/MM/YYYY", "YYYY-MM-DD"]},
+                "state": "Lifecycle", "change": "ECO", "author": {"from": "By", "trim": true},
+                "released": {"Lifecycle": "Released"}}})
+    }
+
+    #[test]
+    fn a_history_mapping_reads_and_writes_as_format_2() {
+        let m = Mapping::from_json("h", &hist()).unwrap();
+        let h = m.history.as_ref().unwrap();
+        assert_eq!((h.revision.as_str(), h.order), ("Rev", Order::Source));
+        assert_eq!(h.date.as_ref().unwrap().date.as_ref().unwrap().len(), 2);
+        assert_eq!(h.state, Some(Field::from("Lifecycle")));
+        assert_eq!(m.to_json(), hist());
+        assert_eq!(Mapping::read("h", m.to_text().as_bytes()).unwrap(), m);
+        for c in ["PN", "Rev", "Released", "Lifecycle", "ECO", "By"] {
+            assert!(m.columns().contains(c), "{c}");
+        }
+        let mut d = erp();
+        d["format"] = json!(2);
+        d["fields"]["description"] = json!({"from": "Desc", "date": ["YYYY-MM-DD", "serial"]});
+        assert_eq!(Mapping::from_json("erp", &d).unwrap().to_json(), d);
+        assert_eq!(
+            Mapping::from_json("erp", &erp()).unwrap().to_json(),
+            erp(),
+            "still format 1"
+        );
     }
 
     #[test]
@@ -832,6 +1053,38 @@ pub(crate) mod tests {
             (
                 json!({"format": 2, "kind": "ryuplm.import", "reader": {"type": "xml", "records": "/e:Export/Item"}, "key": "k", "fields": {"number": {"from": "n"}}}),
                 "/reader/records",
+            ),
+            (
+                json!({"format": 1, "kind": "ryuplm.import", "reader": {"type": "csv"}, "key": "k", "fields": {"number": {"from": "n"}}, "history": {"revision": "r"}}),
+                "/format",
+            ),
+            (
+                json!({"format": 2, "kind": "ryuplm.import", "reader": {"type": "csv"}, "key": "k", "fields": {"number": {"from": "n"}}, "history": {"revision": "r"}, "bom": {"quantity": "q", "root": "R"}}),
+                "/history",
+            ),
+            (
+                json!({"format": 2, "kind": "ryuplm.import", "reader": {"type": "csv"}, "key": "k", "fields": {"number": {"from": "n"}}, "history": {"revision": "r", "order": "date"}}),
+                "/history/order",
+            ),
+            (
+                json!({"format": 2, "kind": "ryuplm.import", "reader": {"type": "csv"}, "key": "k", "fields": {"number": {"from": "n"}}, "history": {"date": "d"}}),
+                "/history/revision",
+            ),
+            (
+                json!({"format": 2, "kind": "ryuplm.import", "reader": {"type": "csv"}, "key": "k", "fields": {"number": {"from": "n"}}, "history": {"revision": "r", "state": 3}}),
+                "/history/state",
+            ),
+            (
+                json!({"format": 2, "kind": "ryuplm.import", "reader": {"type": "csv"}, "key": "k", "fields": {"number": {"from": "n", "date": ["MM/YYYY"]}}}),
+                "/fields/number/date/0",
+            ),
+            (
+                json!({"format": 2, "kind": "ryuplm.import", "reader": {"type": "csv"}, "key": "k", "fields": {"number": {"from": "n", "date": ["serial"], "unit": "mm"}}}),
+                "/fields/number",
+            ),
+            (
+                json!({"format": 1, "kind": "ryuplm.import", "reader": {"type": "csv"}, "key": "k", "fields": {"number": {"from": "n", "date": ["serial"]}}}),
+                "/format",
             ),
         ];
         for (v, at) in cases {

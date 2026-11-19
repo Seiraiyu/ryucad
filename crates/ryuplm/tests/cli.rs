@@ -500,3 +500,38 @@ fn imports_from_the_cli() {
         1,
     );
 }
+
+#[test]
+fn a_history_imports_and_shows_from_the_cli() {
+    let p = Pair::project();
+    let mapping = ryuplm::canonical::to_string(&json!({"format": 2, "kind": "ryuplm.import",
+        "reader": {"type": "csv"}, "key": "PN", "fields": {"number": {"from": "PN"}},
+        "history": {"revision": "Rev", "date": {"from": "Date", "date": ["DD/MM/YYYY"]}}}));
+    let csv = "PN,Rev,Date\n100-0001,A,07/03/2019\n100-0001,B,02/11/2020\n";
+    for top in [&p.direct, &p.daemon] {
+        fs::create_dir_all(top.join("p/imports")).unwrap();
+        fs::write(top.join("p/imports/hist.json"), &mapping).unwrap();
+        fs::write(top.join("p/hist.csv"), csv).unwrap();
+    }
+    let c = p.ok(&["import", "check", "hist", "hist.csv"]);
+    assert_eq!(c["rows"], 1, "one row per key: {c}");
+    let r = p.ok(&["import", "run", "hist", "hist.csv"]);
+    assert_eq!(r["created"]["count"], 1);
+    // Item answers may carry the item's own warnings (its number matches
+    // no scheme), so these two compare both ways without `ok`'s check.
+    let shown = |args: &[&str]| {
+        let (code, v) = p.both(args);
+        assert_eq!(code, 0, "{args:?}: {v}");
+        v["result"].clone()
+    };
+    let s = shown(&["item", "show", "100-0001"]);
+    assert_eq!(
+        s["legacy"][1],
+        json!({"label": "B", "date": "2020-11-02", "values": {"number": "100-0001"},
+               "import": "hist", "carried": true})
+    );
+    assert_eq!(s["state"]["next"], "C");
+    let l = shown(&["release", "list", "100-0001"]);
+    assert_eq!(l["legacy"], s["legacy"]);
+    assert_eq!(p.files(&p.direct), p.files(&p.daemon));
+}
