@@ -171,3 +171,39 @@ fn number_commands_need_the_ledger_on() {
     assert!(fake.seen.lock().unwrap().is_empty());
     ok(&c, &fake.url, &["daemon", "stop"]);
 }
+
+#[test]
+fn an_import_assigns_through_the_ledger_or_locally_offline() {
+    let c = catalogue(true);
+    std::fs::create_dir_all(c.root.join("imports")).unwrap();
+    std::fs::write(
+        c.root.join("imports/erp.json"),
+        ryuplm::canonical::to_string(&json!({"format": 1, "kind": "ryuplm.import",
+            "reader": {"type": "csv"}, "key": "ID", "fields": {"name": {"from": "Name"}},
+            "numbers": "assign", "scheme": "mech"})),
+    )
+    .unwrap();
+    std::fs::write(c.root.join("a.csv"), "ID,Name\n1,One\n2,Two\n").unwrap();
+    std::fs::write(c.root.join("b.csv"), "ID,Name\n1,One\n2,Two\n3,Three\n").unwrap();
+    let (fake, state) = Ledger::start("acme/widgets");
+    state.lock().unwrap().sequences.insert("MECH-{seq:5}".into(), 700);
+    let u = fake.url.as_str();
+    let v = ok(&c, u, &["import", "run", "erp", "a.csv", "--dry-run"]);
+    assert_eq!(v["result"]["would_reserve"][0]["count"], 2);
+    assert!(fake.seen.lock().unwrap().is_empty(), "a dry run reserves nothing");
+    let v = ok(&c, u, &["import", "run", "erp", "a.csv"]);
+    assert_eq!(
+        (&v["result"]["created"]["count"], &v["result"]["ledger"]["requests"]),
+        (&json!(2), &json!(1))
+    );
+    assert_eq!(ok(&c, u, &["item", "show", "MECH-00701"])["result"]["item"]["name"], "Two");
+    // Offline, the new row is numbered locally, above what is held.
+    let v = ok(&c, OFFLINE, &["import", "run", "erp", "b.csv"]);
+    assert_eq!(
+        (&v["result"]["created"]["count"], &v["result"]["ledger"]["reserved"]),
+        (&json!(1), &json!(false))
+    );
+    ok(&c, u, &["item", "show", "MECH-00702"]);
+    assert_eq!(fake.seen.lock().unwrap().len(), 1);
+    ok(&c, u, &["daemon", "stop"]);
+}
