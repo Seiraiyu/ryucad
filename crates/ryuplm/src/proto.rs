@@ -213,6 +213,10 @@ pub enum Request {
         prefer: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         limit: Option<usize>,
+        /// Numbers the ledger handed out, by scheme, taken in order by the
+        /// items an `assign` import creates (the CLI fills it, ryuplm 2.B).
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        numbers: std::collections::BTreeMap<String, Vec<String>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
@@ -466,6 +470,7 @@ mod tests {
                 dry_run: true,
                 prefer: Some("source".into()),
                 limit: None,
+                numbers: Default::default(),
                 expected_revision: None,
             },
             Request::ImportList {},

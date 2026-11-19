@@ -287,6 +287,7 @@ fn dispatch(
             dry_run,
             prefer,
             limit,
+            numbers,
             expected_revision,
         } => {
             let prefer = prefer
@@ -300,6 +301,7 @@ fn dispatch(
                 dry_run,
                 prefer,
                 limit,
+                &numbers,
                 expected_revision.as_deref(),
             )?
         }

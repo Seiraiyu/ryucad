@@ -565,6 +565,7 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
                 dry_run: *dry_run,
                 prefer: prefer.clone(),
                 limit: *limit,
+                numbers: Default::default(),
                 expected_revision: exp(expect),
             },
         ),

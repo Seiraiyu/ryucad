@@ -159,6 +159,7 @@ fn a_hundred_thousand_row_import() {
         dry_run: false,
         prefer: None,
         limit: Some(10),
+        numbers: Default::default(),
         expected_revision: None,
     };
     let t = Instant::now();
@@ -291,6 +292,7 @@ fn a_history_of_half_a_million_rows() {
                 dry_run: false,
                 prefer: None,
                 limit: Some(10),
+                numbers: Default::default(),
                 expected_revision: None,
             },
         )
@@ -397,6 +399,7 @@ fn a_hundred_thousand_tree_records() {
                 dry_run: false,
                 prefer: None,
                 limit: Some(10),
+                numbers: Default::default(),
                 expected_revision: None,
             },
         );

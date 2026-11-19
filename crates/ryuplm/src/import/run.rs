@@ -387,6 +387,9 @@ fn three_way(
 pub struct Outcome {
     pub items: BTreeMap<Id, Item>,
     pub report: Value,
+    /// Per scheme `assign` used: `{scheme, template, count, floor}`, what
+    /// a ledger catalogue's run asks the ledger for (`would_reserve`).
+    pub assign: Vec<Value>,
 }
 
 fn row_json(id: &Id, item: &Item, r: &Mapped) -> Value {
@@ -401,6 +404,23 @@ pub fn plan(
     rows: &[Mapped],
     prefer: Option<Prefer>,
     limit: usize,
+) -> Result<Outcome> {
+    plan_with(src, cat, config, m, rows, prefer, limit, &BTreeMap::new())
+}
+
+/// [`plan`] with `given`: numbers the ledger handed out, by scheme, used in
+/// order for the items `assign` creates instead of the local sequence.
+/// `conflict` when a scheme needs more than were given.
+#[allow(clippy::too_many_arguments)]
+pub fn plan_with(
+    src: &dyn Source,
+    cat: &Catalogue,
+    config: &Config,
+    m: &Mapping,
+    rows: &[Mapped],
+    prefer: Option<Prefer>,
+    limit: usize,
+    given: &BTreeMap<String, Vec<String>>,
 ) -> Result<Outcome> {
     let name = m.name.as_str();
     // The items this import made before, by key.
@@ -443,7 +463,7 @@ pub fn plan(
     let mut t = Tally::default();
     let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut taken: BTreeSet<String> = cat.items.keys().map(|i| i.as_str().to_owned()).collect();
-    let mut seqs: BTreeMap<String, (ryupdm::config::Template, u64)> = BTreeMap::new();
+    let mut seqs: BTreeMap<String, (ryupdm::config::Template, u64, u64, usize)> = BTreeMap::new();
     for r in rows {
         let key = &r.record.key;
         if !seen.insert(key.clone()) {
@@ -533,18 +553,33 @@ pub fn plan(
                         let entry = match seqs.get_mut(&s.name) {
                             Some(e) => e,
                             None => {
-                                let first =
-                                    crate::numbers::next(src, cat, config, Some(&s.name), class)?;
-                                let tpl = s
-                                    .next
-                                    .clone()
-                                    .expect("next() refuses a scheme without a template");
-                                let seq = tpl.read(&first).expect("next() fills its own template");
-                                seqs.entry(s.name.clone()).or_insert((tpl, seq))
+                                let (_, tpl) =
+                                    crate::numbers::template(config, Some(&s.name), class)?;
+                                let floor = crate::numbers::highest(src, cat, tpl);
+                                seqs.entry(s.name.clone())
+                                    .or_insert((tpl.clone(), floor + 1, floor, 0))
                             }
                         };
-                        let n = entry.0.fill(entry.1);
+                        let n = if given.is_empty() {
+                            entry.0.fill(entry.1)
+                        } else {
+                            given
+                                .get(&s.name)
+                                .and_then(|v| v.get(entry.3))
+                                .cloned()
+                                .ok_or_else(|| {
+                                    Error::new(
+                                        Code::Conflict,
+                                        format!(
+                                            "import {name} needs more numbers of scheme {:?} than the ledger handed out; run it again",
+                                            s.name
+                                        ),
+                                    )
+                                    .with("scheme", &s.name)
+                                })?
+                        };
                         entry.1 += 1;
+                        entry.3 += 1;
                         n
                     }
                 };
@@ -608,9 +643,16 @@ pub fn plan(
     });
     // Only what changed is written.
     work.retain(|id, item| cat.items.get(id) != Some(item));
+    let assign: Vec<Value> = seqs
+        .iter()
+        .map(|(scheme, (t, _, floor, used))| {
+            json!({"scheme": scheme, "template": t.text(), "count": used, "floor": floor})
+        })
+        .collect();
     Ok(Outcome {
         items: work,
         report,
+        assign,
     })
 }
 
@@ -974,6 +1016,7 @@ pub fn run(
     dry_run: bool,
     prefer: Option<Prefer>,
     limit: Option<usize>,
+    numbers: &BTreeMap<String, Vec<String>>,
     expected: Option<&str>,
 ) -> Result<Value> {
     crate::items::check_expected("the catalogue", &session.revision(), expected)?;
@@ -981,7 +1024,7 @@ pub fn run(
     if !p.refusals.is_empty() {
         return Err(super::refused(name, file, p.refusals));
     }
-    let out = plan(
+    let out = plan_with(
         &session.snapshot(),
         session.catalogue(),
         &p.config,
@@ -989,6 +1032,7 @@ pub fn run(
         &p.rows,
         prefer,
         limit.unwrap_or(100),
+        numbers,
     )?;
     let mut report = out.report;
     report["file"] = json!(file);
@@ -998,6 +1042,10 @@ pub fn run(
     if dry_run {
         let refused = crate::write::would_add(session, &writes)?;
         report["would_refuse"] = crate::fault::list(&refused);
+        // A ledger catalogue's dry run says what a run would reserve.
+        if p.config.ledger {
+            report["would_reserve"] = json!(out.assign);
+        }
         return Ok(report);
     }
     if !writes.0.is_empty() {
@@ -1103,6 +1151,42 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn numbers_from_the_ledger_are_used_in_order_and_counted() {
+        let m = Mapping::from_json(
+            "erp",
+            &json!({"format": 1, "kind": "ryuplm.import", "reader": {"type": "csv"}, "key": "ID",
+            "fields": {"description": {"from": "Desc"}}, "numbers": "assign", "scheme": "mech"}),
+        )
+        .unwrap();
+        let f = files(&[("0000000000001", Item::new("MECH-00007"))]);
+        // SAFETY: tests that read the seed set the same value.
+        unsafe { std::env::set_var(crate::ids::SEED_VAR, "test") };
+        let cat = Catalogue::load(&f).unwrap();
+        let config = Config::read_in(&f, "ryuplm").unwrap();
+        let rows = rows(&m, "ID,Desc\na,One\nb,Two\n");
+        let local = plan(&f, &cat, &config, &m, &rows, None, 100).unwrap();
+        assert_eq!(
+            local.assign,
+            vec![json!({"scheme": "mech", "template": "MECH-{seq:5}", "count": 2, "floor": 7})]
+        );
+        let given = BTreeMap::from([(
+            "mech".to_owned(),
+            vec!["MECH-00100".to_owned(), "MECH-00101".to_owned()],
+        )]);
+        let out = plan_with(&f, &cat, &config, &m, &rows, None, 100, &given).unwrap();
+        let by_desc: BTreeMap<&str, &str> = out
+            .items
+            .values()
+            .map(|i| (i.description.as_deref().unwrap(), i.number.as_str()))
+            .collect();
+        assert_eq!(by_desc, BTreeMap::from([("One", "MECH-00100"), ("Two", "MECH-00101")]));
+        // Fewer numbers than new items: refused, nothing planned.
+        let short = BTreeMap::from([("mech".to_owned(), vec!["MECH-00100".to_owned()])]);
+        let e = plan_with(&f, &cat, &config, &m, &rows, None, 100, &short).err().unwrap();
+        assert_eq!(e.code, Code::Conflict);
+    }
+
+    #[test]
     fn an_existing_number_is_adopted() {
         let mut mine = Item::new("100-0001");
         mine.description = Some("Screw".into());
@@ -1169,6 +1253,7 @@ pub(crate) mod tests {
                     dry_run: dry,
                     prefer: None,
                     limit: None,
+                    numbers: Default::default(),
                     expected_revision: None,
                 },
             )
@@ -1551,6 +1636,7 @@ pub(crate) mod tests {
                 dry_run: false,
                 prefer: None,
                 limit: None,
+                numbers: Default::default(),
                 expected_revision: None,
             },
         )
