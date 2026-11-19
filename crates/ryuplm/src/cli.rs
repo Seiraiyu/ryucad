@@ -342,13 +342,30 @@ enum ItemCmd {
     Show {
         item: String,
     },
+    /// Items, a window at a time: --offset and --limit cut the rows from
+    /// the matches, whose number is the answer's `total`.
     List {
         #[arg(long)]
         number: Option<String>,
         #[arg(long)]
         class: Option<String>,
+        /// Found in the number, a previous number, the name or description.
         #[arg(long)]
         text: Option<String>,
+        /// in_work, released, modified or obsolete.
+        #[arg(long)]
+        state: Option<String>,
+        /// make or buy.
+        #[arg(long)]
+        make_buy: Option<String>,
+        /// errors or warnings: items with at least one.
+        #[arg(long)]
+        faults: Option<String>,
+        /// id (the default), number, name or class.
+        #[arg(long)]
+        sort: Option<String>,
+        #[arg(long)]
+        offset: Option<usize>,
         #[arg(long)]
         limit: Option<usize>,
     },
@@ -591,6 +608,11 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
             number,
             class,
             text,
+            state,
+            make_buy,
+            faults,
+            sort,
+            offset,
             limit,
         }) => (
             root()?,
@@ -598,6 +620,11 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
                 number: number.clone(),
                 class: class.clone(),
                 text: text.clone(),
+                state: state.clone(),
+                make_buy: make_buy.clone(),
+                faults: faults.clone(),
+                sort: sort.clone(),
+                offset: *offset,
                 limit: *limit,
             },
         ),

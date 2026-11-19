@@ -441,6 +441,11 @@ fn where_used_across_ten_checkouts() {
             number: None,
             class: None,
             text: None,
+            state: None,
+            make_buy: None,
+            faults: None,
+            sort: None,
+            offset: None,
             limit: Some(1),
         },
     )["items"][0]["id"]

@@ -74,8 +74,26 @@ pub enum Request {
         number: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         class: Option<String>,
+        /// Found in the number, a previous number, the name or the
+        /// description, whatever the case.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         text: Option<String>,
+        /// A lifecycle state: `in_work`, `released`, `modified`,
+        /// `obsolete`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        state: Option<String>,
+        /// `make` or `buy`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        make_buy: Option<String>,
+        /// `errors` or `warnings`: items with at least one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        faults: Option<String>,
+        /// `id` (the default), `number`, `name` or `class`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sort: Option<String>,
+        /// Rows skipped before the first returned.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset: Option<usize>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         limit: Option<usize>,
     },
