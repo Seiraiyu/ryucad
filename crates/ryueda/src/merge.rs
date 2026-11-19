@@ -72,6 +72,14 @@ fn board_atom(at: &str) -> bool {
     matches!(segs(at).as_slice(), ["stackup"])
 }
 
+/// A waiver is one value; a via rule is one value.
+fn rules_atom(at: &str) -> bool {
+    matches!(
+        segs(at).as_slice(),
+        ["waivers", _] | [_, "via"] | ["classes", _, "via"]
+    )
+}
+
 fn libcomp_atom(at: &str) -> bool {
     matches!(
         segs(at).as_slice(),
@@ -95,6 +103,7 @@ fn atoms(kind: &str) -> fn(&str) -> bool {
         crate::footprint::KIND => footprint_atom,
         crate::libcomp::KIND => libcomp_atom,
         crate::board::BOARD_KIND => board_atom,
+        crate::board::RULES_KIND => rules_atom,
         crate::project::LOCK_KIND => ryupdm::git::lock_atom,
         _ => no_atom,
     }
@@ -361,6 +370,7 @@ pub fn newest(kind: &str) -> Option<u64> {
         | crate::board::VIA_KIND => crate::board::file::NEWEST,
         crate::board::HOLE_KIND => crate::board::FORMAT,
         crate::board::preset::KIND => crate::board::preset::FORMAT,
+        crate::board::RULES_KIND => crate::board::rules::FORMAT,
         _ => return None,
     })
 }

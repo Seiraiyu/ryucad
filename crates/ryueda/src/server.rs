@@ -1389,6 +1389,36 @@ fn dispatch(
         }
         Request::BoardDrc { board, codes } => crate::board::cmd::drc(session, &board, &codes),
         Request::BoardStatus { board } => crate::board::cmd::status(session, &board),
+        Request::BoardRulesShow { board } => crate::board::rulecmd::show(session.project(), &board),
+        Request::BoardRulesSet {
+            board,
+            class,
+            set,
+            expected_revision,
+        } => crate::board::rulecmd::set(
+            session,
+            &board,
+            class.as_deref(),
+            &set,
+            false,
+            expected_revision.as_deref(),
+        ),
+        Request::BoardRulesUnset {
+            board,
+            class,
+            keys,
+            expected_revision,
+        } => crate::board::rulecmd::set(
+            session,
+            &board,
+            class.as_deref(),
+            &keys,
+            true,
+            expected_revision.as_deref(),
+        ),
+        Request::BoardRulesExplain { board, refs } => {
+            crate::board::rulecmd::explain(session, &board, &refs)
+        }
         Request::BoardExport {
             board,
             allow_errors,

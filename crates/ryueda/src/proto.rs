@@ -833,6 +833,29 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         codes: Vec<String>,
     },
+    #[serde(rename = "board.rules.show")]
+    BoardRulesShow { board: String },
+    /// `key=value` rules set on the board's defaults, or on a class.
+    #[serde(rename = "board.rules.set")]
+    BoardRulesSet {
+        board: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        class: Option<String>,
+        set: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "board.rules.unset")]
+    BoardRulesUnset {
+        board: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        class: Option<String>,
+        keys: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "board.rules.explain")]
+    BoardRulesExplain { board: String, refs: Vec<String> },
     /// A board's counts: parts placed, nets routed and open, findings.
     #[serde(rename = "board.status")]
     BoardStatus { board: String },
@@ -1664,6 +1687,8 @@ impl Request {
                 | Request::PresetEdit { .. }
                 | Request::PresetDelete { .. }
                 | Request::BoardCreate { .. }
+                | Request::BoardRulesSet { .. }
+                | Request::BoardRulesUnset { .. }
                 | Request::BoardEdit { .. }
                 | Request::BoardDelete { .. }
                 | Request::BoardPlace { .. }

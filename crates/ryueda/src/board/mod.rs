@@ -21,6 +21,7 @@ pub mod preset;
 pub mod presetcmd;
 pub mod render;
 pub mod route;
+pub mod rulecmd;
 pub mod rules;
 pub mod shapes;
 pub mod stackup;

@@ -1534,6 +1534,38 @@ enum PresetCmd {
 }
 
 #[derive(Subcommand)]
+enum RulesCmd {
+    /// The rules as written and as resolved, each value with where it came from.
+    Show { board: String },
+    /// Set rules: KEY=VALUE (clearance, track_width, via=DRILL,DIAMETER, hole_clearance, edge_clearance, courtyard_clearance, placement_grid, pour.clearance, pour.min_width, pour.thermal_gap, pour.thermal_spoke), lengths. With --class, that net class's.
+    Set {
+        board: String,
+        #[arg(long)]
+        class: Option<String>,
+        #[arg(required = true, value_name = "KEY=VALUE")]
+        set: Vec<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Remove rules by KEY, from the defaults or --class.
+    Unset {
+        board: String,
+        #[arg(long)]
+        class: Option<String>,
+        #[arg(required = true, value_name = "KEY")]
+        keys: Vec<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// The rules that apply to one item (a pad, track, via or net:NAME) or a pair, and where each came from.
+    Explain {
+        board: String,
+        #[arg(required = true, num_args = 1..=2)]
+        refs: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
 enum DesignCmd {
     /// A design over a root block, its ID random unless given.
     Create {
@@ -1721,6 +1753,9 @@ enum BoardCmd {
         #[arg(long = "code")]
         codes: Vec<String>,
     },
+    /// The board's rules: defaults and per net class over its preset's floor.
+    #[command(subcommand)]
+    Rules(RulesCmd),
     /// Parts placed, nets routed and open, findings by code.
     Status { board: String },
     /// The fabrication package into --out: Gerber X2 per layer, Excellon
@@ -4037,6 +4072,37 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
         Command::Board(BoardCmd::Status { board }) => Request::BoardStatus {
             board: board.clone(),
         },
+        Command::Board(BoardCmd::Rules(RulesCmd::Show { board })) => Request::BoardRulesShow {
+            board: board.clone(),
+        },
+        Command::Board(BoardCmd::Rules(RulesCmd::Set {
+            board,
+            class,
+            set,
+            expect,
+        })) => Request::BoardRulesSet {
+            board: board.clone(),
+            class: class.clone(),
+            set: set.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Board(BoardCmd::Rules(RulesCmd::Unset {
+            board,
+            class,
+            keys,
+            expect,
+        })) => Request::BoardRulesUnset {
+            board: board.clone(),
+            class: class.clone(),
+            keys: keys.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Board(BoardCmd::Rules(RulesCmd::Explain { board, refs })) => {
+            Request::BoardRulesExplain {
+                board: board.clone(),
+                refs: refs.clone(),
+            }
+        }
         Command::Board(BoardCmd::Export {
             board,
             allow_errors,

@@ -56,9 +56,12 @@ pub fn project_file(rel: &str) -> bool {
             crate::conn::CLASSES,
             library::DIR,
             crate::pdm::PROPERTIES,
+            crate::board::preset::PRESETS,
         ]
         .contains(d),
-        [d, _, f] if *d == crate::board::BOARDS => *f == crate::board::BOARD_FILE,
+        [d, _, f] if *d == crate::board::BOARDS => {
+            *f == crate::board::BOARD_FILE || *f == crate::board::RULES_FILE
+        }
         [d, _, p, _] if *d == crate::board::BOARDS => [
             crate::board::PLACEMENTS,
             crate::board::TRACKS,
@@ -244,6 +247,8 @@ pub(crate) mod tests {
             "boards/b/vias/v1.json",
             "boards/b/holes/h1.json",
             "boards/b/placements/r1.json",
+            "boards/b/rules.json",
+            "presets/acme-2l.json",
         ] {
             assert!(super::project_file(f), "{f}");
         }

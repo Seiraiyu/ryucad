@@ -843,6 +843,10 @@ fn every_protocol_method_has_a_command() {
         ("board.hole.delete", &["board", "hole", "delete"]),
         ("board.drc", &["board", "drc"]),
         ("board.status", &["board", "status"]),
+        ("board.rules.show", &["board", "rules", "show"]),
+        ("board.rules.set", &["board", "rules", "set"]),
+        ("board.rules.unset", &["board", "rules", "unset"]),
+        ("board.rules.explain", &["board", "rules", "explain"]),
         ("board.export", &["board", "export"]),
         ("block.create", &["block", "create"]),
         ("block.edit", &["block", "edit"]),
@@ -5773,4 +5777,113 @@ fn presets_from_the_cli() {
     p.ok(&["preset", "delete", "acme-2l"]);
     let l = p.ok(&["preset", "list"]);
     assert_eq!(l["presets"].as_array().unwrap().len(), 2, "{l}");
+}
+
+/// A board's rules from the CLI (ryueda 7.B): a default and a class rule
+/// set, refused under the preset, shown with their sources, explained for
+/// a pair, unset again; a track drawn with no width takes its class's.
+#[test]
+fn board_rules_from_the_cli() {
+    let p = Pair::breakout();
+    for args in breakout_board::script() {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        p.ok(&args);
+    }
+    let id = breakout_board::BOARD;
+    // A class for the 3V3 rail, in the design.
+    p.ok(&["class", "add", "Power", "--id", "power"]);
+    p.ok(&["rail", "edit", "v3v3", "--class", "power"]);
+    let s = p.ok(&["board", "rules", "set", id, "clearance=0.1mm"]);
+    assert_eq!(s["file"]["defaults"]["clearance_nm"], 100_000, "{s}");
+    p.fails(
+        &["board", "rules", "set", id, "clearance=0.05mm"],
+        "rule_below_preset",
+        1,
+    );
+    p.fails(
+        &[
+            "board",
+            "rules",
+            "set",
+            id,
+            "--class",
+            "ghost",
+            "clearance=0.2mm",
+        ],
+        "board_class_not_found",
+        1,
+    );
+    p.fails(
+        &["board", "rules", "set", id, "clearence=0.2mm"],
+        "invalid_param",
+        1,
+    );
+    p.ok(&[
+        "board",
+        "rules",
+        "set",
+        id,
+        "--class",
+        "power",
+        "track_width=0.3mm",
+        "via=0.3mm,0.6mm",
+    ]);
+    let show = p.ok(&["board", "rules", "show", id]);
+    assert_eq!(
+        show["rules"]["classes"]["power"]["track_width_nm"]["value"], 300_000,
+        "{show}"
+    );
+    assert_eq!(
+        show["rules"]["classes"]["power"]["track_width_nm"]["source"], "class:power",
+        "{show}"
+    );
+    assert_eq!(
+        show["rules"]["board"]["clearance_nm"]["source"], "board",
+        "{show}"
+    );
+    let e = p.ok(&["board", "rules", "explain", id, "R1/2", "U1/1"]);
+    assert!(
+        e["pair"]["clearance_nm"]["value"].as_i64().unwrap() >= 100_000,
+        "{e}"
+    );
+    assert!(e["items"].as_array().unwrap().len() == 2, "{e}");
+    // A track of the power rail drawn with no width takes 0.3 mm.
+    let t = p.ok(&[
+        "board",
+        "track",
+        "add",
+        id,
+        "--net",
+        "rail:v3v3",
+        "--layer",
+        "bottom",
+        "--path",
+        "10,10",
+        "11,10",
+        "--id",
+        "pw",
+    ]);
+    assert_eq!(t["tracks"][0]["track"]["width_nm"], 300_000, "{t}");
+    // The breakout's 0.25 mm power tracks are now under the class's width.
+    let d = p.run_in(&p.direct, "board", &["board", "drc", id]).1;
+    assert!(d.to_string().contains("drc_track_width"), "{d}");
+    p.ok(&["board", "track", "delete", id, "pw"]);
+    p.ok(&[
+        "board",
+        "rules",
+        "unset",
+        id,
+        "--class",
+        "power",
+        "track_width",
+        "via",
+    ]);
+    p.ok(&["board", "rules", "unset", id, "clearance"]);
+    let show = p.ok(&["board", "rules", "show", id]);
+    assert!(
+        show["file"].is_null(),
+        "an emptied rules.json is deleted: {show}"
+    );
+    let d = p.ok(&["board", "drc", id]);
+    assert_eq!(d["findings"], json!([]), "{d}");
 }

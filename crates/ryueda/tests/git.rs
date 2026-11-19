@@ -1152,3 +1152,116 @@ fn stackups_and_inner_routes_merge() {
     assert_eq!(c.keys().collect::<Vec<_>>(), ["/stackup"], "{b}");
     assert_eq!(c["/stackup"]["kind"], "value", "{b}");
 }
+
+/// Rules from two branches (ryueda 7.B): different classes and waivers
+/// merge; one default set two ways conflicts at that value alone.
+#[test]
+fn rules_from_two_branches_merge_by_value() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = dir.path().join("run");
+    let top = dir.path().join("repo");
+    std::fs::create_dir_all(&top).unwrap();
+    let board = breakout_in_git(&top, &run);
+    let ok = |args: &[&str]| -> Value {
+        let (c, v) = ryueda(&board, &run, false, args);
+        assert_eq!(c, 0, "{args:?}: {v}");
+        v
+    };
+    ok(&[
+        "board", "create", "Main", "--design", "board", "--rect", "30,20", "--id", "main",
+    ]);
+    ok(&["class", "add", "Power", "--id", "power"]);
+    ok(&["class", "add", "Signal", "--id", "signal"]);
+    ok(&["board", "rules", "set", "main", "clearance=0.15mm"]);
+    git(&top, &["add", "-A"]);
+    git(&top, &["commit", "-qm", "rules"]);
+    git(&top, &["branch", "theirs"]);
+    ok(&[
+        "board",
+        "rules",
+        "set",
+        "main",
+        "--class",
+        "power",
+        "track_width=0.4mm",
+    ]);
+    git(&top, &["add", "-A"]);
+    git(&top, &["commit", "-qm", "ours"]);
+    git(&top, &["checkout", "-q", "theirs"]);
+    ok(&[
+        "board",
+        "rules",
+        "set",
+        "main",
+        "--class",
+        "signal",
+        "clearance=0.2mm",
+    ]);
+    git(&top, &["add", "-A"]);
+    git(&top, &["commit", "-qm", "theirs"]);
+    git(&top, &["checkout", "-q", "main"]);
+    let (merged, err) = git_try(&top, &[], &["merge", "-q", "--no-edit", "theirs"]);
+    assert!(merged, "{err}");
+    let r: Value = serde_json::from_str(
+        &std::fs::read_to_string(board.join("boards/main/rules.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(r["classes"]["power"]["track_width_nm"], 400_000);
+    assert_eq!(r["classes"]["signal"]["clearance_nm"], 200_000);
+    git(&top, &["branch", "-f", "theirs"]);
+    ok(&["board", "rules", "set", "main", "clearance=0.2mm"]);
+    git(&top, &["add", "-A"]);
+    git(&top, &["commit", "-qm", "ours 2"]);
+    git(&top, &["checkout", "-q", "theirs"]);
+    ok(&["board", "rules", "set", "main", "clearance=0.3mm"]);
+    git(&top, &["add", "-A"]);
+    git(&top, &["commit", "-qm", "theirs 2"]);
+    git(&top, &["checkout", "-q", "main"]);
+    let (merged, _) = git_try(&top, &[], &["merge", "-q", "--no-edit", "theirs"]);
+    assert!(!merged);
+    let r: Value = serde_json::from_str(
+        &std::fs::read_to_string(board.join("boards/main/rules.json")).unwrap(),
+    )
+    .unwrap();
+    let c = r["conflicts"].as_object().unwrap();
+    assert_eq!(
+        c.keys().collect::<Vec<_>>(),
+        ["/defaults/clearance_nm"],
+        "{r}"
+    );
+}
+
+/// A project preset edited two ways in different fields merges clean
+/// (ryueda 7.B).
+#[test]
+fn a_project_preset_merges_by_value() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = dir.path().join("run");
+    let top = dir.path().join("repo");
+    std::fs::create_dir_all(&top).unwrap();
+    let board = breakout_in_git(&top, &run);
+    let ok = |args: &[&str]| -> Value {
+        let (c, v) = ryueda(&board, &run, false, args);
+        assert_eq!(c, 0, "{args:?}: {v}");
+        v
+    };
+    ok(&["preset", "create", "acme-2l", "--from", "jlc-2l"]);
+    git(&top, &["add", "-A"]);
+    git(&top, &["commit", "-qm", "preset"]);
+    git(&top, &["branch", "theirs"]);
+    ok(&["preset", "edit", "acme-2l", "clearance_nm=0.12mm"]);
+    git(&top, &["add", "-A"]);
+    git(&top, &["commit", "-qm", "ours"]);
+    git(&top, &["checkout", "-q", "theirs"]);
+    ok(&["preset", "edit", "acme-2l", "edge_clearance_nm=0.3mm"]);
+    git(&top, &["add", "-A"]);
+    git(&top, &["commit", "-qm", "theirs"]);
+    git(&top, &["checkout", "-q", "main"]);
+    let (merged, err) = git_try(&top, &[], &["merge", "-q", "--no-edit", "theirs"]);
+    assert!(merged, "{err}");
+    let p: Value =
+        serde_json::from_str(&std::fs::read_to_string(board.join("presets/acme-2l.json")).unwrap())
+            .unwrap();
+    assert_eq!(p["clearance_nm"], 120_000);
+    assert_eq!(p["edge_clearance_nm"], 300_000);
+}
