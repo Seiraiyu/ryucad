@@ -36,6 +36,12 @@ pub enum Fault {
     /// stub of another net on `in1` 170 µm from its hole's wall and 120 µm
     /// from its ring (ryueda 7.A).
     HoleGap(usize),
+    /// Connection `n` (on `in1`) with both its vias made blind, top to
+    /// `in1`: their spans the only findings (ryueda 7.A).
+    InnerBlind(usize),
+    /// [`Fault::InnerBlind`] with the `in1` leg moved to `in2`, below the
+    /// vias' spans: it meets neither, so its net opens (ryueda 7.A).
+    InnerMove(usize),
 }
 
 #[derive(Clone, Debug)]
@@ -241,7 +247,15 @@ pub fn write(dir: &Path, s: &Spec) {
             let dir_x = if b.0 > a.0 { 1 } else { -1 };
             let va = (a.0 + dir_x * VIA_OFFSET, a.1);
             let vb = (s.pad(n + 1, 1).0 - dir_x * VIA_OFFSET, a.1);
-            let middle = if s.inner(n) { "in1" } else { "bottom" };
+            let blind =
+                matches!(s.fault, Some(Fault::InnerBlind(f) | Fault::InnerMove(f)) if f == n);
+            let middle = if s.fault == Some(Fault::InnerMove(n)) {
+                "in2"
+            } else if s.inner(n) {
+                "in1"
+            } else {
+                "bottom"
+            };
             legs = vec![("top", a, va), (middle, va, vb), ("top", vb, b)];
             for (k, at) in [("a", va), ("b", vb)] {
                 let (mut drill, mut dia) = s.via;
@@ -252,7 +266,7 @@ pub fn write(dir: &Path, s: &Spec) {
                 }
                 let mut via =
                     json!({"net": net, "at": [at.0, at.1], "drill_nm": drill, "diameter_nm": dia});
-                if k == "a" && s.fault == Some(Fault::ViaToIn1(n)) {
+                if (k == "a" && s.fault == Some(Fault::ViaToIn1(n))) || blind {
                     via["to"] = json!("in1");
                 }
                 if k == "a" && s.fault == Some(Fault::HoleGap(n)) {

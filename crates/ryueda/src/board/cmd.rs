@@ -207,6 +207,12 @@ pub fn edit(
             .map(|v| contour_from(v, unit))
             .collect::<Result<_>>()?;
     }
+    if layers.is_some() && stackup.is_some() {
+        return Err(
+            Error::new(Code::InvalidParam, "give --layers or --stackup, not both")
+                .with("param", "stackup"),
+        );
+    }
     if let Some(n) = layers {
         let preset = super::preset::by_name(&file.preset).unwrap_or(super::preset::DEFAULT);
         file.stackup = (n != 2)
@@ -398,10 +404,10 @@ fn rotation(v: Option<&Value>) -> Result<i64> {
     }
 }
 
-/// `board place`: one part, or several all or nothing.
 /// One part placed from flags: its reference, `at`, rotation and side.
 pub type PlaceOne<'a> = (&'a str, &'a [String; 2], Option<&'a str>, Option<&'a str>);
 
+/// `board place`: one part, or several all or nothing.
 pub fn place(
     session: &mut Session,
     board: &str,

@@ -136,6 +136,7 @@ fn generated_multilayer_boards_are_clean() {
 #[cfg_attr(debug_assertions, ignore = "release only: seeded boards checked")]
 fn each_seeded_layer_fault_gives_its_finding() {
     let mut tried = 0;
+    let mut inner_moves = 0;
     for seed in 0..32u64 {
         let spec = board_gen::seeded_multilayer(seed);
         if spec.layers == 2 {
@@ -145,6 +146,33 @@ fn each_seeded_layer_fault_gives_its_finding() {
         let set = |f: &[drc::Finding]| -> std::collections::BTreeSet<String> {
             f.iter().map(|x| format!("{:?}", x.code)).collect()
         };
+        // An inner connection's vias made blind, top to in1: their spans
+        // alone. Its in1 leg moved to in2, below them: it meets neither via,
+        // so exactly its net opens as well.
+        if let Some(n) = (0..spec.count() - 1).find(|&n| spec.inner(n)) {
+            let blind = check(&Spec {
+                fault: Some(Fault::InnerBlind(n)),
+                ..spec.clone()
+            });
+            assert_eq!(
+                codes(&blind),
+                [Code::DrcViaSpan, Code::DrcViaSpan],
+                "seed {seed}: {blind:?}"
+            );
+            let moved = check(&Spec {
+                fault: Some(Fault::InnerMove(n)),
+                ..spec.clone()
+            });
+            let opens: Vec<&drc::Finding> =
+                moved.iter().filter(|f| f.code == Code::NetOpen).collect();
+            assert_eq!(opens.len(), 1, "seed {seed}: {moved:?}");
+            assert_eq!(
+                moved.len(),
+                3,
+                "seed {seed}: the two spans and the open: {moved:?}"
+            );
+            inner_moves += 1;
+        }
         if let Some(v) = (0..spec.count() - 1).find(|&n| spec.by_vias(n)) {
             let cut = check(&Spec {
                 fault: Some(Fault::ViaToIn1(v)),
@@ -191,6 +219,7 @@ fn each_seeded_layer_fault_gives_its_finding() {
         }
     }
     assert!(tried >= 8, "{tried}");
+    assert!(inner_moves >= 4, "{inner_moves}");
 }
 
 /// Every file a seeded board writes reads back and writes the same bytes,
