@@ -275,6 +275,7 @@ fn every_protocol_method_has_a_command() {
         ("bom.diff", &["bom", "diff"]),
         ("bom.where_used", &["where-used"]),
         ("reps.list", &["reps"]),
+        ("index", &["index"]),
         ("import.guess", &["import", "guess"]),
         ("import.check", &["import", "check"]),
         ("import.run", &["import", "run"]),

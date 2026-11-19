@@ -29,6 +29,7 @@ pub mod drivers;
 pub mod fault;
 pub mod ids;
 pub mod import;
+pub mod index;
 pub mod item;
 pub mod items;
 pub mod judge;

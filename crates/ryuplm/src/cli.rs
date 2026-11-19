@@ -121,6 +121,19 @@ enum Command {
         #[arg(long = "in", value_name = "DIR")]
         within: Vec<String>,
     },
+    /// The whole catalogue as JSON lines in a file: a header, one line
+    /// per item (fields, links, joined BOM lines, state, labels, faults
+    /// counted), then the faults that name no item.
+    Index {
+        #[arg(long, value_name = "FILE")]
+        out: PathBuf,
+        /// A Git revision of the catalogue: the working files by default.
+        #[arg(long, value_name = "REV")]
+        rev: Option<String>,
+        /// Also look for representations under this folder.
+        #[arg(long = "in", value_name = "DIR")]
+        within: Vec<String>,
+    },
     /// Items added, removed and changed between two revisions.
     Diff {
         from: Option<String>,
@@ -727,6 +740,14 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
         Command::Reps { rev, within } => (
             root()?,
             Request::RepsList {
+                rev: rev.clone(),
+                within: absolute(here, within),
+            },
+        ),
+        Command::Index { out, rev, within } => (
+            root()?,
+            Request::Index {
+                out: abs_file(here, out),
                 rev: rev.clone(),
                 within: absolute(here, within),
             },

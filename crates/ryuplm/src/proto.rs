@@ -209,6 +209,15 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         within: Vec<String>,
     },
+    #[serde(rename = "index")]
+    Index {
+        /// The file to write, an absolute path: the CLI makes it one.
+        out: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        within: Vec<String>,
+    },
     #[serde(rename = "import.guess")]
     ImportGuess {
         /// An absolute path: the CLI makes it one.
