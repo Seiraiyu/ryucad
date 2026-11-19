@@ -437,7 +437,14 @@ mod tests {
             },
         )
         .unwrap();
-        let v = ask(&root, Request::Check { within: vec![] }).unwrap();
+        let v = ask(
+            &root,
+            Request::Check {
+                within: vec![],
+                against: None,
+            },
+        )
+        .unwrap();
         let codes: Vec<&str> = v["faults"]
             .as_array()
             .unwrap()

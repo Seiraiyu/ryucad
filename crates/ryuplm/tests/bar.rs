@@ -19,12 +19,13 @@ use serde_json::{Value, json};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+/// Whether the bars are strict (RYUPLM_BARS=1, a quiet machine).
+fn strict() -> bool {
+    std::env::var("RYUPLM_BARS").is_ok_and(|v| v == "1")
+}
+
 fn bar(d: Duration) -> Duration {
-    if std::env::var("RYUPLM_BARS").is_ok_and(|v| v == "1") {
-        d
-    } else {
-        d * 10
-    }
+    if strict() { d } else { d * 10 }
 }
 
 fn within(what: &str, took: Duration, limit: Duration) {
@@ -104,7 +105,10 @@ fn a_hundred_thousand_items() {
         None,
         None,
         &root,
-        Request::Check { within: vec![] },
+        Request::Check {
+            within: vec![],
+            against: None,
+        },
     );
     within(
         "check of 100,000 items",
@@ -436,6 +440,11 @@ fn where_used_across_ten_checkouts() {
             number: None,
             class: None,
             text: None,
+            state: None,
+            make_buy: None,
+            faults: None,
+            sort: None,
+            offset: None,
             limit: Some(1),
         },
     )["items"][0]["id"]
@@ -464,6 +473,97 @@ fn where_used_across_ten_checkouts() {
         "{}",
         v["problems"]
     );
+}
+
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "release only: the bars time a release build"
+)]
+fn the_index_and_list_windows_of_a_hundred_thousand_items() {
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path().join("big");
+    std::fs::create_dir_all(&root).unwrap();
+    let root = root.canonicalize().unwrap();
+    write_catalogue(&root, "bar", 100_000);
+    let mut slot = None;
+    ask(&mut slot, &root, Request::ProjectInfo {});
+    // The index, warm: judged, joined and written.
+    let out = d.path().join("index.jsonl");
+    let t = Instant::now();
+    let v = ask(
+        &mut slot,
+        &root,
+        Request::Index {
+            out: out.display().to_string(),
+            rev: None,
+            within: vec![],
+        },
+    );
+    within(
+        "index of 100,000 items",
+        t.elapsed(),
+        Duration::from_secs(10),
+    );
+    assert_eq!(v["items"], 100_000, "{v}");
+    assert_eq!(
+        std::fs::read_to_string(&out).unwrap().lines().count(),
+        100_002
+    );
+    // The first list builds the listing (states, faults counted): not
+    // the bar, but said.
+    let list = |slot: &mut Option<ryuplm::session::Session>, ask_: Value| {
+        ask(
+            slot,
+            &root,
+            Request::from_rpc("item.list", Some(ask_)).unwrap(),
+        )
+    };
+    let t = Instant::now();
+    let first = list(&mut slot, json!({"limit": 200}));
+    println!("the listing built and its first window: {:?}", t.elapsed());
+    assert_eq!(
+        (first["total"].clone(), first["count"].clone()),
+        (json!(100_000), json!(200))
+    );
+    // Each sort's first window sorts once; said, not barred.
+    for sort in ["number", "name", "class"] {
+        let t = Instant::now();
+        list(&mut slot, json!({"sort": sort, "limit": 200}));
+        println!("first window by {sort}: {:?}", t.elapsed());
+    }
+    // The bar: any window of 200, any sort and filter, from a warm daemon.
+    let windows = [
+        json!({"limit": 200, "offset": 50_000}),
+        json!({"sort": "number", "limit": 200, "offset": 99_800}),
+        json!({"sort": "name", "limit": 200, "offset": 10_000, "state": "in_work"}),
+        json!({"sort": "class", "limit": 200, "text": "bracket"}),
+        json!({"sort": "number", "limit": 200, "faults": "warnings"}),
+        json!({"limit": 200, "make_buy": "buy", "text": "m3"}),
+    ];
+    let mut worst = Duration::ZERO;
+    for w in &windows {
+        let t = Instant::now();
+        let v = list(&mut slot, w.clone());
+        let took = t.elapsed();
+        println!("window {w}: {took:?}, {} of {}", v["count"], v["total"]);
+        worst = worst.max(took);
+    }
+    // A recorded miss (#1018): about 180 ms of every warm request is the
+    // session's freshness scan (ryu-session's `fresh::Stamps` statting
+    // 100,000 files), the window itself about 1 ms. Strict runs
+    // (RYUPLM_BARS=1) still assert 20 ms, so they show the miss; the loose
+    // run (full.yml) would sit just above the measured time and go red at
+    // random, so it says the time instead. The fix is a later designed
+    // plan: every product shares the freshness check.
+    let what = "a 200-row window of 100,000 items, warm";
+    if strict() {
+        within(what, worst, Duration::from_millis(20));
+    } else {
+        println!(
+            "{what}: {worst:?} (bar 20ms, a recorded miss: #1018; asserted only with RYUPLM_BARS=1)"
+        );
+    }
 }
 
 /// Design 936's client bar: a 100,000-row first import on a ledger

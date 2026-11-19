@@ -7,7 +7,9 @@
 # BOM, a loop refused, where-used, the BOM diff and an unresolved link,
 # the activity log, an item master imported and imported again, the
 # ledger turned on and asked offline (the local number and its warning),
-# the daemon's status and stop, and a check in process.
+# the daemon's status and stop, a check in process, and the hosted
+# service's contract (version's schema_outputs, a list window, git
+# attributes, reps, resolve and index).
 #
 #   scripts/smoke-ryuplm.sh path/to/ryuplm
 set -eu
@@ -136,4 +138,26 @@ run daemon status
 has '"running":true' "a daemon is running"
 run daemon stop
 run --no-daemon check
+# The service's contract (design 938): the probe, a window of the list,
+# the driver's lines, what the catalogue reaches, a reference, and the
+# index.
+case "$("$exe" version)" in
+    *'"schema_outputs":1'*) echo "ok   ryuplm version (schema_outputs 1)" ;;
+    *)
+        echo "FAIL ryuplm version has no schema_outputs"
+        exit 1
+        ;;
+esac
+run item list --sort number --offset 0 --limit 1
+has '"total":' "a window says how many match"
+run git attributes
+run reps
+kit=$("$exe" item show KIT-1 | sed -n 's/.*"id":"\([0-9a-z]*\)".*/\1/p')
+run resolve "item/$kit"
+has '"standing":"here"' "the kit's reference stands"
+run index --out "$work/index.jsonl"
+[ -s "$work/index.jsonl" ] || {
+    echo "FAIL ryuplm index wrote nothing"
+    exit 1
+}
 echo "ryuplm smoke test passed"

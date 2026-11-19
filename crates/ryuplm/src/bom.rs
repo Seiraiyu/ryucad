@@ -735,12 +735,14 @@ pub fn foreign_children(cat: &Catalogue, others: &[PathBuf]) -> Vec<Fault> {
 /// What `check` adds for structure: links followed on disk
 /// ([`crate::links::resolve`]), the joined findings ([`joined`]; a link
 /// `resolve` already found unresolved isn't reported twice), and other
-/// catalogues' missing children ([`foreign_children`]).
+/// catalogues' missing children ([`foreign_children`]), representations
+/// read at `at`.
 pub fn findings(
     cat: &Catalogue,
     index: &crate::reps::Index,
     reps: &mut dyn Reps,
     others: &[PathBuf],
+    at: &At,
 ) -> Vec<Fault> {
     let detail = |f: &Fault, k: &str| f.error.details[k].as_str().unwrap_or("").to_owned();
     let mut out = crate::links::resolve(cat, index);
@@ -749,7 +751,7 @@ pub fn findings(
         .filter(|f| f.error.code == Code::ItemLinkUnresolved)
         .map(|f| (detail(f, "item"), detail(f, "product")))
         .collect();
-    out.extend(joined(cat, reps, &At::Working).into_iter().filter(|f| {
+    out.extend(joined(cat, reps, at).into_iter().filter(|f| {
         f.error.code != Code::ItemLinkUnresolved
             || !told.contains(&(detail(f, "item"), detail(f, "product")))
     }));
