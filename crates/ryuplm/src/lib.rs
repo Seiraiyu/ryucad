@@ -45,6 +45,7 @@ pub mod reach;
 pub mod refs;
 pub mod release;
 pub mod reps;
+pub mod review;
 pub mod server;
 pub mod session;
 pub mod settings;
@@ -72,13 +73,15 @@ impl ryu_session::Product for Plm {
 impl ryu_session::prefs::Schema for Plm {
     const CONFIG_DIR_VAR: &'static str = "RYUPLM_CONFIG_DIR";
     /// `daemon.poll_ms`, and `pdm.dependents`: folders searched for other
-    /// catalogues (numbers elsewhere), as ryucad's and ryueda's.
+    /// catalogues (numbers elsewhere), as ryucad's and ryueda's; and
+    /// `review.url`, the hosted service `ryuplm review` talks to.
     fn accepts(name: &str, value: &serde_json::Value) -> bool {
         match name {
             "daemon.poll_ms" => value.as_u64().is_some_and(|n| (10..=10_000).contains(&n)),
             "pdm.dependents" => value
                 .as_array()
                 .is_some_and(|a| a.iter().all(serde_json::Value::is_string)),
+            "review.url" => value.as_str().is_some_and(ryu_review::url_ok),
             _ => false,
         }
     }
@@ -86,7 +89,37 @@ impl ryu_session::prefs::Schema for Plm {
         match name {
             "daemon.poll_ms" => Some(serde_json::json!(250)),
             "pdm.dependents" => Some(serde_json::json!([])),
+            "review.url" => Some(serde_json::json!(ryu_review::DEFAULT_URL)),
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ryu_session::prefs::Schema;
+    use serde_json::json;
+
+    #[test]
+    fn review_url_is_an_https_url_or_this_machine() {
+        assert!(Plm::accepts(
+            "review.url",
+            &json!("https://review.example.com")
+        ));
+        assert!(Plm::accepts("review.url", &json!("http://127.0.0.1:8080")));
+        assert!(!Plm::accepts(
+            "review.url",
+            &json!("http://review.example.com")
+        ));
+        assert!(!Plm::accepts("review.url", &json!(7)));
+        assert_eq!(
+            Plm::default_of("review.url"),
+            Some(json!(ryu_review::DEFAULT_URL))
+        );
+        // What it took before, it still takes.
+        assert!(Plm::accepts("daemon.poll_ms", &json!(250)));
+        assert!(Plm::accepts("pdm.dependents", &json!(["/x"])));
+        assert!(!Plm::accepts("ui.theme", &json!("dark")));
     }
 }

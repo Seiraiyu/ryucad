@@ -152,6 +152,11 @@ enum Command {
     Git(GitCmd),
     #[command(subcommand)]
     Merge(MergeCmd),
+    /// The hosted service for this clone's GitHub pull requests: status,
+    /// threads, comments, approvals. It needs a GitHub token
+    /// (RYUPLM_REVIEW_TOKEN, GH_TOKEN or gh).
+    #[command(subcommand)]
+    Review(ReviewCmd),
     History {
         #[arg(long)]
         limit: Option<usize>,
@@ -518,6 +523,44 @@ enum GitCmd {
         theirs: PathBuf,
         path: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum ReviewCmd {
+    /// The pull request's checks and threads (the branch's own pull
+    /// request unless named).
+    Status { pr: Option<u64> },
+    /// Its comment threads; --open for those not resolved.
+    Threads {
+        pr: Option<u64>,
+        #[arg(long)]
+        open: bool,
+    },
+    /// Start a thread pinned to a reference (item/<id>, or
+    /// item/<id>/line/<line>).
+    Comment {
+        #[arg(value_name = "REF")]
+        reference: String,
+        text: String,
+        #[arg(long)]
+        pr: Option<u64>,
+        /// The commit the reference was read at (the pull request's head
+        /// by default).
+        #[arg(long)]
+        commit: Option<String>,
+    },
+    /// Reply in a thread.
+    Reply { thread: String, text: String },
+    /// Resolve a thread.
+    Resolve { thread: String },
+    /// Reopen a thread.
+    Reopen { thread: String },
+    /// Merge the base into the pull request's head with ryuplm's driver
+    /// (Merge in), when GitHub's line merge conflicts and ryuplm's doesn't.
+    Update { pr: Option<u64> },
+    /// What the release records the pull request proposes still need,
+    /// and what blocks them.
+    Approvals { pr: Option<u64> },
 }
 
 #[derive(Subcommand)]
@@ -941,13 +984,15 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
         Command::Participants => (root()?, Request::ParticipantList {}),
         Command::Undo { entry } => (root()?, Request::Undo { entry: *entry }),
         Command::Redo { entry } => (root()?, Request::Redo { entry: *entry }),
-        // Version, Init, Watch, Daemon, Git and Merge are not requests.
+        // Version, Init, Watch, Daemon, Git, Merge and Review are not
+        // requests.
         Command::Version
         | Command::Init { .. }
         | Command::Watch { .. }
         | Command::Daemon(_)
         | Command::Git(_)
-        | Command::Merge(_) => return Ok(None),
+        | Command::Merge(_)
+        | Command::Review(_) => return Ok(None),
     }))
 }
 
@@ -1012,6 +1057,40 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
                 *count,
                 Duration::from_secs(*timeout),
             )
+        }
+        Command::Review(cmd) => {
+            use ryu_review::Action;
+            let action = match cmd {
+                ReviewCmd::Status { pr } => Action::Status { pr: *pr },
+                ReviewCmd::Threads { pr, open } => Action::Threads {
+                    pr: *pr,
+                    open: *open,
+                },
+                ReviewCmd::Comment {
+                    reference,
+                    text,
+                    pr,
+                    commit,
+                } => Action::Comment {
+                    reference: reference.clone(),
+                    text: text.clone(),
+                    pr: *pr,
+                    commit: commit.clone(),
+                },
+                ReviewCmd::Reply { thread, text } => Action::Reply {
+                    thread: thread.clone(),
+                    text: text.clone(),
+                },
+                ReviewCmd::Resolve { thread } => Action::Resolve {
+                    thread: thread.clone(),
+                },
+                ReviewCmd::Reopen { thread } => Action::Reopen {
+                    thread: thread.clone(),
+                },
+                ReviewCmd::Update { pr } => Action::Update { pr: *pr },
+                ReviewCmd::Approvals { pr } => Action::Approvals { pr: *pr },
+            };
+            ryuplm::review::run(&here, action)
         }
         cmd => {
             let Some((root, req)) = request(cmd, &here)? else {

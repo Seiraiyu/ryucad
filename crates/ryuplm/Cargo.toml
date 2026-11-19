@@ -21,6 +21,9 @@ roxmltree = "0.21"
 gix = { version = "0.89", default-features = false, features = ["sha1", "revision"] }
 ryu-doc = { path = "../ryu-doc" }
 ryu-git = { path = "../ryu-git" }
+# The hosted service's client (design 938): `ryuplm review` and
+# `where-used --org`. HTTPS on rustls, as ryucad's and ryueda's.
+ryu-review = { path = "../ryu-review" }
 ryu-session = { path = "../ryu-session" }
 # AML names and lifecycles, shared with ryueda's part data (no project).
 ryueda-parts = { path = "../ryueda-parts" }
@@ -45,6 +48,7 @@ testing = []
 
 [dev-dependencies]
 assert_cmd = "2"
+ryu-review = { path = "../ryu-review", features = ["testing"] }
 ryuplm = { path = ".", default-features = false, features = ["testing"] }
 tempfile = "3"
 
