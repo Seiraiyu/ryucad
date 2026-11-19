@@ -336,6 +336,7 @@ fn dispatch(
         Request::ReleaseCheck {} => release::check(session)?,
         Request::ReleaseSync {} => release::sync(session)?,
         Request::Diff { from, to } => diff::diff(session, from.as_deref(), to.as_deref())?,
+        Request::Resolve { refs, rev } => crate::refs::resolve(session, &refs, rev.as_deref())?,
         Request::ActivityLog { limit, before } => {
             let entries = live.map_or_else(Vec::new, |l| l.log.page(limit.unwrap_or(50), before));
             json!({ "entries": entries })

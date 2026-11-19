@@ -287,6 +287,7 @@ fn every_protocol_method_has_a_command() {
         ("release.check", &["release", "check"]),
         ("release.sync", &["release", "sync"]),
         ("diff", &["diff"]),
+        ("resolve", &["resolve"]),
         ("activity.log", &["history"]),
         ("undo", &["undo"]),
         ("redo", &["redo"]),

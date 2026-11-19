@@ -275,6 +275,13 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         to: Option<String>,
     },
+    #[serde(rename = "resolve")]
+    Resolve {
+        /// `item/<id>` or `item/<id>/line/<line>`.
+        refs: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+    },
     #[serde(rename = "activity.log")]
     ActivityLog {
         #[serde(default, skip_serializing_if = "Option::is_none")]

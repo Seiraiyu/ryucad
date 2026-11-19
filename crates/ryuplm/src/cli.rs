@@ -111,6 +111,15 @@ enum Command {
         from: Option<String>,
         to: Option<String>,
     },
+    /// Whether references (item/<id>, item/<id>/line/<line>) still stand
+    /// at a revision: here, removed from their item, or gone.
+    Resolve {
+        #[arg(value_name = "REF", required = true)]
+        refs: Vec<String>,
+        /// A Git revision of the catalogue: the working files by default.
+        #[arg(long, value_name = "REV")]
+        rev: Option<String>,
+    },
     #[command(subcommand)]
     Git(GitCmd),
     #[command(subcommand)]
@@ -842,6 +851,13 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
             Request::Diff {
                 from: from.clone(),
                 to: to.clone(),
+            },
+        ),
+        Command::Resolve { refs, rev } => (
+            root()?,
+            Request::Resolve {
+                refs: refs.clone(),
+                rev: rev.clone(),
             },
         ),
         Command::History { limit, before } => (
