@@ -57,7 +57,12 @@ pub fn diff(session: &mut Session, from: Option<&str>, to: Option<&str>) -> Resu
             "added": l1.iter().filter(|l| !l0.contains(l)).collect::<Vec<_>>(),
         }));
     }
-    Ok(
-        json!({"from": from.unwrap_or("HEAD"), "to": to.unwrap_or("working tree"), "added": added, "removed": removed, "changed": changed}),
-    )
+    Ok(json!({
+        "schema": crate::OUTPUT_SCHEMA,
+        "from": from.unwrap_or("HEAD"),
+        "to": to.unwrap_or("working tree"),
+        "added": added,
+        "removed": removed,
+        "changed": changed,
+    }))
 }

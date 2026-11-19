@@ -120,7 +120,7 @@ pub(crate) fn shown(session: &Session, id: &Id) -> Value {
         o.remove("kind");
         o.insert("id".into(), json!(id));
     }
-    json!({"item": item, "path": item_path(id), "revision": session.item_revision(id)})
+    json!({"schema": crate::OUTPUT_SCHEMA, "item": item, "path": item_path(id), "revision": session.item_revision(id)})
 }
 
 pub fn create(
@@ -287,6 +287,35 @@ mod tests {
 
     fn fields(v: serde_json::Value) -> super::Fields {
         serde_json::from_value(v).unwrap()
+    }
+
+    #[test]
+    fn a_shown_item_says_its_schema() {
+        let (_d, root) = catalogue();
+        ask(
+            &root,
+            Request::ItemCreate {
+                fields: Default::default(),
+                number: Some("A-1".into()),
+                next: None,
+                expected_revision: None,
+            },
+        )
+        .unwrap();
+        let v = ask(&root, Request::ItemShow { item: "A-1".into() }).unwrap();
+        assert_eq!(v["schema"], 1);
+        // A created or edited item's answer is the same shape.
+        let e = ask(
+            &root,
+            Request::ItemEdit {
+                item: "A-1".into(),
+                fields: fields(json!({"name": "n"})),
+                unset: vec![],
+                expected_revision: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(e["schema"], 1);
     }
 
     #[test]

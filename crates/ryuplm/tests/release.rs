@@ -88,6 +88,7 @@ fn an_item_is_released_and_made_obsolete() {
         },
     )
     .unwrap();
+    assert_eq!(listed["schema"], 1);
     assert_eq!(listed["items"][0]["state"], "released");
     ask(&root, Request::ReleaseCheck {}).unwrap();
     let synced = ask(&root, Request::ReleaseSync {}).unwrap();

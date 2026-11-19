@@ -49,6 +49,7 @@ pub fn init(root: &Path, unit: Option<Unit>) -> Result<Value> {
 fn info(session: &Session) -> Value {
     let c = session.catalogue();
     json!({
+        "schema": crate::OUTPUT_SCHEMA,
         "root": session.root(),
         "project": c.manifest.project,
         "default_unit": c.manifest.default_unit,
@@ -461,5 +462,6 @@ pub(crate) mod tests {
         assert_eq!(v["items"], 0);
         assert_eq!(v["revision"].as_str().unwrap().len(), 32);
         assert_eq!(v["default_unit"], "mm");
+        assert_eq!(v["schema"], 1);
     }
 }

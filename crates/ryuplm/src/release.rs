@@ -300,6 +300,7 @@ pub fn list(session: &mut Session, item: Option<&str>) -> Result<Value> {
         })
         .collect();
     let mut v = json!({
+        "schema": crate::OUTPUT_SCHEMA,
         "repository": has_repo,
         "release_branch": config.release_branch,
         "records": shown,
