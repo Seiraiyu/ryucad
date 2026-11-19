@@ -437,8 +437,104 @@ pub fn resolve(p: &crate::project::Project, name: &str) -> Option<std::sync::Arc
     if let Some(b) = by_name(name) {
         return Some(std::sync::Arc::new(b.clone()));
     }
-    let _ = p; // Task 5: the project's own presets
-    None
+    let id = crate::id::Id::parse(name, "preset").ok()?;
+    p.presets
+        .get(&id)?
+        .item
+        .as_ref()
+        .ok()
+        .cloned()
+        .map(std::sync::Arc::new)
+}
+
+/// A project's own presets' folder.
+pub const PRESETS: &str = "presets";
+
+/// Every preset's name a project can use, for messages.
+pub fn names_in(p: &crate::project::Project) -> String {
+    ALL.iter()
+        .map(|x| x.name.to_string())
+        .chain(p.presets.keys().map(ToString::to_string))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// A project's own presets: `presets/<id>.json`, each its preset or why
+/// not, and the faults of files there that aren't presets. A preset's
+/// `name` is its file's ID, and no built-in's.
+#[allow(clippy::type_complexity)]
+pub fn load(
+    src: &dyn crate::source::Source,
+) -> crate::error::Result<(
+    std::collections::BTreeMap<crate::id::Id, crate::library::Loaded<Preset>>,
+    Vec<crate::fault::Fault>,
+)> {
+    use crate::error::Code;
+    use crate::fault::Fault;
+    use crate::source::{Kind, join};
+    let mut out = std::collections::BTreeMap::new();
+    let mut faults = Vec::new();
+    for (file, kind) in src.list(PRESETS)? {
+        let path = join(PRESETS, &file);
+        let id = file
+            .strip_suffix(".json")
+            .and_then(|s| crate::id::Id::parse(s, "preset").ok());
+        let (Kind::File, Some(id)) = (kind, id) else {
+            faults.push(
+                Fault::error(
+                    Code::InvalidDocument,
+                    format!("{path} isn't a preset file (presets/<id>.json)"),
+                )
+                .with("path", &path),
+            );
+            continue;
+        };
+        let Some(bytes) = src.read(&path)? else {
+            continue;
+        };
+        let loaded = match crate::doc::read::<Preset>(&bytes, &path, KIND, FORMAT) {
+            Ok(p) => {
+                let mut f = Vec::new();
+                if p.name != id.as_str() {
+                    f.push(
+                        Fault::error(
+                            Code::InvalidDocument,
+                            format!("preset {id}'s name is {}, not its file's", p.name),
+                        )
+                        .with("path", &path)
+                        .with("pointer", "/name"),
+                    );
+                }
+                if by_name(id.as_str()).is_some() {
+                    f.push(
+                        Fault::error(
+                            Code::InvalidDocument,
+                            format!("a project preset can't take a built-in's name ({id})"),
+                        )
+                        .with("path", &path)
+                        .with("pointer", "/name"),
+                    );
+                }
+                if let Some(s) = &p.stackup {
+                    f.extend(
+                        super::stackup::judge(s)
+                            .into_iter()
+                            .map(|x| x.with("path", &path)),
+                    );
+                }
+                crate::library::Loaded {
+                    item: Ok(p),
+                    faults: f,
+                }
+            }
+            Err(e) => crate::library::Loaded {
+                item: Err(e),
+                faults: Vec::new(),
+            },
+        };
+        out.insert(id, loaded);
+    }
+    Ok((out, faults))
 }
 
 #[cfg(test)]

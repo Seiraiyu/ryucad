@@ -360,6 +360,7 @@ pub fn newest(kind: &str) -> Option<u64> {
         | crate::board::TRACK_KIND
         | crate::board::VIA_KIND => crate::board::file::NEWEST,
         crate::board::HOLE_KIND => crate::board::FORMAT,
+        crate::board::preset::KIND => crate::board::preset::FORMAT,
         _ => return None,
     })
 }

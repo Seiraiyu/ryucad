@@ -63,20 +63,8 @@ pub fn load(src: &dyn Source) -> Result<(BTreeMap<Id, BoardFiles>, Vec<Fault>)> 
 }
 
 fn board_faults(b: &Board, path: &str) -> Vec<Fault> {
-    let preset = super::preset::by_name(&b.preset).is_none().then(|| {
-        Fault::error(
-            Code::InvalidDocument,
-            format!(
-                "preset {} isn't known; presets are {}",
-                b.preset,
-                super::preset::names()
-            ),
-        )
-        .with("pointer", "/preset")
-    });
     super::outline::judge(b)
         .into_iter()
-        .chain(preset)
         .chain(b.stackup.iter().flat_map(super::stackup::judge))
         .map(|f| f.with("path", path))
         .collect()
@@ -457,14 +445,6 @@ mod tests {
         let (boards, _) = load(&files(&[("boards/b/placements/r1.json", PLACED)])).unwrap();
         let b = &boards[&Id::parse("b", "board").unwrap()];
         assert_eq!(b.faults()[0].error.code, Code::InvalidDocument);
-    }
-
-    #[test]
-    fn an_unknown_preset_is_a_fault() {
-        let other = BOARD.replace("jlc-2l", "acme-6l");
-        let (boards, _) = load(&files(&[("boards/b/board.json", &other)])).unwrap();
-        let b = &boards[&Id::parse("b", "board").unwrap()];
-        assert_eq!(b.faults()[0].error.details["pointer"], "/preset");
     }
 
     #[test]
