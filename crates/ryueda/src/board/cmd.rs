@@ -96,18 +96,20 @@ pub fn answer(p: &Project, id: &Id) -> Value {
         "faults": fault::list(&b.faults()),
     });
     match &b.board.item {
-        Ok(board) => v["board"] = crate::doc::to_value(board, BOARD_KIND, FORMAT),
+        Ok(board) => v["board"] = super::file::value(board, BOARD_KIND),
         Err(e) => v["error"] = json!(e),
     }
     v
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn create(
     session: &mut Session,
     name: &str,
     design: &str,
     rect: Option<&[String; 2]>,
     outline: Option<&Value>,
+    layers: Option<u32>,
     id: Option<&str>,
     expected: Option<&str>,
 ) -> Result<Value> {
@@ -144,6 +146,10 @@ pub fn create(
             ));
         }
     };
+    let stackup = match layers {
+        None | Some(2) => None,
+        Some(n) => Some(super::stackup::even(super::preset::DEFAULT, n as usize)?),
+    };
     let id = new_id(id, "board", |s| {
         Id::parse(s, "board").is_ok_and(|i| p.boards.contains_key(&i))
     })?;
@@ -153,6 +159,7 @@ pub fn create(
         preset: super::preset::DEFAULT.name.into(),
         outline,
         cutouts: Vec::new(),
+        stackup,
     };
     let mut w = Writes::default();
     w.put(board_path(&id), &board, BOARD_KIND);
@@ -162,12 +169,15 @@ pub fn create(
     Ok(v)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn edit(
     session: &mut Session,
     board: &str,
     name: Option<&str>,
     outline: Option<&Value>,
     cutouts: Option<&Value>,
+    layers: Option<u32>,
+    stackup: Option<&Value>,
     expected: Option<&str>,
 ) -> Result<Value> {
     let p = session.project();
@@ -197,6 +207,21 @@ pub fn edit(
             .map(|v| contour_from(v, unit))
             .collect::<Result<_>>()?;
     }
+    if layers.is_some() && stackup.is_some() {
+        return Err(
+            Error::new(Code::InvalidParam, "give --layers or --stackup, not both")
+                .with("param", "stackup"),
+        );
+    }
+    if let Some(n) = layers {
+        let preset = super::preset::by_name(&file.preset).unwrap_or(super::preset::DEFAULT);
+        file.stackup = (n != 2)
+            .then(|| super::stackup::even(preset, n as usize))
+            .transpose()?;
+    }
+    if let Some(v) = stackup {
+        file.stackup = Some(stackup_from(v, unit)?);
+    }
     let mut w = Writes::default();
     w.put(board_path(&id), &file, BOARD_KIND);
     let before = super::drc::now(session, &id);
@@ -204,6 +229,30 @@ pub fn edit(
     let mut v = answer(session.project(), &id);
     v["drc"] = super::drc::delta(session, &id, before);
     Ok(v)
+}
+
+/// A stackup from a request: thicknesses as `coord` reads lengths.
+pub fn stackup_from(v: &Value, unit: Unit) -> Result<super::stackup::Stackup> {
+    let mut v = v.clone();
+    let layers = v
+        .get_mut("layers")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| {
+            Error::new(Code::InvalidParam, "a stackup is {layers: [...]}").with("param", "stackup")
+        })?;
+    for l in layers {
+        if let Some(t) = l.get("thickness_nm").cloned() {
+            l["thickness_nm"] = json!(coord::nm(&t, unit)?);
+        }
+    }
+    let s: super::stackup::Stackup = serde_json::from_value(v).map_err(|e| {
+        Error::new(Code::InvalidParam, format!("the stackup doesn't read: {e}"))
+            .with("param", "stackup")
+    })?;
+    if let Some(f) = super::stackup::judge(&s).into_iter().next() {
+        return Err(f.error);
+    }
+    Ok(s)
 }
 
 pub fn delete(session: &mut Session, board: &str, expected: Option<&str>) -> Result<Value> {
@@ -260,7 +309,7 @@ pub fn drc(session: &mut Session, board: &str, codes: &[String]) -> Result<Value
         .collect();
     let errors = findings.iter().filter(|f| f.is_error()).count();
     let owned: Vec<super::drc::Finding> = findings.iter().map(|f| (*f).clone()).collect();
-    let v = json!({
+    let mut v = json!({
         "board": format!("board/{id}"),
         "revision": session.project().boards[&id].revision,
         "rules": c.preset.rules_json(),
@@ -270,6 +319,11 @@ pub fn drc(session: &mut Session, board: &str, codes: &[String]) -> Result<Value
         "warnings": owned.len() - errors,
         "incomplete": c.incomplete,
     });
+    // ryueda 7.A's rules, shown for boards with a stackup of their own:
+    // added to `rules` they would move every stage 5 answer.
+    if board_of(&session.project().boards[&id]).is_ok_and(|f| f.stackup.is_some()) {
+        v["layer_rules"] = c.preset.layer_rules_json();
+    }
     if errors > 0 {
         return Err(Error::new(
             Code::CheckFailed,
@@ -350,11 +404,14 @@ fn rotation(v: Option<&Value>) -> Result<i64> {
     }
 }
 
+/// One part placed from flags: its reference, `at`, rotation and side.
+pub type PlaceOne<'a> = (&'a str, &'a [String; 2], Option<&'a str>, Option<&'a str>);
+
 /// `board place`: one part, or several all or nothing.
 pub fn place(
     session: &mut Session,
     board: &str,
-    one: Option<(&str, &[String; 2], Option<&str>)>,
+    one: Option<PlaceOne>,
     ops: Option<&Value>,
     expected: Option<&str>,
 ) -> Result<Value> {
@@ -365,7 +422,9 @@ pub fn place(
     let id = b.id.clone();
     let design = board_of(b)?.design.clone();
     let asks: Vec<Value> = match (one, ops) {
-        (Some((r, at, rot)), None) => vec![json!({"ref": r, "at": at, "rotation": rot})],
+        (Some((r, at, rot, side)), None) => {
+            vec![json!({"ref": r, "at": at, "rotation": rot, "side": side})]
+        }
         (None, Some(Value::Array(list))) if !list.is_empty() => list.clone(),
         _ => {
             return Err(Error::new(
@@ -406,18 +465,34 @@ pub fn place(
         let placement = Placement {
             at: coord::point(at, unit)?,
             rotation_mdeg: rotation(a.get("rotation"))?,
+            side: match a.get("side").and_then(Value::as_str) {
+                None | Some("top") => PlacementSide::Top,
+                Some("bottom") => PlacementSide::Bottom,
+                Some(x) => {
+                    return Err(Error::new(
+                        Code::InvalidParam,
+                        format!("--side is top or bottom, not {x}"),
+                    )
+                    .with("param", "side"));
+                }
+            },
         };
         w.put(
             placement_path(&id, &o.reference),
             &placement,
             PLACEMENT_KIND,
         );
-        placed.push(json!({
+        let mut entry = json!({
             "occurrence": o.reference,
             "refdes": o.refdes,
             "at": placement.at,
             "rotation_mdeg": placement.rotation_mdeg,
-        }));
+        });
+        // Stage 5's answers don't move: a top part says no side.
+        if !placement.side.is_top() {
+            entry["side"] = json!(placement.side.name());
+        }
+        placed.push(entry);
     }
     let before = super::drc::now(session, &id);
     commit(session, &format!("board {id} place"), w)?;
@@ -473,6 +548,14 @@ pub fn show(p: &Project, board: &str, pads: bool) -> Result<Value> {
     let Ok(file) = board_of(b) else {
         return Ok(v);
     };
+    if file.stackup.is_some() {
+        let n = super::stackup::copper_count(file);
+        v["layers"] = json!(
+            (0..n)
+                .map(|i| CopperLayer::at(i, n).short())
+                .collect::<Vec<_>>()
+        );
+    }
     match occ::occurrences(p, &file.design) {
         Err(e) => v["design_error"] = json!(e),
         Ok((_, occs)) => {
@@ -494,7 +577,13 @@ pub fn show(p: &Project, board: &str, pads: bool) -> Result<Value> {
                         "value": o.value,
                         "footprint": o.footprint_ref,
                         "dnp": o.dnp,
-                        "placement": placement.map(|pl| json!({"at": pl.at, "rotation_mdeg": pl.rotation_mdeg})),
+                        "placement": placement.map(|pl| {
+                            let mut v = json!({"at": pl.at, "rotation_mdeg": pl.rotation_mdeg});
+                            if !pl.side.is_top() {
+                                v["side"] = json!(pl.side.name());
+                            }
+                            v
+                        }),
                     })
                 })
                 .collect();

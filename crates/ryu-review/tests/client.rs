@@ -168,3 +168,103 @@ fn shared_actions_ask_the_service_about_the_clones_pull_request() {
     let posted: serde_json::Value = serde_json::from_str(&seen.last().unwrap().body).unwrap();
     assert_eq!(posted, j!({"ref": "board:breakout/r1", "body": "why 10k?"}));
 }
+
+#[test]
+fn a_handler_answers_each_request_from_what_it_asked() {
+    let fake = ryu_review::testing::Fake::serve(|s| {
+        let body = serde_json::json!({"path": s.path, "method": s.method}).to_string();
+        (200, "application/json", body.into_bytes())
+    });
+    let c = ryu_review::Client::new(&fake.url, "t");
+    let v = c.get("/x?y=1").unwrap();
+    assert_eq!(
+        (v["path"].as_str(), v["method"].as_str()),
+        (Some("/api/v1/x?y=1"), Some("GET"))
+    );
+    assert_eq!(fake.seen.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn the_fake_ledger_hands_out_reserves_and_answers() {
+    use ryu_doc::error::Code;
+    use ryu_review::testing::Ledger;
+    use serde_json::json;
+    let (fake, ledger) = Ledger::start("acme/widgets");
+    let c = ryu_review::Client::new(&fake.url, "t");
+    let cat = "0123456789abcdef0123456789abcdef";
+    let other = "fedcba9876543210fedcba9876543210";
+    let base = "/repos/acme/widgets/numbers";
+    // Above the floor, then on from where the sequence is.
+    let v = c
+        .post(
+            &format!("{base}/next"),
+            &json!({"catalogue": cat, "template": "M-{seq:3}", "count": 2, "floor": 7}),
+        )
+        .unwrap();
+    assert_eq!(
+        (v["schema"].clone(), v["numbers"].clone()),
+        (json!(1), json!(["M-008", "M-009"]))
+    );
+    let v = c
+        .post(
+            &format!("{base}/next"),
+            &json!({"catalogue": other, "template": "M-{seq:3}"}),
+        )
+        .unwrap();
+    assert_eq!(v["numbers"], json!(["M-010"]));
+    // All or none: one number held for another catalogue refuses the call.
+    let e = c
+        .post(
+            &format!("{base}/reserve"),
+            &json!({"catalogue": other, "numbers": ["M-008", "X 1"]}),
+        )
+        .unwrap_err();
+    assert_eq!(e.code, Code::PartNumberTaken);
+    assert_eq!(e.details["service"]["taken"][0]["number"], "M-008");
+    assert_eq!(
+        e.details["service"]["taken"][0]["holders"][0]["catalogue"],
+        cat
+    );
+    assert!(!ledger.lock().unwrap().reserved.contains_key("X 1"));
+    c.post(
+        &format!("{base}/reserve"),
+        &json!({"catalogue": other, "numbers": ["X 1"]}),
+    )
+    .unwrap();
+    let v = c
+        .get(&format!("{base}/{}", ryu_review::escape("X 1")))
+        .unwrap();
+    assert_eq!(
+        (v["number"].as_str(), v["holders"][0]["kind"].as_str()),
+        (Some("X 1"), Some("reserved"))
+    );
+    let v = c.get(&format!("{base}?catalogue={other}")).unwrap();
+    let listed: Vec<&str> = v["reservations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["number"].as_str().unwrap())
+        .collect();
+    assert_eq!(listed, ["M-010", "X 1"]);
+    assert_eq!(v["after"], serde_json::Value::Null);
+    // A bound number is held for its item; a refusal answers every call.
+    ledger
+        .lock()
+        .unwrap()
+        .bound
+        .insert("B-1".into(), (other.into(), "k3v9q2m8x4c1p".into()));
+    let v = c.get(&format!("{base}/B-1")).unwrap();
+    assert_eq!(
+        (
+            v["holders"][0]["kind"].as_str(),
+            v["holders"][0]["item"].as_str()
+        ),
+        (Some("bound"), Some("k3v9q2m8x4c1p"))
+    );
+    ledger.lock().unwrap().refuse = Some((403, "not_in_beta".into()));
+    assert_eq!(
+        c.get(&format!("{base}/B-1")).unwrap_err().code,
+        Code::ReviewNotInBeta
+    );
+    assert_eq!(ledger.lock().unwrap().next_calls, 2);
+}

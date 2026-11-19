@@ -33,6 +33,7 @@ pub mod index;
 pub mod item;
 pub mod items;
 pub mod judge;
+pub mod ledger;
 pub mod links;
 pub mod listing;
 pub mod load;
@@ -72,15 +73,17 @@ impl ryu_session::Product for Plm {
 
 impl ryu_session::prefs::Schema for Plm {
     const CONFIG_DIR_VAR: &'static str = "RYUPLM_CONFIG_DIR";
-    /// `daemon.poll_ms`, and `pdm.dependents`: folders searched for other
-    /// catalogues (numbers elsewhere), as ryucad's and ryueda's; and
-    /// `review.url`, the hosted service `ryuplm review` talks to.
+    /// `daemon.poll_ms`, `pdm.dependents` (folders searched for other
+    /// catalogues: numbers elsewhere, as ryucad's and ryueda's) and
+    /// `review.url` (the hosted service: the ledger's, and the one
+    /// `ryuplm review` talks to).
     fn accepts(name: &str, value: &serde_json::Value) -> bool {
         match name {
             "daemon.poll_ms" => value.as_u64().is_some_and(|n| (10..=10_000).contains(&n)),
             "pdm.dependents" => value
                 .as_array()
                 .is_some_and(|a| a.iter().all(serde_json::Value::is_string)),
+            // The hosted service the ledger is asked of (design 936).
             "review.url" => value.as_str().is_some_and(ryu_review::url_ok),
             _ => false,
         }
@@ -96,30 +99,34 @@ impl ryu_session::prefs::Schema for Plm {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+mod prefs_tests {
     use ryu_session::prefs::Schema;
     use serde_json::json;
 
     #[test]
     fn review_url_is_an_https_url_or_this_machine() {
-        assert!(Plm::accepts(
+        assert!(crate::Plm::accepts(
             "review.url",
             &json!("https://review.example.com")
         ));
-        assert!(Plm::accepts("review.url", &json!("http://127.0.0.1:8080")));
-        assert!(!Plm::accepts(
+        assert!(crate::Plm::accepts(
             "review.url",
-            &json!("http://review.example.com")
+            &json!("http://127.0.0.1:9")
         ));
-        assert!(!Plm::accepts("review.url", &json!(7)));
+        assert!(!crate::Plm::accepts(
+            "review.url",
+            &json!("http://example.com")
+        ));
+        assert!(!crate::Plm::accepts("review.url", &json!(3)));
         assert_eq!(
-            Plm::default_of("review.url"),
+            crate::Plm::default_of("review.url"),
             Some(json!(ryu_review::DEFAULT_URL))
         );
+        assert_eq!(crate::ledger::PLM.name, "ryuplm");
+        assert_eq!(crate::ledger::PLM.token_var, "RYUPLM_REVIEW_TOKEN");
         // What it took before, it still takes.
-        assert!(Plm::accepts("daemon.poll_ms", &json!(250)));
-        assert!(Plm::accepts("pdm.dependents", &json!(["/x"])));
-        assert!(!Plm::accepts("ui.theme", &json!("dark")));
+        assert!(crate::Plm::accepts("daemon.poll_ms", &json!(250)));
+        assert!(crate::Plm::accepts("pdm.dependents", &json!(["/x"])));
+        assert!(!crate::Plm::accepts("ui.theme", &json!("dark")));
     }
 }

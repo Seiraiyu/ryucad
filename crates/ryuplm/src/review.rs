@@ -6,30 +6,9 @@
 use crate::error::{Code, Error, Result};
 use serde_json::{Value, json};
 
-/// Overrides the `review.url` preference.
-pub const URL_VAR: &str = "RYUPLM_REVIEW_URL";
-/// The GitHub token to send, before `GH_TOKEN`, `GITHUB_TOKEN` and `gh
-/// auth token`.
-pub const TOKEN_VAR: &str = "RYUPLM_REVIEW_TOKEN";
-
-/// ryuplm as the review client names it.
-pub const PLM: ryu_review::Product = ryu_review::Product {
-    name: "ryuplm",
-    version: env!("CARGO_PKG_VERSION"),
-    url_var: URL_VAR,
-    token_var: TOKEN_VAR,
-    url_pref,
-};
-
-/// The `review.url` preference, when the preferences set it.
-fn url_pref() -> Option<String> {
-    ryu_session::prefs::Preferences::<crate::Plm>::load()
-        .ok()?
-        .values
-        .get(ryu_review::URL_PREF)?
-        .as_str()
-        .map(str::to_owned)
-}
+// ryuplm as the service's client names it: the ledger's (design 936),
+// one `review.url` and one token for both.
+use crate::ledger::PLM;
 
 /// Runs `action` for the clone holding `here`. A comment's reference is
 /// read here first, so a mistyped one never reaches the service.

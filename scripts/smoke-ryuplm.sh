@@ -6,9 +6,10 @@
 # a change undone and redone through the daemon, a kit's own line, its
 # BOM, a loop refused, where-used, the BOM diff and an unresolved link,
 # the activity log, an item master imported and imported again, the
-# daemon's status and stop, a check in process, and the hosted service's
-# contract (version's schema_outputs, a list window, git attributes, reps,
-# resolve and index).
+# ledger turned on and asked offline (the local number and its warning),
+# the daemon's status and stop, a check in process, and the hosted
+# service's contract (version's schema_outputs, a list window, git
+# attributes, reps, resolve and index).
 #
 #   scripts/smoke-ryuplm.sh path/to/ryuplm
 set -eu
@@ -118,6 +119,21 @@ run import run erp master.csv
 has '"written":2' "two items imported"
 run import run erp master.csv
 has '"written":0' "an unchanged re-import writes nothing"
+# The ledger (design 936): turned on, then asked with no service to
+# reach. --next falls back to the local number with a ledger_unavailable
+# warning; number who has nothing to fall back to. The live round (a
+# reservation, a push binding it, another catalogue's PR refused) is
+# proved by ryupdm-service's own tests and its e2e.
+export RYUPLM_REVIEW_URL=http://127.0.0.1:9 RYUPLM_REVIEW_TOKEN=smoke
+git remote add origin https://github.com/acme/widgets.git
+run settings edit --ledger on
+has '"ledger":true' "the ledger is on"
+run item create --next --class machined --name Clip
+has '"reserved":false' "offline, the number is local"
+has 'ledger_unavailable' "offline, a warning says so"
+fails ledger_unavailable number who MECH-00101
+run settings edit --ledger off
+
 run daemon status
 has '"running":true' "a daemon is running"
 run daemon stop

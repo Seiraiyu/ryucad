@@ -377,6 +377,7 @@ fn run(root: &Path, name: &str, file: &str) -> Value {
             dry_run: false,
             prefer: None,
             limit: None,
+            numbers: Default::default(),
             expected_revision: None,
         },
     )
@@ -389,6 +390,7 @@ fn run(root: &Path, name: &str, file: &str) -> Value {
             dry_run: false,
             prefer: None,
             limit: None,
+            numbers: Default::default(),
             expected_revision: None,
         },
     )

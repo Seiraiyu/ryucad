@@ -295,6 +295,9 @@ fn dispatch(
             save,
         )?,
         Request::ImportList {} => crate::import::list(session)?,
+        Request::NumberLocal { next, class, item } => {
+            crate::numbers::local(session, next.as_deref(), class.as_deref(), item.as_deref())?
+        }
         Request::ImportCheck { name, file, limit } => {
             crate::import::preview::check(session, &name, std::path::Path::new(&file), limit)?
         }
@@ -304,6 +307,7 @@ fn dispatch(
             dry_run,
             prefer,
             limit,
+            numbers,
             expected_revision,
         } => {
             let prefer = prefer
@@ -317,6 +321,7 @@ fn dispatch(
                 dry_run,
                 prefer,
                 limit,
+                &numbers,
                 expected_revision.as_deref(),
             )?
         }

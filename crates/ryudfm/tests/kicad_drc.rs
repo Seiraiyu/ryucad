@@ -9,7 +9,9 @@
 //! a type, so on a board that reaches it only KiCad's gaps are checked
 //! against ours; a board whose CAD netlist lies off its copper (#933) has
 //! its opens and shorts printed, not compared; a gap KiCad gives as 0 is a
-//! contact (copper of no net on a net's), one island for us. A board in
+//! contact (copper of no net on a net's), one island for us. Gaps to a
+//! plated hole's wall on layers where it has no pad are ours too
+//! (`Copper::hole_clearance`, #946), as KiCad reports them. A board in
 //! `KNOWN_DRC_CASES` has its disagreements printed under its issue.
 //! Release builds in the devcontainer only:
 //!
@@ -27,7 +29,7 @@ use ryudfm::testing::{compare_with_drc, manifest};
 
 /// Boards whose disagreements with KiCad's DRC are printed rather than
 /// asserted, each with the issue that holds them.
-const KNOWN_DRC_CASES: &[(&str, &str)] = &[("osm-l-bmc-som", "#946")];
+const KNOWN_DRC_CASES: &[(&str, &str)] = &[("lpddr4-test-board", "#1007")];
 
 #[test]
 #[ignore = "needs scripts/fetch-dfm-corpus.sh's DRC reports: run in the devcontainer"]

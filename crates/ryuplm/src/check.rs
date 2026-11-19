@@ -4,7 +4,7 @@
 use crate::error::{Code, Error, Result};
 use crate::judge::Context;
 use crate::session::Session;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use std::path::PathBuf;
 
 pub const SCHEMA: u64 = 1;
@@ -98,25 +98,29 @@ pub fn report(session: &mut Session, within: &[String], against: Option<&str>) -
     let errors = faults.iter().filter(|f| f.is_error()).count()
         + release.iter().filter(|f| f["severity"] == "error").count();
     let warnings = faults.len() + release.len() - errors;
+    // Built by moving: `json!` would copy every fault again. With
+    // `against`, each fault says whether it is new since then.
     let listed: Vec<Value> = faults
-        .iter()
-        .map(|f| {
-            let mut v = f.to_json();
-            if let Some((_, was)) = &old {
-                v["new"] = json!(was.as_ref().is_none_or(|w| !w.contains(&key(f))));
+        .into_iter()
+        .map(|f| match &old {
+            Some((_, was)) => {
+                let new = was.as_ref().is_none_or(|w| !w.contains(&key(&f)));
+                let mut v = f.into_json();
+                v["new"] = json!(new);
+                v
             }
-            v
+            None => f.into_json(),
         })
         .collect();
-    let mut r = json!({
-        "schema": SCHEMA,
-        "faults": listed,
-        "errors": errors,
-        "warnings": warnings,
-    });
+    let mut r = Map::new();
+    r.insert("errors".into(), json!(errors));
+    r.insert("faults".into(), Value::Array(listed));
+    r.insert("schema".into(), json!(SCHEMA));
+    r.insert("warnings".into(), json!(warnings));
+    let mut r = Value::Object(r);
     // Only when there are release findings, as ryueda's.
     if !release.is_empty() {
-        r["release"] = json!(release);
+        r["release"] = Value::Array(release);
     }
     if let (Some(rev), Some((commit, was))) = (against, &old) {
         r["against"] = match was {
@@ -139,11 +143,15 @@ pub fn check(session: &mut Session, within: &[String], against: Option<&str>) ->
         r["warnings"].as_u64().unwrap_or(0),
     );
     if e > 0 {
-        return Err(Error::new(
+        // The report moved in, not copied by `with`.
+        let mut err = Error::new(
             Code::CheckFailed,
             format!("check found {e} error(s) and {w} warning(s)"),
-        )
-        .with("report", r));
+        );
+        let mut details = Map::new();
+        details.insert("report".into(), r);
+        err.details = Value::Object(details);
+        return Err(err);
     }
     Ok(r)
 }

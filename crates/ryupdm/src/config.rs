@@ -19,8 +19,9 @@
 //!
 //! The file is written at the lowest format holding its keys: 1, or 2
 //! with `approvals` (design 261), 5 with numbering schemes
-//! (`part_number.schemes`, design 734). A key a newer format added is refused in
-//! a file that declares an older one.
+//! (`part_number.schemes`, design 734), 6 with the ledger
+//! (`part_number.ledger`, design 936). A key a newer format added is
+//! refused in a file that declares an older one.
 
 use crate::PDM_CONFIG;
 use crate::approvals::Approvals;
@@ -34,8 +35,9 @@ use std::collections::BTreeMap;
 pub const KIND: &str = "ryupdm.config";
 /// The newest format this build reads: 2 added `approvals` (and
 /// `dependencies`), 3 teams in its rules and revoked keys, 4 `packages`
-/// (design 436), 5 `part_number.schemes` (design 734).
-pub const FORMAT: u64 = 5;
+/// (design 436), 5 `part_number.schemes` (design 734), 6
+/// `part_number.ledger` (design 936).
+pub const FORMAT: u64 = 6;
 
 /// How a part's revisions are labelled. Labels are always derived from the
 /// scheme, never typed.
@@ -470,6 +472,11 @@ pub struct Config {
     /// The numbering schemes (format 5), exclusive with `pattern`; judged
     /// by the product (ryuplm), never by [`crate::props::check`].
     pub schemes: Vec<NumberScheme>,
+    /// Whether the organization's ledger hands out and holds this
+    /// catalogue's numbers (`part_number.ledger`, format 6, design 936):
+    /// committed, so every clone and the hosted service agree. ryupdm
+    /// judges nothing by it; ryuplm's CLI asks the ledger.
+    pub ledger: bool,
     /// The custom properties, by name.
     pub properties: BTreeMap<String, Decl>,
     /// Who must approve releases, and the keys trusted to say they did
@@ -491,6 +498,7 @@ impl Default for Config {
             release_branch: "main".to_owned(),
             pattern: None,
             schemes: Vec::new(),
+            ledger: false,
             properties: BTreeMap::new(),
             approvals: None,
             bump: Bump::None,
@@ -516,7 +524,9 @@ impl Config {
 
     /// The lowest format that holds these settings.
     pub fn format(&self) -> u64 {
-        if !self.schemes.is_empty() {
+        if self.ledger {
+            6
+        } else if !self.schemes.is_empty() {
             5
         } else if self.packages.is_some() {
             4
@@ -540,13 +550,26 @@ impl Config {
             "release_branch": self.release_branch,
             "revisions": self.revisions.as_str(),
         });
+        let mut pn = Map::new();
         if let Some(p) = &self.pattern {
-            v["part_number"] = json!({"pattern": p.text()});
+            pn.insert("pattern".into(), json!(p.text()));
         }
         if !self.schemes.is_empty() {
-            v["part_number"] = json!({
-                "schemes": self.schemes.iter().map(NumberScheme::to_json).collect::<Vec<_>>()
-            });
+            pn.insert(
+                "schemes".into(),
+                json!(
+                    self.schemes
+                        .iter()
+                        .map(NumberScheme::to_json)
+                        .collect::<Vec<_>>()
+                ),
+            );
+        }
+        if self.ledger {
+            pn.insert("ledger".into(), json!(true));
+        }
+        if !pn.is_empty() {
+            v["part_number"] = Value::Object(pn);
         }
         if !self.properties.is_empty() {
             let props: Map<String, Value> = self
@@ -608,8 +631,9 @@ impl Config {
                     "part_number takes a pattern or schemes, not both",
                 ));
             }
-            if !po.has("schemes") {
-                // Format 1's `{pattern}`: the pattern is required.
+            // Format 1's `{pattern}`: required, unless the object holds
+            // schemes or only the ledger.
+            if !po.has("schemes") && (po.has("pattern") || !po.has("ledger")) {
                 let text = po.take("pattern")?;
                 let text = text
                     .as_str()
@@ -639,6 +663,17 @@ impl Config {
                     }
                     c.schemes.push(s);
                 }
+            }
+            if let Some(l) = po.take_opt("ledger") {
+                if declared < 6 {
+                    return Err(invalid(
+                        "/part_number/ledger",
+                        "ledger needs format 6: write the file at format 6",
+                    ));
+                }
+                c.ledger = l.as_bool().ok_or_else(|| {
+                    invalid("/part_number/ledger", "ledger must be true or false")
+                })?;
             }
             po.finish()?;
         }
@@ -1123,5 +1158,49 @@ mod tests {
         let c = Config::from_json(&v).unwrap();
         assert!(c.schemes.is_empty());
         assert_eq!(c.to_json(), v);
+    }
+
+    #[test]
+    fn the_ledger_needs_format_6_and_writes_it() {
+        let with_schemes = json!({"format": 6, "kind": "ryupdm.config", "release_branch": "main",
+            "revisions": "letters", "part_number": {"ledger": true,
+            "schemes": [{"name": "mech", "next": "MECH-{seq:5}", "pattern": "MECH-\\d{5}"}]}});
+        let alone = json!({"format": 6, "kind": "ryupdm.config", "release_branch": "main",
+            "revisions": "letters", "part_number": {"ledger": true}});
+        let beside_a_pattern = json!({"format": 6, "kind": "ryupdm.config", "release_branch": "main",
+            "revisions": "letters", "part_number": {"ledger": true, "pattern": "\\d+"}});
+        for v in [&with_schemes, &alone, &beside_a_pattern] {
+            let c = Config::from_json(v).unwrap();
+            assert!(c.ledger, "{v}");
+            assert_eq!(c.format(), 6);
+            assert_eq!(&c.to_json(), v);
+        }
+        // An older format refuses it, and it is true or false.
+        let mut old = with_schemes.clone();
+        old["format"] = json!(5);
+        assert_eq!(
+            Config::from_json(&old).unwrap_err().details["pointer"],
+            "/part_number/ledger"
+        );
+        let mut bad = alone.clone();
+        bad["part_number"]["ledger"] = json!("yes");
+        assert_eq!(
+            Config::from_json(&bad).unwrap_err().details["pointer"],
+            "/part_number/ledger"
+        );
+        // Off is written as nothing, at the lowest format.
+        let mut off = alone.clone();
+        off["part_number"]["ledger"] = json!(false);
+        let c = Config::from_json(&off).unwrap();
+        assert!(!c.ledger);
+        assert_eq!(
+            c.to_json(),
+            json!({"format": 1, "kind": "ryupdm.config", "release_branch": "main", "revisions": "letters"})
+        );
+        // An empty part_number still needs its pattern.
+        assert!(
+            Config::from_json(&json!({"format": 6, "kind": "ryupdm.config", "part_number": {}}))
+                .is_err()
+        );
     }
 }

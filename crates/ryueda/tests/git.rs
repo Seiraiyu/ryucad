@@ -1073,3 +1073,82 @@ fn two_branches_adding_tracks_merge_and_one_track_edited_both_ways_conflicts() {
         serde_json::from_str(&std::fs::read_to_string(tracks.join("t0.json")).unwrap()).unwrap();
     assert_eq!(t0["conflicts"]["/width_nm"]["kind"], "value", "{t0}");
 }
+
+/// A stackup on one branch and routes on both merge (ryueda 7.A); two
+/// stackups conflict as one value, never an interleaving of their layers.
+#[test]
+fn stackups_and_inner_routes_merge() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = dir.path().join("run");
+    let top = dir.path().join("repo");
+    std::fs::create_dir_all(&top).unwrap();
+    let board = breakout_in_git(&top, &run);
+    let ok = |args: &[&str]| -> Value {
+        let (c, v) = ryueda(&board, &run, false, args);
+        assert_eq!(c, 0, "{args:?}: {v}");
+        v
+    };
+    ok(&[
+        "board", "create", "Main", "--design", "board", "--rect", "30,20", "--id", "main",
+    ]);
+    ok(&["board", "place", "main", "R1", "--at", "10,10"]);
+    let pads = ok(&["board", "show", "main", "--pads"])["result"]["pads"].clone();
+    let net = pads[0]["net"].as_str().unwrap().to_owned();
+    git(&top, &["add", "-A"]);
+    git(&top, &["commit", "-qm", "board"]);
+    git(&top, &["branch", "theirs"]);
+    ok(&["board", "edit", "main", "--layers", "4"]);
+    ok(&[
+        "board", "track", "add", "main", "--net", &net, "--layer", "in1", "--path", "1,1", "2,1",
+        "--id", "t1",
+    ]);
+    git(&top, &["add", "-A"]);
+    git(&top, &["commit", "-qm", "ours"]);
+    git(&top, &["checkout", "-q", "theirs"]);
+    ok(&[
+        "board", "track", "add", "main", "--net", &net, "--layer", "top", "--path", "1,3", "2,3",
+        "--id", "t2",
+    ]);
+    git(&top, &["add", "-A"]);
+    git(&top, &["commit", "-qm", "theirs"]);
+    git(&top, &["checkout", "-q", "main"]);
+    let (merged, err) = git_try(&top, &[], &["merge", "-q", "--no-edit", "theirs"]);
+    assert!(merged, "{err}");
+    let (_, v) = ryueda(&board, &run, false, &["check"]);
+    let report = if v["ok"] == true {
+        &v["result"]
+    } else {
+        &v["error"]["details"]["report"]
+    };
+    let ours = report["boards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["board"] == "board/main")
+        .unwrap();
+    assert!(
+        ours["faults"]
+            .as_array()
+            .is_none_or(|f| f.iter().all(|x| x["severity"] != "error")),
+        "{ours}"
+    );
+    // Two stackups made two ways: one conflict, the whole stackup.
+    git(&top, &["branch", "-f", "theirs"]);
+    ok(&["board", "edit", "main", "--layers", "6"]);
+    git(&top, &["add", "-A"]);
+    git(&top, &["commit", "-qm", "six"]);
+    git(&top, &["checkout", "-q", "theirs"]);
+    ok(&["board", "edit", "main", "--layers", "8"]);
+    git(&top, &["add", "-A"]);
+    git(&top, &["commit", "-qm", "eight"]);
+    git(&top, &["checkout", "-q", "main"]);
+    let (merged, _) = git_try(&top, &[], &["merge", "-q", "--no-edit", "theirs"]);
+    assert!(!merged, "two stackups conflict");
+    let b: Value = serde_json::from_str(
+        &std::fs::read_to_string(board.join("boards/main/board.json")).unwrap(),
+    )
+    .unwrap();
+    let c = b["conflicts"].as_object().unwrap();
+    assert_eq!(c.keys().collect::<Vec<_>>(), ["/stackup"], "{b}");
+    assert_eq!(c["/stackup"]["kind"], "value", "{b}");
+}
