@@ -33,6 +33,7 @@ pub mod item;
 pub mod items;
 pub mod judge;
 pub mod links;
+pub mod listing;
 pub mod load;
 pub mod merge;
 pub mod notify;
