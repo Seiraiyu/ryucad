@@ -411,6 +411,10 @@ enum SettingsCmd {
         declaration: Option<String>,
         #[arg(long)]
         remove: bool,
+        /// The organization's ledger hands out and holds this catalogue's
+        /// numbers: on or off.
+        #[arg(long, value_parser = on_off)]
+        ledger: Option<bool>,
         #[command(flatten)]
         expect: Expect,
     },
@@ -501,6 +505,14 @@ fn absolute(here: &Path, dirs: &[String]) -> Vec<String> {
 fn abs_file(here: &Path, file: &Path) -> String {
     let p = here.join(file);
     p.canonicalize().unwrap_or(p).display().to_string()
+}
+
+fn on_off(s: &str) -> core::result::Result<bool, String> {
+    match s {
+        "on" | "true" => Ok(true),
+        "off" | "false" => Ok(false),
+        _ => Err(format!("{s:?}: on or off")),
+    }
 }
 
 fn unit(s: &str) -> core::result::Result<Unit, String> {
@@ -768,6 +780,7 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
             property,
             declaration,
             remove,
+            ledger,
             expect,
         }) => {
             let declaration = declaration
@@ -787,6 +800,7 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
                         property: property.clone(),
                         declaration,
                         remove: *remove,
+                        ledger: *ledger,
                     },
                     expected_revision: exp(expect),
                 },

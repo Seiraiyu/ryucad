@@ -7,8 +7,9 @@ use crate::error::{Code, Error, Result};
 use crate::id::Id;
 use crate::load::Catalogue;
 use crate::source::Source;
-use ryupdm::config::{Config, NumberScheme};
-use serde_json::json;
+use crate::session::Session;
+use ryupdm::config::{Config, NumberScheme, Template};
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -93,17 +94,13 @@ pub fn scheme<'a>(
     }
 }
 
-/// The next number of the scheme chosen as [`scheme`] chooses: one more
-/// than the highest sequence in use read back through its template: any
-/// item's number or previous number, and any number a release record in
-/// `src` holds (an item released, then deleted, keeps its number taken).
-pub fn next(
-    src: &dyn Source,
-    cat: &Catalogue,
-    config: &Config,
+/// The scheme [`scheme`] chooses and its template: `invalid_param` when
+/// it has none.
+pub fn template<'a>(
+    config: &'a Config,
     name: Option<&str>,
     class: Option<&str>,
-) -> Result<String> {
+) -> Result<(&'a NumberScheme, &'a Template)> {
     let s = scheme(config, name, class)?;
     let t = s.next.as_ref().ok_or_else(|| {
         Error::new(
@@ -112,15 +109,69 @@ pub fn next(
         )
         .with("scheme", &s.name)
     })?;
-    let highest = cat
-        .items
+    Ok((s, t))
+}
+
+/// The highest sequence `t` reads back from the numbers in use: any
+/// item's number or previous number, and any number a release record in
+/// `src` holds (an item released, then deleted, keeps its number taken);
+/// 0 when none. The ledger's `floor`.
+pub fn highest(src: &dyn Source, cat: &Catalogue, t: &Template) -> u64 {
+    cat.items
         .values()
         .flat_map(|i| std::iter::once(&i.number).chain(&i.previous_numbers))
         .chain(held(src).keys())
         .filter_map(|n| t.read(n))
         .max()
-        .unwrap_or(0);
-    Ok(t.fill(highest + 1))
+        .unwrap_or(0)
+}
+
+/// The next number of the scheme chosen as [`scheme`] chooses: one more
+/// than [`highest`].
+pub fn next(
+    src: &dyn Source,
+    cat: &Catalogue,
+    config: &Config,
+    name: Option<&str>,
+    class: Option<&str>,
+) -> Result<String> {
+    let (_, t) = template(config, name, class)?;
+    Ok(t.fill(highest(src, cat, t) + 1))
+}
+
+/// `number.local`: what the CLI reads before it asks the ledger: the
+/// catalogue's project ID, whether its ledger is on, and its revision;
+/// with `next` (a scheme, or "" for the one that applies), the scheme
+/// chosen as `--next` chooses it (by `item`'s class when renumbering, else
+/// `class`), its template, the highest sequence in use (`floor`) and the
+/// local next number.
+pub fn local(
+    session: &Session,
+    next: Option<&str>,
+    class: Option<&str>,
+    item: Option<&str>,
+) -> Result<Value> {
+    let src = session.snapshot();
+    let config = Config::read_in(&src, crate::catalogue::NAME)?;
+    let cat = session.catalogue();
+    let mut v = json!({"catalogue": cat.manifest.project, "ledger": config.ledger,
+                       "revision": session.revision()});
+    if let Some(name) = next {
+        let class = match item {
+            Some(i) => {
+                let id = cat.find(i)?;
+                cat.items[&id].class.clone()
+            }
+            None => class.map(str::to_owned),
+        };
+        let (s, t) = template(&config, (!name.is_empty()).then_some(name), class.as_deref())?;
+        let floor = highest(&src, cat, t);
+        v["scheme"] = json!(s.name);
+        v["template"] = json!(t.text());
+        v["floor"] = json!(floor);
+        v["next"] = json!(t.fill(floor + 1));
+    }
+    Ok(v)
 }
 
 /// `part_number_duplicate` for live items sharing a number, then for a

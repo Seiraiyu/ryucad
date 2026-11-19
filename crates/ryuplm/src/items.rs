@@ -417,4 +417,78 @@ mod tests {
         assert_eq!(s["ryupdm"]["part_number"]["schemes"][0]["name"], "mech");
         assert_eq!(s["ryupdm"]["format"], 5);
     }
+
+    #[test]
+    fn number_local_says_the_scheme_its_floor_and_the_ledger() {
+        let (_d, root) = catalogue();
+        ask(
+            &root,
+            Request::SettingsEdit {
+                change: serde_json::from_value(json!({
+            "scheme": "mech", "pattern": "MECH-\\d{5}", "next_template": "MECH-{seq:5}"}))
+                .unwrap(),
+                expected_revision: None,
+            },
+        )
+        .unwrap();
+        ask(
+            &root,
+            Request::ItemCreate {
+                fields: fields(json!({})),
+                number: Some("MECH-00041".into()),
+                next: None,
+                expected_revision: None,
+            },
+        )
+        .unwrap();
+        let local = |next: Option<&str>, item: Option<&str>| {
+            ask(
+                &root,
+                Request::NumberLocal {
+                    next: next.map(str::to_owned),
+                    class: None,
+                    item: item.map(str::to_owned),
+                },
+            )
+            .unwrap()
+        };
+        let v = local(Some(""), None);
+        assert_eq!(
+            (&v["scheme"], &v["template"], &v["floor"], &v["next"], &v["ledger"]),
+            (&json!("mech"), &json!("MECH-{seq:5}"), &json!(41), &json!("MECH-00042"), &json!(false))
+        );
+        assert_eq!(v["catalogue"].as_str().unwrap().len(), 32);
+        let plain = local(None, None);
+        assert!(plain.get("template").is_none());
+        assert_eq!(plain["revision"], v["revision"]);
+        assert_eq!(local(Some(""), Some("MECH-00041"))["next"], "MECH-00042");
+    }
+
+    #[test]
+    fn the_ledger_is_turned_on_and_off_in_ryupdm_json() {
+        let (_d, root) = catalogue();
+        let edit = |change: serde_json::Value| {
+            ask(
+                &root,
+                Request::SettingsEdit {
+                    change: serde_json::from_value(change).unwrap(),
+                    expected_revision: None,
+                },
+            )
+        };
+        let on = edit(json!({"ledger": true})).unwrap();
+        assert_eq!(
+            (&on["ryupdm"]["part_number"]["ledger"], &on["ryupdm"]["format"]),
+            (&json!(true), &json!(6))
+        );
+        let local = ask(&root, Request::NumberLocal { next: None, class: None, item: None }).unwrap();
+        assert_eq!(local["ledger"], true);
+        let off = edit(json!({"ledger": false})).unwrap();
+        assert_eq!(
+            (off["ryupdm"].get("part_number"), &off["ryupdm"]["format"]),
+            (None, &json!(1))
+        );
+        let both = edit(json!({"ledger": true, "class": "x"})).unwrap_err();
+        assert_eq!(both.code, crate::error::Code::Usage);
+    }
 }

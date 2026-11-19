@@ -31,6 +31,10 @@ pub struct Change {
     /// With `property`: its declaration, as `ryupdm.json` writes one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub declaration: Option<Value>,
+    /// Turn the organization's ledger on or off (`part_number.ledger`,
+    /// design 936).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ledger: Option<bool>,
     /// Remove the named class, scheme or property instead.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub remove: bool,
@@ -62,6 +66,7 @@ pub fn edit(session: &mut Session, change: Change, expected: Option<&str>) -> Re
         change.class.is_some(),
         change.scheme.is_some(),
         change.property.is_some(),
+        change.ledger.is_some(),
     ]
     .iter()
     .filter(|b| **b)
@@ -69,7 +74,7 @@ pub fn edit(session: &mut Session, change: Change, expected: Option<&str>) -> Re
     if picked != 1 {
         return Err(Error::new(
             Code::Usage,
-            "change one of --class, --scheme or --property at a time",
+            "change one of --class, --scheme, --property or --ledger at a time",
         ));
     }
     let mut manifest = session.catalogue().manifest.clone();
@@ -141,6 +146,9 @@ pub fn edit(session: &mut Session, change: Change, expected: Option<&str>) -> Re
                 .properties
                 .insert(name.clone(), ryupdm::config::Decl::from_json(d, &at)?);
         }
+    }
+    if let Some(on) = change.ledger {
+        config.ledger = on;
     }
     // The settings must read back as written.
     let config_text = crate::canonical::to_string(&config.to_json());

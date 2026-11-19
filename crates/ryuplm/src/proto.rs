@@ -218,6 +218,17 @@ pub enum Request {
     },
     #[serde(rename = "import.list")]
     ImportList {},
+    /// What the CLI reads before it asks the ledger (ryuplm 2.B): see
+    /// `numbers::local`. Reads only.
+    #[serde(rename = "number.local")]
+    NumberLocal {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        next: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        class: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        item: Option<String>,
+    },
     #[serde(rename = "settings.show")]
     SettingsShow {},
     #[serde(rename = "settings.edit")]
@@ -458,6 +469,11 @@ mod tests {
                 expected_revision: None,
             },
             Request::ImportList {},
+            Request::NumberLocal {
+                next: Some(String::new()),
+                class: Some("machined".into()),
+                item: None,
+            },
         ];
         for r in reqs {
             assert_eq!(Request::from_rpc(&r.method(), Some(r.params())).unwrap(), r);
