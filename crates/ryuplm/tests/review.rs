@@ -186,3 +186,42 @@ fn review_needs_a_github_clone() {
         "{v}"
     );
 }
+
+#[test]
+fn where_used_across_the_organization_asks_the_service() {
+    let dir = tempfile::tempdir().unwrap();
+    let (root, id) = catalogue(dir.path());
+    let manifest: Value =
+        serde_json::from_slice(&std::fs::read(root.join("ryuplm.json")).unwrap()).unwrap();
+    let project = manifest["project"].as_str().unwrap().to_owned();
+    let path = format!("/api/v1/where-used?project={project}&item={id}");
+    let fake = Fake::start(vec![json(
+        "GET",
+        &path,
+        200,
+        j!({"schema": 1, "item": id, "working": [{"parent": "0000000000009", "repo": "acme/kits"}], "released": []}),
+    )]);
+    // By number: the item is found here, and asked for by its ID.
+    let (code, v) = ryuplm(&root, &fake.url, &["where-used", "KIT-1", "--org"]);
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(v["result"]["working"][0]["repo"], "acme/kits");
+    let seen = fake.seen.lock().unwrap();
+    assert_eq!(seen[0].path, path);
+    assert_eq!(seen[0].auth.as_deref(), Some("Bearer tok"));
+    drop(seen);
+    // Another schema is refused, never half read.
+    let two = Fake::start(vec![json("GET", &path, 200, j!({"schema": 2}))]);
+    let (code, v) = ryuplm(&root, &two.url, &["where-used", &id, "--org"]);
+    assert_eq!(
+        (code, &v["error"]["code"]),
+        (1, &j!("review_failed")),
+        "{v}"
+    );
+    // --org asks the service only: the local flags don't go with it.
+    let (code, v) = ryuplm(
+        &root,
+        &fake.url,
+        &["where-used", "KIT-1", "--org", "--working"],
+    );
+    assert_eq!((code, &v["error"]["code"]), (2, &j!("usage")), "{v}");
+}

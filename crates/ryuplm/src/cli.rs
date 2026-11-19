@@ -109,6 +109,10 @@ enum Command {
         /// Working files only: no releases.
         #[arg(long)]
         working: bool,
+        /// Ask the hosted service instead: every repository of the
+        /// organization the token can read (review.url and its token).
+        #[arg(long, conflicts_with_all = ["within", "no_dependents", "working"])]
+        org: bool,
     },
     /// The projects this catalogue reaches, without reading them: each
     /// ryucad or ryueda project its links name, each other catalogue its
@@ -771,6 +775,7 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
             within,
             no_dependents,
             working,
+            org: false,
         } => (
             root()?,
             Request::BomWhereUsed {
@@ -992,7 +997,8 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
         | Command::Daemon(_)
         | Command::Git(_)
         | Command::Merge(_)
-        | Command::Review(_) => return Ok(None),
+        | Command::Review(_)
+        | Command::WhereUsed { org: true, .. } => return Ok(None),
     }))
 }
 
@@ -1058,6 +1064,9 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
                 Duration::from_secs(*timeout),
             )
         }
+        Command::WhereUsed {
+            item, org: true, ..
+        } => ryuplm::review::where_used_org(&find_root(&here)?, item),
         Command::Review(cmd) => {
             use ryu_review::Action;
             let action = match cmd {
