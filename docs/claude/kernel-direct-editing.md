@@ -666,3 +666,42 @@ Design 919, plan 23.A (#658).
   - M10, room given to a released face, and M11, a released face kept off a pin (`a_released_face_takes_no_room_and_no_cut`); M12, releases counted against `ADJUSTS` (`released_builds_have_their_own_budget`); M13, `pinned_but` ignoring `released` (`a_released_face_is_never_pinned`, `a_release_unpinches_its_neighbours`, the twin, the golden); M14, a release asked before room (`a_wrong_pin_released_builds_the_taller_box`, `section::near_room`).
 - **Testing.** `near`'s `a_released_face_is_never_pinned`, `a_release_unpinches_its_neighbours`, `a_released_faces_near_box_holds_its_working_neighbours` and `a_released_face_takes_no_room_and_no_cut`; `retrim::tests`' `released_builds_have_their_own_budget`, `a_failure_lies_at_its_pieces_pin_or_the_pins_its_arcs_lie_on`, `only_a_narrowed_walk_failing_at_a_pin_asks_its_release` and `a_wrong_pin_released_builds_the_taller_box` (room first, then a forced pin released builds the taller box; the release through `narrowed_rung` is the twin's); `tests/retrim.rs`' `the_released_pin_twin_is_rounded_and_slotted` and `the_released_pin_twin_asks_its_start_plane_released`; `tests/work.rs`' `the_released_pin_twin_is_bounded` (release); the `released_pin` golden.
 - **Limits.** A release reads every arc of the failing piece, so it may release a pin that needn't grow; that costs one capped build and leaves the first answer. A released face is carried over its neighbours' near boxes, which can carry it past the region it bounds (the twin's start plane across the block's whole section) or let it close a gap other faces close too (CTC 02's two closures). Ryukei 24 reads those. STC 10 #3044, FTC 07 rd, FTC 10 rb and FTC 07 AP242 #13541 refuse as before (SolidWorks refuses them as one operation too).
+
+## The gap's budget (decided in ryukei phase 23.B)
+
+Design 919, plan 23.B (#658).
+
+- **One cap a deleted set.** `delete::grow` runs each set's re-trim within its gap (`grow_within`, `retrim_gap`, `Scope::Gap` of `GAP` units; see `kernel-work.md`). This applies to deletes only: moves, offsets, replaces and drafts keep their ladders and see no gap (`retrim_with`).
+- **Past the gap** (`climb_within`): no build starts, `settle`'s narrowed retry included. The build that ran the gap out is discarded unless it built. The ladder answers its last finished rung's cause, or `Uncertain` at the set's least face if no rung finished. `narrowed_rung` starts no adjusted or released build past the gap (its `once` answers `Unchanged`, which the ladder discards). There is no new error, and `grow`'s `RegionTooSmall` → `GapNotHealed` applies as before. `climb` is `climb_within` never spent, and only the tests call it.
+- **Census VIII (23.B)** (cox-worker-2, 2026-11-18, main `ede45371`, release, one thread a delete, Proxmox host load 60 to 120). It covered ryukei's `delete_faces`, `retrim`, `blend_edits`, `tweaks`, `drafts`, `work`, `fuzz_regressions`, `tweak_props`, `edit_props` and `--lib tweak::`; ryustep's `defeature`, committed and pinned; and ryucad's `direct_edits`. 328 sets built.
+  - **The largest built ladder**, 9,871,261 units, is the bent rod's rim (`a_bent_rods_rim_is_deleted`, plan 19.A). Its rung-0 first build spends 9,606,924 refusing `Uncertain`, and its narrowed retry builds in 264,337. The next largest is 1,009,883 (pinned FTC 08's pocket floor).
+  - **32 sets refused**, the largest linkrods #11 (27,459,995), FTC 07 rd (26,868,113), STC 10 #3044 (23,891,761), FTC 07 AP242 #13541 (22,336,105), CTC 02 with PMI (20,973,765) and FTC 10 rb (17,059,202). Each refusal spends most of its units in one or two builds of 9 to 14 M that refuse `Uncertain`. For FTC 07 rd that is its rung-0 first build of 14.3 M; for the other three it is rung 2's first build after two cheap rungs (1.2 to 1.6 M each).
+- **The verdict on the 10 s bar** (the owner, 2026-11-18): **unmet.** Design 919's rule puts `GAP` at `1 << 26`, above every refused ladder, so the four one-operation refusals SolidWorks 2026 also refuses keep main's answers and times:
+  - FTC 07 rd: `Uncertain` at pin `f19ffa9e`, 55.5 s.
+  - FTC 10 rb: `HealAmbiguous` at `d0eb13c5`, 26.5 s.
+  - STC 10 #3044: `GapNotHealed` at `05bec1f4`, 31.5 to 34.4 s.
+  - FTC 07 AP242 #13541: `Uncertain` at `784aeb19`, 36.1 to 39.4 s.
+
+  Any gap under 9.87 M would refuse the bent rod's rim, which builds, and the refusals spend their time in builds shaped like its first one. Units alone can't tell those builds apart. Making them refuse sooner is a later follow-up, not 23.B's. `KNOWN_REFUSED` and `PINNED_REFUSED` (STC 10 and FTC 07 AP242 must refuse typed) record it.
+- **Bars** (cox-worker-2, AMD Ryzen 7 9700X, release, 2026-11-18; branch `401575127` against main `ede45371`; one thread for the deletes; host load 1 to 120, so main and the branch were run alternately):
+
+  | Bar | Result |
+  |---|---|
+  | One-operation refusals inside 10 s | **Unmet** (above): each answers as main, in main's time |
+  | No delete slower | Met: the 7 committed and 18 pinned bodies that defeature stay bit for bit (`dump_unnamed` hashes). Every refusal's answer is main's. Pinned corpus retimed alternately: main 460.3 and 451.0 s, branch 451.8 and 454.0 s |
+  | Goldens | Met: ryukei, ryucad, ryusketch, ryumate and ryustep's suites are unmoved |
+  | Work figures | Met: `tests/work.rs` is main's to the unit; `a_refused_delete_is_bounded` is new (879 units) |
+  | Property suites | Met: `edit_props` as main, seed for seed. `blend_props`, `boolean_props`, `general_props`, `heal_props`, `tolerant_boolean_props`, `intersect_props`, `retrim`, `blends`, `booleans`, `delete_faces`, the lib's tests, ryustep's `checks` and ryucad's `direct_edits` pass |
+  | Fuzzing | `edit`, `boolean`, `tweak` and `intersect` through `fuzz.yml`, three runs (44416276194, 44416280254 and 44416283983; the first's `edit` job lost its runner during Build, before fuzzing, and its rerun passed): no crash, timeout or OOM. Met |
+
+- **Mutations** (debug, as CI's nextest runs them). Each of these makes a test fail:
+  - M1, `GAP` = `u64::MAX` (`a_gap_is_a_scope_its_rungs_share`);
+  - M2, `capped_with` ignoring its units (the gap, `exhausted`, `a_set_past_its_gap_…` and `a_retrim_within_its_gap_…` tests);
+  - M3, `exhausted` as `>=` (`a_meter_is_exhausted_past_its_innermost_cap_only`);
+  - M4, M5 and M6, `climb_within` without its check before each rung, between the first build and `settle`, or after a rung's answer (`a_ladder_stops_at_its_gap_with_its_last_finished_rungs_cause`);
+  - M7, `narrowed_rung` starting builds past the gap (`a_narrowed_rung_past_its_gap_starts_no_more_builds`);
+  - M9, the fallback naming no face (`a_set_past_its_gap_…`, `a_retrim_within_its_gap_…`).
+
+  Two survive, as expected: M8, a gap check that ignores whether there is a gap, which only matters for a re-trim inside another cap, and none exists today; and M10, `grow` without a gap, which changes nothing at `1 << 26`.
+- **Testing.** `work`'s `a_gap_is_a_scope_its_rungs_share` and `a_meter_is_exhausted_past_its_innermost_cap_only`; `retrim::tests`' `a_ladder_stops_at_its_gap_with_its_last_finished_rungs_cause`, `a_retrim_within_its_gap_builds_and_past_it_refuses_at_the_least_face` and `a_narrowed_rung_past_its_gap_starts_no_more_builds`; `delete::tests`' `a_set_past_its_gap_refuses_with_its_last_finished_rungs_cause` and `a_set_that_builds_spends_what_it_did_under_its_gap`; `tests/work.rs`' `a_refused_delete_is_bounded`; ryustep's `PINNED_REFUSED`.
+- **Limits.** A refusal past a gap may name its set's least face instead of the pair it would have stopped at. Today no set reaches `1 << 26`. ryukei 24's CTC 02 with PMI and 23.C's partial deletes inherit the refusals' cost: a refused unit can spend up to 27 M units, about a minute on cox-worker-2.
