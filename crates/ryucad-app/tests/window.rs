@@ -820,6 +820,51 @@ fn the_window_follows_an_agent_until_the_human_navigates() {
     assert_ne!(h.state().opened().view.nav.camera, agent);
 }
 
+/// #1027: showing another part leaves the Properties tile empty, not on
+/// the chosen feature of the part no longer shown; showing it again puts
+/// the feature back.
+#[test]
+fn the_property_panel_follows_the_shown_part() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    p.ok(&["part", "create", "q"]);
+    p.ok(&[
+        "feature", "add", "q", "box", "--id", "b", "--param", "x=5", "--param", "y=5", "--param",
+        "z=5",
+    ]);
+    let mut h = window(&p);
+    frames(&mut h, |a| {
+        matches!(a.screen, ryucad_app::ui::app::Screen::Opened(_))
+            && a.opened().ws.idle()
+            && a.opened().ws.model.parts.len() == 2
+    });
+    p.ok(&["focus", "p"]);
+    frames(&mut h, |a| {
+        a.opened().ws.idle() && a.opened().ws.model.focus.as_deref() == Some("p")
+    });
+    h.run_steps(2);
+    h.get_by_label("boss (cylinder)").click();
+    frames(&mut h, |a| a.opened().ws.forms.form.is_some());
+    h.run_steps(2);
+    h.get_by_label("cylinder in part p");
+    p.ok(&["focus", "q"]);
+    frames(&mut h, |a| {
+        a.opened().ws.idle() && a.opened().ws.model.focus.as_deref() == Some("q")
+    });
+    h.run_steps(2);
+    assert!(h.query_by_label("cylinder in part p").is_none());
+    h.get_by_label("Choose a feature in the tree to see and edit it");
+    p.ok(&["focus", "p"]);
+    frames(&mut h, |a| {
+        a.opened().ws.idle() && a.opened().ws.model.focus.as_deref() == Some("p")
+    });
+    h.run_steps(2);
+    h.get_by_label("cylinder in part p");
+}
+
 #[test]
 fn a_parameter_is_edited_in_the_property_panel() {
     let _one = one_at_a_time();

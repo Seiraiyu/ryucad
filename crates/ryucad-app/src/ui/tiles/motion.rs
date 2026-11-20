@@ -20,11 +20,14 @@ fn mark_x(r: egui::Rect, f: f64) -> f32 {
 /// Draws the tile.
 pub fn motion(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
     let save_gate = ws.control("motion.save");
+    // The shown motion's assembly, else the shown one: never one the
+    // window stopped showing (#1027).
     let Some(part) = ws
         .assembly
         .motions
-        .part
-        .clone()
+        .shown
+        .as_ref()
+        .map(|s| s.part.clone())
         .or_else(|| ws.shown_assembly())
     else {
         ui.weak("Show an assembly to play its motions (View > Show).");
