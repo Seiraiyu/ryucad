@@ -733,3 +733,23 @@ mod ctrl_click_tests {
         assert!(!held);
     }
 }
+
+/// GNOME's text scaling factor (Settings > Accessibility > Large Text)
+/// when the window will be a native Wayland one, which no compositor
+/// scale carries it to (#1026); `None` under X11 or XWayland, which carry
+/// it as the DPI, or where gsettings has no such key.
+#[cfg(target_os = "linux")]
+pub fn wayland_text_scale() -> Option<f32> {
+    let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty());
+    let forced_x11 = std::env::var("WINIT_UNIX_BACKEND").is_ok_and(|b| b == "x11");
+    if !wayland || forced_x11 {
+        return None;
+    }
+    let out = std::process::Command::new("gsettings")
+        .args(["get", "org.gnome.desktop.interface", "text-scaling-factor"])
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    super::app::parse_text_scale(&String::from_utf8_lossy(&out.stdout))
+}
