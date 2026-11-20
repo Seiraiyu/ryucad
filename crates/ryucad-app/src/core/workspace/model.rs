@@ -648,6 +648,17 @@ pub(crate) enum Asked {
     FlatMesh(BodyKey, String),
 }
 
+/// The part a failure says isn't in the revision a request named: the
+/// daemon's `no part X` (`not_found` with only the part and the commit
+/// read in its details), as a read at a revision without the part
+/// answers (#1021).
+pub(crate) fn absent_at(e: &Error) -> Option<&str> {
+    let d = e.details.as_object()?;
+    (e.code == Code::NotFound && d.len() == 2 && d.get("commit").is_some_and(Value::is_string))
+        .then(|| d.get("part")?.as_str())
+        .flatten()
+}
+
 impl Model {
     /// Takes the answer to one of this sub-state's requests (design
     /// 541, "Typed handles"); what it does elsewhere goes in `fx`.
@@ -758,6 +769,11 @@ impl Model {
                 let report = match r {
                     Ok(a) => a.result["parts"][0].clone(),
                     Err(e) if e.code == Code::RebuildFailed => e.details["parts"][0].clone(),
+                    // Not in the revision asked for (a part added since,
+                    // shown swapped, #1021): nothing there, not broken.
+                    Err(e) if rev.is_some() && absent_at(&e) == Some(id.as_str()) => {
+                        json!({"part": id, "features": []})
+                    }
                     Err(e) => json!({"part": id, "error": e}),
                 };
                 fx.then(Then::PartChanged(report));
