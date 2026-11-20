@@ -135,7 +135,13 @@ function Install-Ryucad {
         $bin = Join-Path $home_ 'bin'
         New-Item -ItemType Directory -Force -Path $bin | Out-Null
         $exe = Join-Path $bin 'ryucad.exe'
-        if (Test-Path $exe) { & $exe daemon stop --all *> $null }
+        if (Test-Path $exe) {
+            # One still running after the wait (#1023) is said, not hidden.
+            $stopped = & $exe daemon stop --all 2> $null | Out-String
+            if ($stopped -match 'still_running') {
+                Write-Host "ryucad-install: warning: a ryucad daemon didn't stop and still runs the old version; close its window, or end it in Task Manager, then run: ryucad daemon stop --all"
+            }
+        }
         Clear-OldCopy $exe
         Move-Aside $exe
         Copy-Item (Join-Path $tmp "ryucad-$version-$target\ryucad.exe") $exe

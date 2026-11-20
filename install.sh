@@ -218,7 +218,13 @@ main() {
     chmod 755 "$bin/.ryucad.new"
     mv -f "$bin/.ryucad.new" "$bin/ryucad"
     # Daemons from the old version must not keep running.
-    "$bin/ryucad" daemon stop --all >/dev/null 2>&1 || true
+    # One still running after the wait (#1023) is said, not hidden.
+    stopped=$("$bin/ryucad" daemon stop --all 2>/dev/null) || true
+    case $stopped in
+    *still_running*)
+        say "warning: a ryucad daemon didn't stop and still runs the old version; close its window, or end it, then run: ryucad daemon stop --all"
+        ;;
+    esac
     # git diff reads ryucad's files through ryucad: its driver, in the
     # user's Git config.
     if command -v git >/dev/null 2>&1; then
