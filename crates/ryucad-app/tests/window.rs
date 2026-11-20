@@ -5397,6 +5397,46 @@ fn an_explode_is_chosen_and_played_from_its_tile() {
     });
 }
 
+/// #1027: the Motion list follows the shown part: an assembly's motions,
+/// then, a plain part shown, none, never the assembly it listed last.
+#[test]
+fn the_motion_list_follows_the_shown_part() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = two_bolts();
+    p.ok(&[
+        "motion",
+        "save",
+        "frame",
+        "slam",
+        "--steps",
+        "11",
+        "--drives",
+        r#"[{"instances": ["b2"], "translate": {"direction": [-1, 0, 0], "from": "0 mm", "to": "40 mm"}}]"#,
+    ]);
+    let mut h = window(&p);
+    both_bolts(&mut h);
+    menu(&mut h, "View", "Motion");
+    frames(&mut h, |a| a.opened().ws.assembly.motions.list.len() == 1);
+    shown(&mut h, "Motions of frame");
+    p.ok(&["focus", "bolt"]);
+    frames(&mut h, |a| {
+        a.opened().ws.idle() && a.opened().ws.model.focus.as_deref() == Some("bolt")
+    });
+    shown(
+        &mut h,
+        "Show an assembly to play its motions (View > Show).",
+    );
+    assert!(h.query_by_label("Motions of frame").is_none());
+    p.ok(&["focus", "frame"]);
+    frames(&mut h, |a| {
+        a.opened().ws.idle() && a.opened().ws.model.focus.as_deref() == Some("frame")
+    });
+    shown(&mut h, "Motions of frame");
+}
+
 #[test]
 fn the_motion_tile_scrubs_plays_sweeps_and_shows_a_collision() {
     let _one = one_at_a_time();
