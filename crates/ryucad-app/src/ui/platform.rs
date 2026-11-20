@@ -740,9 +740,7 @@ mod ctrl_click_tests {
 /// it as the DPI, or where gsettings has no such key.
 #[cfg(target_os = "linux")]
 pub fn wayland_text_scale() -> Option<f32> {
-    let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty());
-    let forced_x11 = std::env::var("WINIT_UNIX_BACKEND").is_ok_and(|b| b == "x11");
-    if !wayland || forced_x11 {
+    if !native_wayland(|k| std::env::var_os(k)) {
         return None;
     }
     let out = std::process::Command::new("gsettings")
@@ -752,4 +750,44 @@ pub fn wayland_text_scale() -> Option<f32> {
         .ok()
         .filter(|o| o.status.success())?;
     super::app::parse_text_scale(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Whether winit 0.30 opens the window on Wayland in the environment
+/// `var` reads: as its `EventLoop` decides, on a non-empty
+/// `WAYLAND_DISPLAY` or `WAYLAND_SOCKET` (`platform_impl/linux`), else X11.
+#[cfg(any(target_os = "linux", test))]
+pub fn native_wayland(var: impl Fn(&str) -> Option<std::ffi::OsString>) -> bool {
+    ["WAYLAND_DISPLAY", "WAYLAND_SOCKET"]
+        .iter()
+        .any(|k| var(k).is_some_and(|v| !v.is_empty()))
+}
+
+#[cfg(test)]
+mod wayland_tests {
+    use std::ffi::OsString;
+
+    /// #1026: the window is native Wayland as winit 0.30 decides it.
+    #[test]
+    fn wayland_is_decided_as_winit_decides_it() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |k: &str| {
+                pairs
+                    .iter()
+                    .find(|(n, _)| *n == k)
+                    .map(|(_, v)| OsString::from(v))
+            }
+        };
+        assert!(super::native_wayland(env(&[(
+            "WAYLAND_DISPLAY",
+            "wayland-0"
+        )])));
+        assert!(super::native_wayland(env(&[("WAYLAND_SOCKET", "3")])));
+        assert!(super::native_wayland(env(&[
+            ("WAYLAND_DISPLAY", ""),
+            ("WAYLAND_SOCKET", "3")
+        ])));
+        assert!(!super::native_wayland(env(&[("WAYLAND_DISPLAY", "")])));
+        assert!(!super::native_wayland(env(&[("DISPLAY", ":0")])));
+        assert!(!super::native_wayland(env(&[])));
+    }
 }
