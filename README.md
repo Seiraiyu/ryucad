@@ -109,9 +109,9 @@ ryupdm is product data management on the same Git repositories. There is no seco
 
 ### Electronics: ryueda and ryudfm
 
-Two more products in this repo share ryucad's files, sessions and CLI conventions. Both are early and have not been released yet.
+Two more products in this repo share ryucad's files, sessions and CLI conventions. ryueda has its own release line (`ryueda-vX.Y.Z` tags), from ryueda-v0.1.0; ryudfm is early and hasn't been released yet.
 
-- **ryueda** is electronics CAD for agents, on its own release line (`ryueda-vX.Y.Z` tags, `install-ryueda.sh`). It has symbol, footprint and component libraries, and imports KiCad libraries: on davids-m4 (Apple M4) it imported KiCad 9.0.9's 10,217 symbols and 15,361 footprints. It has hierarchical blocks, connectivity, the flattened netlist and ERC, and a schematic engine (`ryusch`) that lays out and draws schematics, pages them into PDFs, and lints how readable they are.
+- **ryueda** is electronics CAD for agents, from schematic to a fabricated board. It has symbol, footprint and component libraries, and imports KiCad's: on davids-m4 (Apple M4) it imported KiCad 9.0.9's 10,217 symbols and 15,361 footprints. It has hierarchical blocks, connectivity, the flattened netlist and ERC, and a schematic engine (`ryusch`) that lays out and draws schematics, pages them into PDFs, and lints how readable they are. Boards are placed and routed by command, checked by DRC, and exported as Gerber X2, Excellon, a BOM and pick and place. A live session and a window (`ryueda open`) show an agent's work as it happens. Git diffs and merges ryueda's files by value, with a compare view and a conflict panel. Part data, releases of designs and library parts, BOMs and where-used complete it.
 - **ryudfm** is design-for-manufacturing for boards, also on its own line. It reads ODB++ exactly into integer nanometres, then inspects and renders it. On cox-worker-4 (AMD Opteron 6380) it reads and shapes a 338,087-feature board in 0.71 to 0.76 s. Its copper measurement engine is under way.
 
 ### PLM: ryuplm
@@ -144,6 +144,18 @@ irm https://github.com/Seiraiyu/ryucad/releases/latest/download/install.ps1 | ie
 ```
 
 Set `RYUCAD_VERSION=v0.8.2` to install a particular version, `RYUCAD_HOME` to install somewhere other than `~/.ryucad`, `RYUCAD_NO_MODIFY_PATH=1` to leave your shell profile alone, and `RYUCAD_NO_APP=1` to install the command only (servers, CI). `ryucad open [folder]` opens a project in the app, or brings its window forward.
+
+ryueda installs the same way, into `~/.ryueda/bin`, with its app and Git drivers. With no version given it takes the newest ryueda release; `RYUEDA_VERSION`, `RYUEDA_HOME`, `RYUEDA_NO_MODIFY_PATH` and `RYUEDA_NO_APP` work as ryucad's do:
+
+```sh
+# Linux, macOS and WSL
+curl -fsSL https://github.com/Seiraiyu/ryucad/releases/download/ryueda-v0.1.0/install-ryueda.sh | sh
+```
+
+```powershell
+# Windows (PowerShell)
+irm https://github.com/Seiraiyu/ryucad/releases/download/ryueda-v0.1.0/install-ryueda.ps1 | iex
+```
 
 <details>
 <summary>Uninstall</summary>
@@ -215,7 +227,7 @@ Each release is tested end to end on a Mac, Linux and Windows before it is tagge
 | ryukei | Hidden lines and sections (10), robustness and speed (15) | Draft and face tweaks (9), direct editing (13) |
 | ryucad | Shell, thicken, mirror and split in the app (15), sheet metal (16), annotations (19), STEP reference import (21) | Drawings (9), draft (17), surfaces (18), redline markup (20) |
 | ryupdm | | Teams and hosting (6), release packages (7) |
-| ryueda | The schematic formatter (2), part data (6) | The live session and app, Git, the first board, routing, outputs |
+| ryueda | The board (7) | Routing, outputs and MCAD, design import, verification |
 | ryudfm | The copper engine (1) | Rules and waivers, fabrication and assembly checks |
 | ryuplm | Its first release (ryuplm-release 1) | Items in the app and the hosted pages (1), part numbers from a ledger (2), documents (3), ECOs (4) |
 

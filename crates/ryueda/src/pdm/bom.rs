@@ -86,11 +86,28 @@ pub fn lines_of(p: &Project, occs: &[&Occurrence], build: u64) -> Vec<Line> {
         dnp: Vec<String>,
     }
     let mut by: BTreeMap<String, Acc> = BTreeMap::new();
+    // One lookup per distinct `of`: 10,000 occurrences of one component
+    // parse it and look it up once (#976).
+    type Placed<'p> = Option<(
+        (String, Option<crate::id::ProjectId>, String),
+        Option<&'p crate::libcomp::LibComp>,
+    )>;
+    let mut placed: BTreeMap<&str, Placed> = BTreeMap::new();
     for o in occs {
-        let Some(of) = crate::erc::of_ref(&o.of) else {
+        let Some(((part, project, revision), comp)) = placed
+            .entry(o.of.as_str())
+            .or_insert_with(|| {
+                let of = crate::erc::of_ref(&o.of)?;
+                Some((
+                    part_of(p, &of),
+                    crate::erc::placed_libcomp(p, &o.of).and_then(|l| l.item.as_ref().ok()),
+                ))
+            })
+            .as_ref()
+        else {
             continue;
         };
-        let (part, project, revision) = part_of(p, &of);
+        let comp = *comp;
         let value = o.value.clone().unwrap_or_default();
         let footprint = o
             .footprint
@@ -99,7 +116,6 @@ pub fn lines_of(p: &Project, occs: &[&Occurrence], build: u64) -> Vec<Line> {
             .unwrap_or_default()
             .to_owned();
         let key = format!("{part}\0{value}\0{footprint}");
-        let comp = crate::erc::placed_libcomp(p, &o.of).and_then(|l| l.item.as_ref().ok());
         let acc = by.entry(key.clone()).or_insert_with(|| {
             let mut properties = BTreeMap::new();
             let mut defaulted = Vec::new();
@@ -139,9 +155,9 @@ pub fn lines_of(p: &Project, occs: &[&Occurrence], build: u64) -> Vec<Line> {
             Acc {
                 line: Line {
                     key,
-                    part,
-                    project,
-                    revision,
+                    part: part.clone(),
+                    project: project.clone(),
+                    revision: revision.clone(),
                     quantity: 0,
                     properties,
                     defaulted,
@@ -152,7 +168,7 @@ pub fn lines_of(p: &Project, occs: &[&Occurrence], build: u64) -> Vec<Line> {
             }
         });
         let name = o.refdes.clone().unwrap_or_else(|| o.reference.clone());
-        if crate::erc::occurrence_dnp(p, o) {
+        if crate::erc::occurrence_dnp_of(p, o, comp) {
             acc.dnp.push(name);
         } else {
             acc.refdes.push(name);
@@ -161,8 +177,8 @@ pub fn lines_of(p: &Project, occs: &[&Occurrence], build: u64) -> Vec<Line> {
     }
     by.into_values()
         .map(|mut a| {
-            a.refdes.sort_by_key(|d| designator_key(d));
-            a.dnp.sort_by_key(|d| designator_key(d));
+            a.refdes.sort_by_cached_key(|d| designator_key(d));
+            a.dnp.sort_by_cached_key(|d| designator_key(d));
             a.line
                 .columns
                 .insert("refdes".to_owned(), a.refdes.join(","));
@@ -384,9 +400,14 @@ pub fn get(session: &mut crate::session::Session, ask: &Ask) -> crate::error::Re
     };
     let design = design_id(session.project(), ask.design)?;
     let (commit, then, config) = read_at(session, &design, ask.rev)?;
+    // The working netlist is the session's, flattened once per reading of
+    // the project (#976); a revision's is flattened here.
+    let n = match &then {
+        Some(t) => std::sync::Arc::new(crate::netlist::flatten(t, &design)?),
+        None => session.netlist(&design)?,
+    };
     let session: &crate::session::Session = session;
     let p: &Project = then.as_deref().unwrap_or(session.project());
-    let n = crate::netlist::flatten(p, &design)?;
     let build = if ask.build {
         crate::sourcing::config(p).build_quantity()
     } else {
@@ -569,9 +590,9 @@ mod tests {
 
     #[test]
     fn designators_sort_by_letters_then_number() {
-        let mut v = vec!["R10", "C1", "R2", "R1", "U1A"];
-        v.sort_by_key(|a| designator_key(a));
-        assert_eq!(v, ["C1", "R1", "R2", "R10", "U1A"]);
+        let mut v = vec!["R10", "C1", "R2", "R1", "U1A", "R", "U1"];
+        v.sort_by_cached_key(|a| designator_key(a));
+        assert_eq!(v, ["C1", "R1", "R2", "R10", "R", "U1", "U1A"]);
     }
 
     #[test]

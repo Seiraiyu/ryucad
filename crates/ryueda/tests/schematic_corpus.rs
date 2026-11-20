@@ -921,6 +921,81 @@ fn the_front_ends_op_amps_are_the_template() {
     }
 }
 
+/// #862: after C10 and TP4 are added (as the issue's round did), an idiom
+/// fix the lint still offers adds no sheet, and `idiom U1 buck` puts at
+/// most one new sheet in the block, never one a part, and says so. Not
+/// reproduced on main since ryueda 5.D (ryueda-release 1.A: no idiom fix
+/// is offered, and `idiom U1 buck` keeps the buck on its one sheet, with
+/// C10 on any of the buck's nets): kept as the guard.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release only")]
+fn an_idiom_suggestion_adds_no_sheets() {
+    let dir = tempfile::tempdir().unwrap();
+    let board = circuit(dir.path(), "buck");
+    ryueda(&board, 1, &["layout"]);
+    for args in [
+        &["component", "add", "buck", "--of", "c_0_1uf", "--id", "c10"][..],
+        &["connect", "buck/c10/1", "rail:+3V3"][..],
+        &["connect", "buck/c10/2", "rail:GND"][..],
+        &["component", "add", "buck", "--of", "tp_gnd", "--id", "tp4"][..],
+        &["connect", "buck/tp4/1", "rail:GND"][..],
+    ] {
+        ryueda(&board, 1, args);
+    }
+    ryueda(&board, 1, &["layout"]);
+    let before = layout_of(&board, "buck")["sheets"]
+        .as_object()
+        .unwrap()
+        .len();
+    let d = ryueda(&board, 1, &["describe", "--block", "buck"]);
+    let fixes: Vec<Vec<String>> = d["blocks"][0]["sheets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|s| s["findings"].as_array().cloned().unwrap_or_default())
+        .flat_map(|f| f["fixes"].as_array().cloned().unwrap_or_default())
+        .map(|fix| {
+            fix.as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t.as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        })
+        .filter(|fix| fix.iter().any(|t| t.starts_with("idiom")))
+        .collect();
+    let sheets_after = |texts: &[&str]| {
+        let mut args = vec!["place", "buck"];
+        args.extend(texts);
+        args.push("--dry-run");
+        let v = ryueda(&board, 1, &args);
+        let n = v["description"]["blocks"][0]["sheets"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{v}"))
+            .len();
+        (n, v)
+    };
+    for fix in &fixes {
+        let texts: Vec<&str> = fix.iter().map(String::as_str).collect();
+        let (n, v) = sheets_after(&texts);
+        assert_eq!(n, before, "{fix:?}: {}", v["notes"]);
+    }
+    let (n, v) = sheets_after(&["idiom U1 buck"]);
+    assert!(
+        n <= before + 1,
+        "at most one new sheet, never one a part: {n} from {before}"
+    );
+    if n > before {
+        assert!(
+            v["notes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|x| x["code"] == "move_costly"),
+            "{v}"
+        );
+    }
+}
+
 /// A move brings only the idioms anchored on the part it moves: moving one
 /// op-amp unit beside the other moves no part of the other unit's stage
 /// (round 1, F5: any move of U11:2 scattered baldiff).
@@ -1242,18 +1317,17 @@ fn names_as_drawn_are_accepted() {
         1,
         &["place", "mitayi", "--dry-run", "align U3B U3C row"],
     );
-    // A sheet by its ID.
+    // A sheet by its ID, told by its name (s2's, which canvas order gives
+    // it: #880).
+    let s2 = layout_of(&rp, "mitayi")["sheets"]["s2"]["name"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     let out = ryueda(&rp, 1, &["place", "mitayi", "--dry-run", "sheet R3 s2"]);
+    let text = out["instructions"][0]["text"].as_str().unwrap();
     assert!(
-        out["instructions"][0]["text"]
-            .as_str()
-            .unwrap()
-            .ends_with("\"Sheet 2\"")
-            || out["instructions"][0]["text"]
-                .as_str()
-                .unwrap()
-                .ends_with("Sheet 2"),
-        "{}",
+        text.ends_with(&format!("\"{s2}\"")) || text.ends_with(&s2),
+        "{s2}: {}",
         out["instructions"]
     );
     let (eth, _) = fresh(dir.path(), "ethernet");
@@ -1367,6 +1441,32 @@ fn describe_gives_boxes_and_pins() {
     assert_eq!(ph["name"], "PH", "{u1}");
     assert_eq!(ph["side"], "right", "{u1}");
     assert_eq!(ph["at_mm"].as_array().unwrap().len(), 2);
+}
+
+/// #880: a layout from nothing names its sheets in canvas order (the top
+/// row first, each row left to right), as `scene` and the PDF read them.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release only")]
+fn the_rp2040s_sheets_read_in_canvas_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let (board, _) = fresh(dir.path(), "rp2040");
+    let l = layout_of(&board, "mitayi");
+    let mut sheets: Vec<(i64, i64, String, String)> = l["sheets"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .map(|(id, s)| {
+            (
+                -s["at"][1].as_i64().unwrap(),
+                s["at"][0].as_i64().unwrap(),
+                id.clone(),
+                s["name"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    sheets.sort();
+    let names: Vec<&str> = sheets.iter().map(|s| s.3.as_str()).collect();
+    assert_eq!(names, ["Sheet 1", "Sheet 2", "Sheet 3"], "{sheets:?}");
 }
 
 /// A sheet is renamed by its ID or name, and sheet instructions follow it
@@ -1740,6 +1840,9 @@ fn edits_to_the_corpus_change_only_what_they_name() {
                 format!("{rename}_X"),
             ],
             vec![],
+            // A rename keeps the net drawn as it was (#859), but a longer
+            // name may move its labels and their stubs (the RP2040's
+            // XOUT_X shortens one stub by 1.5 grid steps).
             vec![net_key(rename)],
         ));
         edits.push((
@@ -1839,6 +1942,53 @@ fn edits_to_the_corpus_change_only_what_they_name() {
                 "{name}: {args:?}: {:?}",
                 laid.invalid
             );
+            // #863: the capacitor added, then connected, stands by what it
+            // hangs on: within 25 grid steps of a pin on its net, on that
+            // pin's sheet (10 to 23 on cox-worker-5, the ethernet's dense
+            // VDDCR the furthest; left where `component add` put it, the
+            // breakout's stood 36 off).
+            if args[0] == "connect" && args[1].ends_with("/c99/1") {
+                use ryusch::geom::{GRID, Place};
+                use ryusch::shape::Shape;
+                let input = &laid.built.input;
+                let l = ryueda::schem::read_layout(
+                    &std::fs::read(board.join(format!("blocks/{block}/layout.json"))).unwrap(),
+                    "layout.json",
+                )
+                .unwrap();
+                let end = |p: usize, pin: usize| {
+                    let x = &l.placed[&input.parts[p].key];
+                    let e = Shape::of(&input.parts[p], Place::new(x.at, x.rotation, x.mirror)).pins
+                        [pin]
+                        .end;
+                    (x.sheet.clone(), e)
+                };
+                let c = input.part("c99").expect("c99 placed");
+                let net = input.parts[c].pins[0].net.expect("c99/1 connected");
+                let (sheet, a) = end(c, 0);
+                let nearest = input
+                    .parts
+                    .iter()
+                    .enumerate()
+                    .filter(|(q, _)| *q != c)
+                    .flat_map(|(q, part)| {
+                        part.pins
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, x)| x.net == Some(net))
+                            .map(move |(i, _)| (q, i))
+                    })
+                    .filter(|(q, _)| l.placed.contains_key(&input.parts[*q].key))
+                    .map(|(q, i)| end(q, i))
+                    .filter(|(s, _)| *s == sheet)
+                    .map(|(_, b)| (a[0] - b[0]).abs() + (a[1] - b[1]).abs())
+                    .min();
+                assert!(
+                    nearest.is_some_and(|d| d <= 25 * GRID),
+                    "{name}: c99 is {:?} steps from its net's nearest pin",
+                    nearest.map(|d| d / GRID)
+                );
+            }
         }
     }
 }
@@ -3012,6 +3162,63 @@ fn corpus_branches(
     commit("ours");
     let _ = gitrepo::git_try(&top, &[], &["merge", "--no-commit", "-q", "theirs"]);
     (board, top, before)
+}
+
+/// #859's round: ours renames VSNS to FB, theirs draws VSNS as a wire; the
+/// merger takes theirs' layout whole and lays it out again over the merged
+/// connectivity. R9 stays joined to the net by a wire, not a label.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release only")]
+fn a_relayout_after_a_rename_keeps_the_nets_wires() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = |x: &str| x.to_owned();
+    let (board, _top, _) = corpus_branches(
+        dir.path(),
+        "buck",
+        "buck",
+        "c_0_1uf",
+        &[vec![s("net"), s("rename"), s("buck/VSNS"), s("FB")]],
+        &[vec![s("place"), s("buck"), s("net VSNS wire")]],
+    );
+    let status = ryueda(&board, 1, &["merge", "status"]);
+    let ids: Vec<String> = status["conflicts"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .map(|c| c["id"].as_str().unwrap().to_owned())
+        .collect();
+    if ids.iter().any(|i| i == "buck#layout") {
+        ryueda(&board, 1, &["merge", "resolve", "buck#layout", "--theirs"]);
+    }
+    let again = ryueda(&board, 1, &["merge", "status"]);
+    for c in again["conflicts"].as_array().cloned().unwrap_or_default() {
+        if c["kind"] == "layout_stale" {
+            ryueda(
+                &board,
+                1,
+                &[
+                    "merge",
+                    "resolve",
+                    c["id"].as_str().unwrap(),
+                    "--repair",
+                    "relayout",
+                ],
+            );
+        }
+    }
+    let l = layout_of(&board, "buck");
+    let labels = l["labels"]["vsns"].as_array().cloned().unwrap_or_default();
+    let labelled: Vec<&str> = labels.iter().map(|x| x["on"].as_str().unwrap()).collect();
+    // Theirs labels R8 and U1 and wires R9 to R8's junction.
+    assert!(
+        !labelled.iter().any(|on| on.starts_with("r9/")),
+        "R9 takes a label: {labelled:?}"
+    );
+    assert!(
+        !labels.is_empty() && labels.iter().all(|x| x["text"] == "FB"),
+        "{labels:?}"
+    );
 }
 
 /// Settles every item of the merge by its first repair (a block's areas
