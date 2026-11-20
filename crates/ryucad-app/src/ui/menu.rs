@@ -62,13 +62,24 @@ pub fn bar(ui: &mut egui::Ui, o: &mut Opened) -> Option<Action> {
                     });
                 match tall {
                     Some((per, one)) => {
+                        // The menu's right edge, past its last column: a
+                        // submenu opens there, over no column's items,
+                        // whose clicks would take its rows (#974).
+                        let cols = list.len().div_ceil(per) as f32;
+                        let gap = ui.spacing().item_spacing.x;
+                        let beside = ui.cursor().left() + cols * one.x + (cols - 1.0) * gap;
                         ui.horizontal_top(|ui| {
                             for chunk in list.chunks(per) {
-                                ui.vertical(|ui| {
+                                // Justified, as a menu of one column is: a
+                                // button spans its column, so a submenu
+                                // opens beside the column, not over its
+                                // wider items (#974).
+                                let justified = egui::Layout::top_down_justified(egui::Align::Min);
+                                ui.with_layout(justified, |ui| {
                                     // The one column's width: a separator
                                     // takes all the width it is given.
                                     ui.set_width(one.x);
-                                    if let Some(a) = items(ui, o, &shown, chunk) {
+                                    if let Some(a) = items(ui, o, &shown, chunk, Some(beside)) {
                                         action = Some(a);
                                     }
                                 });
@@ -77,7 +88,7 @@ pub fn bar(ui: &mut egui::Ui, o: &mut Opened) -> Option<Action> {
                     }
                     None => {
                         let top = ui.cursor().top();
-                        if let Some(a) = items(ui, o, &shown, &list) {
+                        if let Some(a) = items(ui, o, &shown, &list, None) {
                             action = Some(a);
                         }
                         let r = ui.min_rect();
@@ -99,6 +110,7 @@ fn items(
     o: &mut Opened,
     shown: &commands::Shown,
     list: &[&'static command::Command],
+    beside: Option<f32>,
 ) -> Option<Action> {
     let mut action = None;
     let mut group = None;
@@ -111,7 +123,7 @@ fn items(
         let enabled = command::enabled(c.id, &shown.state);
         match c.kind {
             Kind::Choices => {
-                ui.menu_button(c.title, |ui| {
+                submenu(ui, c.title, beside, |ui| {
                     let list = commands::choices(o, c.id);
                     if list.is_empty() {
                         ui.weak("None yet");
@@ -155,6 +167,36 @@ fn items(
         }
     }
     action
+}
+
+/// A submenu's button `title`, its submenu drawn by `content`: beside the
+/// button, or with `beside`, beside that x (a menu in columns, #974). Only
+/// where it opens moves; the button is hovered and clicked as ever.
+fn submenu(
+    ui: &mut egui::Ui,
+    title: &str,
+    beside: Option<f32>,
+    content: impl FnOnce(&mut egui::Ui),
+) {
+    let Some(x) = beside else {
+        ui.menu_button(title, content);
+        return;
+    };
+    let my_id = ui.next_auto_id();
+    let open = egui::containers::menu::MenuState::from_ui(ui, |state, _| {
+        state.open_item == Some(egui::containers::menu::SubMenu::id_from_widget_id(my_id))
+    });
+    let inactive = ui.style().visuals.widgets.inactive;
+    if open {
+        ui.style_mut().visuals.widgets.inactive = ui.style().visuals.widgets.open;
+    }
+    let button = egui::Button::new(title)
+        .right_text(egui::containers::menu::SubMenuButton::arrow_atom(None));
+    let response = ui.add(button);
+    ui.style_mut().visuals.widgets.inactive = inactive;
+    let mut anchor = response.clone();
+    anchor.interact_rect.max.x = anchor.interact_rect.max.x.max(x);
+    egui::containers::menu::SubMenu::new().show(ui, &anchor, content);
 }
 
 /// Which separated group of its menu a command is in.

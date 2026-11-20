@@ -4389,6 +4389,15 @@ fn view_show_scrolls_to_every_part() {
             .find(|r| !tree.contains(r))
             .unwrap_or_else(|| panic!("{id} isn't in the menu"))
     };
+    // View flows into columns here (#728): Show's submenu opens beside
+    // its column, clear of the column's wider items, whose clicks would
+    // otherwise take the rows over them (#974).
+    let wide = h
+        .query_all_by_label_contains("Compare with")
+        .map(|n| n.rect().right())
+        .fold(0.0_f32, f32::max);
+    let rows = in_menu(&h, "p00", &first);
+    assert!(wide > 0.0 && rows.left() >= wide, "{rows:?} over x {wide}");
     let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 1000.0));
     // The wheel over the list scrolls it until the last part shows.
     h.event(egui::Event::PointerMoved(
