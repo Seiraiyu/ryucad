@@ -130,6 +130,16 @@ pub(crate) fn delete_faces_in(
             .faces()
             .filter(|&f| names.contains(&out.faces[f].name))
             .collect();
+        // A growth before it took this set's faces away (a small rounded
+        // corner's ball re-trimmed with its other fillet, #979): what was
+        // asked can't be done as asked, so it is refused, never re-trimmed
+        // over nothing.
+        if ids.is_empty() {
+            return Err(TweakError::GapNotHealed {
+                face: *names.iter().next().expect("a set holds a face"),
+            }
+            .into());
+        }
         let (grown, j) = grow::grow(key, &out, &ids, m)?;
         out = grown;
         for e in j.events() {
