@@ -128,7 +128,7 @@ fn ten_thousand_occurrences_flatten_and_check_within_the_bars() {
         rounds.join(" "),
         method("net.rename"),
         method("net.show"),
-        method("daemon.publish")
+        method("session.refresh")
     );
     let _ = Command::cargo_bin("ryueda")
         .unwrap()

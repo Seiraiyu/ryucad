@@ -217,7 +217,17 @@ pub fn answer(
     req: Request,
     job: &ryu_session::job::Job,
 ) -> Result<Answer> {
+    let refreshing = std::time::Instant::now();
     let external = session.refresh_changes()?;
+    // The freshness scan apart from the request's own work, in the
+    // daemon's timings (#981: `daemon status --timings`).
+    if let Some(l) = live.as_deref_mut() {
+        l.timings.request(
+            "session.refresh",
+            std::time::Duration::ZERO,
+            refreshing.elapsed(),
+        );
+    }
     let before = live.as_deref().map(Live::snapshot);
     if let Some(l) = live.as_deref_mut() {
         if !external.is_empty() {
