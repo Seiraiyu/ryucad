@@ -12,6 +12,7 @@ pub mod fab;
 pub mod file;
 pub mod graphic;
 pub mod group;
+pub mod keepout;
 pub mod layout;
 pub mod load;
 pub mod measure;

@@ -28,6 +28,11 @@ pub const HOLE_KIND: &str = "ryueda.hole";
 /// A board's rules (design 924): `boards/<board>/rules.json`.
 pub const RULES_FILE: &str = "rules.json";
 pub const RULES_KIND: &str = "ryueda.board-rules";
+/// A board's keepouts and drawings (ryueda 7.C).
+pub const KEEPOUTS: &str = "keepouts";
+pub const KEEPOUT_KIND: &str = "ryueda.keepout";
+pub const DRAWINGS: &str = "drawings";
+pub const DRAWING_KIND: &str = "ryueda.board-drawing";
 
 /// A copper layer by its position in the stackup: the top, the `k`th
 /// inner layer from the top (1 or more), or the bottom.

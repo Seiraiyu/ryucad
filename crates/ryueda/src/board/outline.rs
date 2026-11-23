@@ -68,7 +68,7 @@ pub fn contour(c: &FileContour) -> Result<Contour, Bad> {
 
 /// The contour's ring: its corners when it is straight, else its
 /// flattening at [`FLATTEN_NM`].
-fn ring(c: &Contour) -> Vec<Point> {
+pub(crate) fn ring(c: &Contour) -> Vec<Point> {
     if c.edges().iter().all(|e| matches!(e, Edge::Segment(_))) {
         return c.edges().iter().map(Edge::start).collect();
     }
@@ -81,7 +81,7 @@ fn ring(c: &Contour) -> Vec<Point> {
 }
 
 /// Whether a ring is simple: [`crate::footprint::simple`]'s exact tests.
-fn simple(r: &[Point]) -> bool {
+pub(crate) fn simple(r: &[Point]) -> bool {
     let pts: Vec<[i64; 2]> = r.iter().map(|p| [p.x, p.y]).collect();
     crate::footprint::simple(&pts)
 }

@@ -324,7 +324,7 @@ pub struct Keepout {
 }
 
 /// What a keepout keeps out.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Keep {
     Copper,
@@ -332,6 +332,11 @@ pub enum Keep {
     Tracks,
     Pads,
     Pours,
+    /// Parts (their courtyards) on a side the keepout's outer layer names
+    /// (ryueda 7.C).
+    Placements,
+    /// Drills whose span reaches the keepout's layer (ryueda 7.C).
+    Holes,
 }
 
 /// Where the reference designator and the value are written: their

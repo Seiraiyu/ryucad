@@ -27,6 +27,8 @@ pub struct BoardFiles {
     pub holes: BTreeMap<Id, Loaded<Hole>>,
     /// `rules.json`, when the board has one (design 924).
     pub rules: Option<Loaded<super::rules::RulesFile>>,
+    /// By ID (ryueda 7.C).
+    pub keepouts: BTreeMap<Id, Loaded<super::keepout::Keepout>>,
 }
 
 fn unknown(path: &str) -> Fault {
@@ -86,6 +88,7 @@ fn load_one(
     let mut vias = BTreeMap::new();
     let mut holes = BTreeMap::new();
     let mut rules = None;
+    let mut keepouts = BTreeMap::new();
     let mut any = false;
     for (name, kind) in src.list(dir)? {
         let path = join(dir, &name);
@@ -167,6 +170,19 @@ fn load_one(
                     hole_faults,
                 )?;
             }
+            (KEEPOUTS, Kind::Dir) => {
+                any |= routes(
+                    src,
+                    &path,
+                    KEEPOUTS,
+                    KEEPOUT_KIND,
+                    "keepout",
+                    &mut h,
+                    faults,
+                    &mut keepouts,
+                    |_| Vec::new(),
+                )?;
+            }
             (RULES_FILE, Kind::File) => {
                 any = true;
                 let bytes = read(src, &path)?;
@@ -199,6 +215,16 @@ fn load_one(
     // Routes judged against the board's stackup.
     if let Some(Loaded { item: Ok(b), .. }) = &board {
         let n = super::stackup::copper_count(b);
+        for (kid, k) in keepouts.iter_mut() {
+            if let Ok(ko) = &k.item {
+                let path = route_path(&id, KEEPOUTS, kid);
+                k.faults.extend(
+                    super::keepout::judge(ko, n)
+                        .into_iter()
+                        .map(|f| f.with("path", &path)),
+                );
+            }
+        }
         for (tid, t) in tracks.iter_mut() {
             if let Ok(track) = &t.item
                 && track.layer.index(n).is_none()
@@ -246,6 +272,7 @@ fn load_one(
         vias,
         holes,
         rules,
+        keepouts,
     }))
 }
 
@@ -278,7 +305,11 @@ fn routes<T: serde::de::DeserializeOwned>(
         piece(h, join(folder, &file).as_bytes());
         piece(h, &bytes);
         // Holes have no format 2.
-        let newest = if kind == HOLE_KIND { FORMAT } else { NEWEST };
+        let newest = if [HOLE_KIND, KEEPOUT_KIND, DRAWING_KIND].contains(&kind) {
+            FORMAT
+        } else {
+            NEWEST
+        };
         let loaded = match doc::read::<T>(&bytes, &at, kind, newest) {
             Ok(x) => Loaded {
                 faults: check(&x).into_iter().map(|f| f.with("path", &at)).collect(),
@@ -452,6 +483,9 @@ impl BoardFiles {
         }
         if let Some(r) = &self.rules {
             one(r.item.as_ref().err(), &r.faults);
+        }
+        for k in self.keepouts.values() {
+            one(k.item.as_ref().err(), &k.faults);
         }
         out
     }
