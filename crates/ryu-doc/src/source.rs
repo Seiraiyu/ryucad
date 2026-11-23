@@ -274,6 +274,30 @@ pub fn pending_syncs() -> usize {
     })
 }
 
+/// One file's sync in a [`Syncer`] batch. On macOS `sync_all` is
+/// `F_FULLFSYNC`, which flushes the whole drive's cache each time: a batch
+/// of 100,000 files took over four minutes (#1044). There a plain `fsync`
+/// hands each file to the drive, and the batch ends with one
+/// `F_FULLFSYNC`, so the batch is as durable as before once it is done.
+/// Elsewhere it is `sync_all`.
+fn sync_one(f: &fs::File) -> std::io::Result<()> {
+    #[cfg(target_vendor = "apple")]
+    {
+        use std::os::fd::AsRawFd;
+        unsafe extern "C" {
+            fn fsync(fd: std::os::raw::c_int) -> std::os::raw::c_int;
+        }
+        // SAFETY: `f` holds the descriptor open for the call.
+        if unsafe { fsync(f.as_raw_fd()) } == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    }
+    #[cfg(not(target_vendor = "apple"))]
+    f.sync_all()
+}
+
 /// Threads [`Syncer`] syncs a batch on at most.
 const SYNC_THREADS: usize = 16;
 
@@ -319,7 +343,7 @@ impl Syncer {
                 // Write access, which Windows' FlushFileBuffers needs;
                 // nothing is truncated. A file removed since needs nothing.
                 if let Ok(f) = fs::OpenOptions::new().write(true).open(path) {
-                    let _ = f.sync_all();
+                    let _ = sync_one(&f);
                 }
             });
             // The folders' entries for the renames; Windows has no such sync.
@@ -328,12 +352,18 @@ impl Syncer {
                 let dirs: Vec<&PathBuf> = dirs.iter().collect();
                 in_parallel(&dirs, |d| {
                     if let Ok(f) = fs::File::open(d) {
-                        let _ = f.sync_all();
+                        let _ = sync_one(&f);
                     }
                 });
             }
             #[cfg(not(unix))]
             drop(dirs);
+            // macOS: the batch's data is with the drive; one flush of the
+            // drive's cache makes all of it durable at once (#1044).
+            #[cfg(target_vendor = "apple")]
+            if let Some(f) = batch.iter().find_map(|p| fs::File::open(p).ok()) {
+                let _ = f.sync_all();
+            }
         }
     }
 }
