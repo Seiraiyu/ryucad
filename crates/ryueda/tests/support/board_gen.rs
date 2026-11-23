@@ -42,6 +42,9 @@ pub enum Fault {
     /// [`Fault::InnerBlind`] with the `in1` leg moved to `in2`, below the
     /// vias' spans: it meets neither, so its net opens (ryueda 7.A).
     InnerMove(usize),
+    /// Connection `n`'s top-layer legs moved a nanometre towards the row
+    /// above, still on their pads (ryueda 7.B: a waiver's limit exceeded).
+    Nudge(usize),
 }
 
 #[derive(Clone, Debug)]
@@ -62,6 +65,8 @@ pub struct Spec {
     /// Every n-th part on the bottom, its connections there too; 0 for
     /// none (ryueda 7.A).
     pub bottom_every: usize,
+    /// The board's `rules.json`, when it has one (ryueda 7.B).
+    pub rules: Option<Value>,
 }
 
 impl Spec {
@@ -79,6 +84,7 @@ impl Spec {
             fault: None,
             layers: 2,
             bottom_every: 0,
+            rules: None,
         }
     }
 
@@ -205,6 +211,14 @@ pub fn write(dir: &Path, s: &Spec) {
         board["stackup"] = serde_json::to_value(st).unwrap();
     }
     put(dir, "boards/main/board.json", "ryueda.board", board);
+    if let Some(r) = &s.rules {
+        put(
+            dir,
+            "boards/main/rules.json",
+            "ryueda.board-rules",
+            r.clone(),
+        );
+    }
     for n in 0..s.count() {
         put(
             dir,
@@ -215,6 +229,13 @@ pub fn write(dir: &Path, s: &Spec) {
     }
     let preset = ryueda::board::preset::JLC_2L;
     let track = |id: String, net: &str, layer: &str, a: (i64, i64), b: (i64, i64)| {
+        let nudged = matches!(s.fault, Some(Fault::Nudge(f)) if id.starts_with(&format!("t{f}_")))
+            && layer == "top";
+        let (a, b) = if nudged {
+            ((a.0, a.1 - 1), (b.0, b.1 - 1))
+        } else {
+            (a, b)
+        };
         put(
             dir,
             &format!("boards/main/tracks/{id}.json"),
@@ -335,6 +356,7 @@ pub fn seeded(seed: u64) -> Spec {
         fault: None,
         layers: 2,
         bottom_every: 0,
+        rules: None,
     }
 }
 

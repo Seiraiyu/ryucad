@@ -13,13 +13,17 @@ pub mod file;
 pub mod graphic;
 pub mod layout;
 pub mod load;
+pub mod measure;
 pub mod occ;
 pub mod opening;
 pub mod outline;
 pub mod pad;
 pub mod preset;
+pub mod presetcmd;
 pub mod render;
 pub mod route;
+pub mod rulecmd;
+pub mod rules;
 pub mod shapes;
 pub mod stackup;
 #[cfg(test)]
@@ -28,5 +32,5 @@ pub mod text;
 
 pub use file::{
     BOARD_FILE, BOARD_KIND, BOARDS, FORMAT, HOLE_KIND, HOLES, PLACEMENT_KIND, PLACEMENTS,
-    TRACK_KIND, TRACKS, VIA_KIND, VIAS,
+    RULES_FILE, RULES_KIND, TRACK_KIND, TRACKS, VIA_KIND, VIAS,
 };

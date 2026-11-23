@@ -264,3 +264,158 @@ fn layers_on_disk_round_trip() {
         );
     }
 }
+
+fn check_all(spec: &Spec) -> drc::BoardCheck {
+    let d = tempfile::tempdir().unwrap();
+    board_gen::write(d.path(), spec);
+    let p = ryueda::project::Project::load(d.path()).unwrap();
+    assert!(p.faults().iter().all(|f| !f.is_error()), "{:?}", p.faults());
+    let id = ryueda::id::Id::parse("main", "board").unwrap();
+    drc::check(&p, &p.boards[&id]).unwrap()
+}
+
+fn tracks_of(spec: &Spec) -> usize {
+    let d = tempfile::tempdir().unwrap();
+    board_gen::write(d.path(), spec);
+    std::fs::read_dir(d.path().join("boards/main/tracks"))
+        .unwrap()
+        .count()
+}
+
+/// Board rules raise exactly the findings they should (ryueda 7.B): a
+/// clearance just over the gap between neighbouring rows gives gaps and
+/// nothing else, the preset's own gives none, a width a nanometre over
+/// the tracks' gives one finding a track; waiving every gap clears the
+/// board, and a track nudged a nanometre closer exceeds its waivers.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release only: seeded boards checked")]
+fn rules_raise_exactly_the_findings_they_should() {
+    let floor = ryueda::board::preset::JLC_2L.clearance_nm;
+    for seed in 0..16u64 {
+        let spec = board_gen::seeded(seed);
+        // Neighbouring rows' tracks run along the rows' centres, the row
+        // pitch apart: their copper is the pitch less a track's width
+        // apart. A nanometre over that, every row's track is under it
+        // (pads, wider than tracks, closer still).
+        let gap = spec.pitch.1 - spec.width;
+        let ruled = |rules: serde_json::Value| Spec {
+            rules: Some(rules),
+            ..spec.clone()
+        };
+        let over = ruled(serde_json::json!({"defaults": {"clearance_nm": gap + 1}}));
+        let c = check_all(&over);
+        assert!(!c.findings.is_empty(), "seed {seed}");
+        assert!(
+            c.findings.iter().all(|f| f.code == Code::DrcClearance),
+            "seed {seed}: {:?}",
+            &c.findings[..c.findings.len().min(5)]
+        );
+        let at_floor = check_all(&ruled(
+            serde_json::json!({"defaults": {"clearance_nm": floor}}),
+        ));
+        assert!(
+            at_floor.findings.is_empty(),
+            "seed {seed}: {:?}",
+            at_floor.findings
+        );
+        let wide = check_all(&ruled(
+            serde_json::json!({"defaults": {"track_width_nm": spec.width + 1}}),
+        ));
+        assert!(
+            wide.findings.iter().all(|f| f.code == Code::DrcTrackWidth),
+            "seed {seed}: {:?}",
+            &wide.findings[..wide.findings.len().min(5)]
+        );
+        assert_eq!(wide.findings.len(), tracks_of(&spec), "seed {seed}");
+
+        // Every gap waived at its own distance: no errors, none unused.
+        let waivers: serde_json::Map<String, serde_json::Value> = c
+            .findings
+            .iter()
+            .map(|f| {
+                (
+                    f.id.clone(),
+                    serde_json::json!({"code": f.code, "refs": f.refs, "reason": "seeded",
+                        "by": "agent", "limit": f.details["distance_nm"]}),
+                )
+            })
+            .collect();
+        let rules = serde_json::json!({"defaults": {"clearance_nm": gap + 1}, "waivers": waivers});
+        let waived = check_all(&ruled(rules.clone()));
+        assert_eq!(waived.errors(), 0, "seed {seed}");
+        assert_eq!(waived.waived(), c.findings.len(), "seed {seed}");
+        assert!(
+            waived.findings.iter().all(|f| f.code != Code::WaiverUnused),
+            "seed {seed}"
+        );
+
+        // A connection within a row below the first, on top, moved a
+        // nanometre towards the row above: the gaps it shares with that
+        // row get worse than their waivers, and only those.
+        let n = (spec.cols..spec.count() - 1)
+            .find(|&n| spec_same_row(&spec, n) && !spec.by_vias(n))
+            .unwrap();
+        let nudged = check_all(&Spec {
+            fault: Some(Fault::Nudge(n)),
+            rules: Some(rules),
+            ..spec.clone()
+        });
+        let exceeded: Vec<&drc::Finding> = nudged
+            .findings
+            .iter()
+            .filter(|f| f.details.get("waiver_exceeded").is_some())
+            .collect();
+        assert!(!exceeded.is_empty(), "seed {seed}");
+        let track = format!("main:track/t{n}_");
+        assert!(
+            exceeded
+                .iter()
+                .all(|f| f.refs.iter().any(|r| r.starts_with(&track))),
+            "seed {seed}: {exceeded:?}"
+        );
+        assert_eq!(nudged.errors(), exceeded.len(), "seed {seed}");
+        assert!(exceeded.iter().all(|f| f.is_error()), "seed {seed}");
+    }
+}
+
+/// A seeded `rules.json` (defaults, two classes, waivers) reads back and
+/// writes the same bytes (ryueda 7.B).
+#[test]
+fn rules_on_disk_round_trip() {
+    for seed in [0u64, 3, 9] {
+        let mut s = seed;
+        let mut draw = |lo: i64, span: i64| lo + (board_gen::next(&mut s) as i64).rem_euclid(span);
+        let rules = serde_json::json!({
+            "defaults": {"clearance_nm": draw(100_000, 200_000), "track_width_nm": draw(100_000, 300_000),
+                "via": {"drill_nm": 300_000, "diameter_nm": draw(600_000, 200_000)}},
+            "classes": {
+                "power": {"track_width_nm": draw(300_000, 500_000), "clearance_nm": draw(150_000, 100_000)},
+                "signal": {"clearance_nm": draw(100_000, 100_000),
+                    "pour": {"clearance_nm": draw(200_000, 100_000)}}},
+            "waivers": {
+                format!("{:016x}", draw(0, i64::MAX)): {"code": "drc_clearance",
+                    "refs": ["main:R1/1", "main:R2/1"], "reason": "measured", "by": "agent",
+                    "limit": draw(50_000, 50_000)},
+                format!("{:016x}", draw(0, i64::MAX)): {"code": "drc_track_width",
+                    "refs": ["main:track/t0_0"], "reason": "neck", "by": "agent"}},
+        });
+        let d = tempfile::tempdir().unwrap();
+        board_gen::write(
+            d.path(),
+            &Spec {
+                rules: Some(rules),
+                ..board_gen::seeded(seed)
+            },
+        );
+        let path = d.path().join("boards/main/rules.json");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let p = ryueda::project::Project::load(d.path()).unwrap();
+        let id = ryueda::id::Id::parse("main", "board").unwrap();
+        let loaded = p.boards[&id].rules.as_ref().unwrap();
+        let file = loaded.item.as_ref().unwrap();
+        let mut v = serde_json::to_value(file).unwrap();
+        v["format"] = serde_json::json!(ryueda::conn::format_of("ryueda.board-rules", &v));
+        v["kind"] = serde_json::json!("ryueda.board-rules");
+        assert_eq!(ryueda::canonical::to_string(&v), text, "seed {seed}");
+    }
+}

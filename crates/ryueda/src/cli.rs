@@ -510,6 +510,9 @@ enum Command {
     /// Boards: create, edit, list, show and delete; place parts; render.
     #[command(subcommand)]
     Board(BoardCmd),
+    /// Fab presets: the built-in ones and the project's own (presets/<id>.json).
+    #[command(subcommand)]
+    Preset(PresetCmd),
     /// Import libraries from other tools: KiCad's for now.
     #[command(subcommand)]
     Import(ImportCmd),
@@ -1501,6 +1504,68 @@ enum ClassCmd {
 }
 
 #[derive(Subcommand)]
+enum PresetCmd {
+    /// The built-in presets and the project's own, with the boards using each.
+    List,
+    /// A preset's document.
+    Show { name: String },
+    /// A project preset copied from another: presets/<NAME>.json.
+    Create {
+        name: String,
+        #[arg(long)]
+        from: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Set fields of a project preset: KEY=VALUE, *_nm values lengths, blind_vias true or false, the rest JSON (stackup, assembly).
+    Edit {
+        name: String,
+        #[arg(required = true, value_name = "KEY=VALUE")]
+        set: Vec<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Delete a project preset no board uses.
+    Delete {
+        name: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+}
+
+#[derive(Subcommand)]
+enum RulesCmd {
+    /// The rules as written and as resolved, each value with where it came from.
+    Show { board: String },
+    /// Set rules: KEY=VALUE (clearance, track_width, via=DRILL,DIAMETER, hole_clearance, edge_clearance, courtyard_clearance, placement_grid, pour.clearance, pour.min_width, pour.thermal_gap, pour.thermal_spoke), lengths. With --class, that net class's.
+    Set {
+        board: String,
+        #[arg(long)]
+        class: Option<String>,
+        #[arg(required = true, value_name = "KEY=VALUE")]
+        set: Vec<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Remove rules by KEY, from the defaults or --class.
+    Unset {
+        board: String,
+        #[arg(long)]
+        class: Option<String>,
+        #[arg(required = true, value_name = "KEY")]
+        keys: Vec<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// The rules that apply to one item (a pad, track, via or net:NAME) or a pair, and where each came from.
+    Explain {
+        board: String,
+        #[arg(required = true, num_args = 1..=2)]
+        refs: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
 enum DesignCmd {
     /// A design over a root block, its ID random unless given.
     Create {
@@ -1549,10 +1614,14 @@ enum BoardCmd {
         /// lengths ("10 mm", or "10" in the project's unit).
         #[arg(long, value_name = "OPS")]
         outline: Option<String>,
-        /// Copper layers (2 by default): N of the preset's copper with equal
-        /// FR-4 between, filling its board thickness.
+        /// Copper layers (the preset's by default): N of the preset's copper
+        /// with equal FR-4 between, filling its board thickness.
         #[arg(long, value_name = "N")]
         layers: Option<u32>,
+        /// The fab preset: jlc-2l (the default), jlc-4l, or one of the
+        /// project's (`ryueda preset list`).
+        #[arg(long)]
+        preset: Option<String>,
         #[arg(long)]
         id: Option<String>,
         #[command(flatten)]
@@ -1683,6 +1752,32 @@ enum BoardCmd {
         /// Only findings of this code; repeat for more.
         #[arg(long = "code")]
         codes: Vec<String>,
+    },
+    /// The board's rules: defaults and per net class over its preset's floor.
+    #[command(subcommand)]
+    Rules(RulesCmd),
+    /// The exact distance between two items (R1/1, track/t1, via/v1,
+    /// hole/h1, R1/1#hole, R1 by its courtyard, net:NAME) on each copper
+    /// layer they share, with the clearance the rules ask of them.
+    Measure {
+        board: String,
+        a: String,
+        b: String,
+        #[arg(long)]
+        layer: Option<String>,
+    },
+    /// Waive a finding by ID with --reason (kept with its measurement as a
+    /// limit: a finding that gets worse counts again), or --remove its
+    /// waiver. Shorts can't be waived.
+    Waive {
+        board: String,
+        finding: String,
+        #[arg(long)]
+        reason: Option<String>,
+        #[arg(long, conflicts_with = "reason")]
+        remove: bool,
+        #[command(flatten)]
+        expect: Expect,
     },
     /// Parts placed, nets routed and open, findings by code.
     Status { board: String },
@@ -3792,12 +3887,29 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             expected_revision: expect.expect.clone(),
         },
         Command::Design(DesignCmd::List) => Request::DesignList {},
+        Command::Preset(PresetCmd::List) => Request::PresetList {},
+        Command::Preset(PresetCmd::Show { name }) => Request::PresetShow { name: name.clone() },
+        Command::Preset(PresetCmd::Create { name, from, expect }) => Request::PresetCreate {
+            name: name.clone(),
+            from: from.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Preset(PresetCmd::Edit { name, set, expect }) => Request::PresetEdit {
+            name: name.clone(),
+            set: set.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Preset(PresetCmd::Delete { name, expect }) => Request::PresetDelete {
+            name: name.clone(),
+            expected_revision: expect.expect.clone(),
+        },
         Command::Board(BoardCmd::Create {
             name,
             design,
             rect,
             outline,
             layers,
+            preset,
             id,
             expect,
         }) => Request::BoardCreate {
@@ -3809,6 +3921,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
                 .map(|o| json_arg("--outline", o))
                 .transpose()?,
             layers: *layers,
+            preset: preset.clone(),
             id: id.clone(),
             expected_revision: expect.expect.clone(),
         },
@@ -3979,9 +4092,59 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             board: board.clone(),
             codes: codes.clone(),
         },
+        Command::Board(BoardCmd::Measure { board, a, b, layer }) => Request::BoardMeasure {
+            board: board.clone(),
+            a: a.clone(),
+            b: b.clone(),
+            layer: layer.clone(),
+        },
+        Command::Board(BoardCmd::Waive {
+            board,
+            finding,
+            reason,
+            remove,
+            expect,
+        }) => Request::BoardWaive {
+            board: board.clone(),
+            finding: finding.clone(),
+            reason: reason.clone(),
+            remove: *remove,
+            expected_revision: expect.expect.clone(),
+        },
         Command::Board(BoardCmd::Status { board }) => Request::BoardStatus {
             board: board.clone(),
         },
+        Command::Board(BoardCmd::Rules(RulesCmd::Show { board })) => Request::BoardRulesShow {
+            board: board.clone(),
+        },
+        Command::Board(BoardCmd::Rules(RulesCmd::Set {
+            board,
+            class,
+            set,
+            expect,
+        })) => Request::BoardRulesSet {
+            board: board.clone(),
+            class: class.clone(),
+            set: set.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Board(BoardCmd::Rules(RulesCmd::Unset {
+            board,
+            class,
+            keys,
+            expect,
+        })) => Request::BoardRulesUnset {
+            board: board.clone(),
+            class: class.clone(),
+            keys: keys.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Board(BoardCmd::Rules(RulesCmd::Explain { board, refs })) => {
+            Request::BoardRulesExplain {
+                board: board.clone(),
+                refs: refs.clone(),
+            }
+        }
         Command::Board(BoardCmd::Export {
             board,
             allow_errors,

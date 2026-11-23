@@ -63,10 +63,16 @@ fn design() -> BTreeMap<String, Vec<u8>> {
         put(&mut f, &format!("blocks/top/components/r{i}.json"), "ryueda.component",
             json!({"of": {"id": "r"}, "refdes": format!("R{}", i + 1), "pins": {"1": one, "2": two}}));
         if i > 0 {
-            put(&mut f, &format!("blocks/top/nets/n{i}.json"), "ryueda.net", json!({"name": format!("N{i}")}));
+            // N1 is a power net (ryueda 7.B): its class's rules apply.
+            let mut net = json!({"name": format!("N{i}")});
+            if i == 1 {
+                net["class"] = json!("power");
+            }
+            put(&mut f, &format!("blocks/top/nets/n{i}.json"), "ryueda.net", net);
         }
     }
     put(&mut f, "designs/d.json", "ryueda.design", json!({"name": "D", "root": "top"}));
+    put(&mut f, "classes/power.json", "ryueda.class", json!({"name": "Power"}));
     f
 }
 
@@ -160,6 +166,34 @@ fuzz_target!(|data: &[u8]| {
     }
     for i in 0..b.next() % 3 {
         put(&mut files, &format!("boards/f/holes/h{i}.json"), "ryueda.hole", json!({"at": [b.coord(), b.coord()], "drill_nm": b.length()}));
+    }
+    // The board's rules (ryueda 7.B): none, or defaults drawn around the
+    // preset's floor (under it too), a class that exists and one that
+    // doesn't, and up to two waivers with drawn IDs and limits.
+    if b.next() % 3 != 0 {
+        let around = |b: &mut Bytes| 100_000 + (b.next() as i64 - 128) * 1_000;
+        let mut rules = json!({"defaults": {}});
+        for key in ["clearance_nm", "track_width_nm", "edge_clearance_nm", "hole_clearance_nm"] {
+            if b.next() % 2 == 0 {
+                rules["defaults"][key] = json!(around(&mut b));
+            }
+        }
+        if b.next() % 2 == 0 {
+            rules["classes"]["power"] = json!({"track_width_nm": around(&mut b), "clearance_nm": around(&mut b)});
+        }
+        if b.next() % 4 == 0 {
+            rules["classes"]["ghost"] = json!({"clearance_nm": around(&mut b)});
+        }
+        const CODES: [&str; 4] = ["drc_clearance", "drc_track_width", "net_short", "net_open"];
+        for _ in 0..b.next() % 3 {
+            let id = format!("{:016x}", (b.next() as u64) << 8 | b.next() as u64);
+            let mut w = json!({"code": CODES[b.next() % CODES.len()], "refs": ["f:R1/1"], "reason": "fuzz", "by": "fuzz"});
+            if b.next() % 2 == 0 {
+                w["limit"] = json!(around(&mut b));
+            }
+            rules["waivers"][id] = w;
+        }
+        put(&mut files, "boards/f/rules.json", "ryueda.board-rules", rules);
     }
     let p = load(&files);
     let _ = p.faults();

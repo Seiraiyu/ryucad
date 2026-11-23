@@ -110,11 +110,23 @@ pub fn create(
     rect: Option<&[String; 2]>,
     outline: Option<&Value>,
     layers: Option<u32>,
+    preset: Option<&str>,
     id: Option<&str>,
     expected: Option<&str>,
 ) -> Result<Value> {
     let p = session.project();
     check_revision("the project", &p.revision, expected)?;
+    let preset_name = preset.unwrap_or(&super::preset::DEFAULT.name).to_owned();
+    let chosen = super::preset::resolve(p, &preset_name).ok_or_else(|| {
+        Error::new(
+            Code::BoardPresetNotFound,
+            format!(
+                "there is no preset {preset_name}; presets are {}",
+                super::preset::names_in(p)
+            ),
+        )
+        .with("preset", &preset_name)
+    })?;
     let unit = p.manifest.default_unit;
     let design = crate::netlist::one_design(p, Some(design))?;
     if named_elsewhere(p, name, None) {
@@ -148,7 +160,7 @@ pub fn create(
     };
     let stackup = match layers {
         None | Some(2) => None,
-        Some(n) => Some(super::stackup::even(super::preset::DEFAULT, n as usize)?),
+        Some(n) => Some(super::stackup::even(&chosen, n as usize)?),
     };
     let id = new_id(id, "board", |s| {
         Id::parse(s, "board").is_ok_and(|i| p.boards.contains_key(&i))
@@ -156,7 +168,7 @@ pub fn create(
     let board = Board {
         name: name.to_owned(),
         design,
-        preset: super::preset::DEFAULT.name.into(),
+        preset: preset_name,
         outline,
         cutouts: Vec::new(),
         stackup,
@@ -316,13 +328,26 @@ pub fn drc(session: &mut Session, board: &str, codes: &[String]) -> Result<Value
         "findings": owned,
         "counts": counts(&owned),
         "errors": errors,
-        "warnings": owned.len() - errors,
+        "warnings": owned
+            .iter()
+            .filter(|f| f.severity == crate::fault::Severity::Warning)
+            .count(),
         "incomplete": c.incomplete,
     });
+    // ryueda 7.B: waived findings counted only when there are any, so
+    // boards without waivers answer as before.
+    let waived = owned.iter().filter(|f| f.waived.is_some()).count();
+    if waived > 0 {
+        v["waived"] = json!(waived);
+    }
     // ryueda 7.A's rules, shown for boards with a stackup of their own:
     // added to `rules` they would move every stage 5 answer.
     if board_of(&session.project().boards[&id]).is_ok_and(|f| f.stackup.is_some()) {
         v["layer_rules"] = c.preset.layer_rules_json();
+    }
+    // ryueda 7.B: the board's own rules, resolved, when it has them.
+    if session.project().boards[&id].rules.is_some() {
+        v["board_rules"] = c.rules.to_json();
     }
     if errors > 0 {
         return Err(Error::new(
@@ -331,6 +356,22 @@ pub fn drc(session: &mut Session, board: &str, codes: &[String]) -> Result<Value
         )
         .with("report", v));
     }
+    Ok(v)
+}
+
+/// `board.measure`: two items' exact distance on each copper layer they
+/// share, with the clearance the board's rules ask of them.
+pub fn measure(
+    session: &mut Session,
+    board: &str,
+    a: &str,
+    b: &str,
+    layer: Option<&str>,
+) -> Result<Value> {
+    let id = find(session.project(), board)?.id.clone();
+    let c = session.board_check(&id)?;
+    let mut v = super::measure::measure(&c.conn, &c.shapes, &c.rules, a, b, layer)?;
+    v["revision"] = json!(session.project().boards[&id].revision);
     Ok(v)
 }
 
@@ -357,7 +398,7 @@ pub fn status(session: &mut Session, board: &str) -> Result<Value> {
         .iter()
         .filter(|f| f.code == Code::BoardUnplaced)
         .count();
-    Ok(json!({
+    let mut v = json!({
         "board": format!("board/{id}"),
         "revision": b.revision,
         "placed": b.placements.len(),
@@ -367,7 +408,11 @@ pub fn status(session: &mut Session, board: &str) -> Result<Value> {
         "errors": c.errors(),
         "warnings": c.warnings(),
         "incomplete": c.incomplete,
-    }))
+    });
+    if c.waived() > 0 {
+        v["waived"] = json!(c.waived());
+    }
+    Ok(v)
 }
 
 pub fn list(p: &Project) -> Value {

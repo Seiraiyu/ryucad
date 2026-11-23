@@ -25,6 +25,8 @@ pub struct BoardFiles {
     pub tracks: BTreeMap<Id, Loaded<Track>>,
     pub vias: BTreeMap<Id, Loaded<Via>>,
     pub holes: BTreeMap<Id, Loaded<Hole>>,
+    /// `rules.json`, when the board has one (design 924).
+    pub rules: Option<Loaded<super::rules::RulesFile>>,
 }
 
 fn unknown(path: &str) -> Fault {
@@ -63,20 +65,8 @@ pub fn load(src: &dyn Source) -> Result<(BTreeMap<Id, BoardFiles>, Vec<Fault>)> 
 }
 
 fn board_faults(b: &Board, path: &str) -> Vec<Fault> {
-    let preset = super::preset::by_name(&b.preset).is_none().then(|| {
-        Fault::error(
-            Code::InvalidDocument,
-            format!(
-                "preset {} isn't known; presets are {}",
-                b.preset,
-                super::preset::names()
-            ),
-        )
-        .with("pointer", "/preset")
-    });
     super::outline::judge(b)
         .into_iter()
-        .chain(preset)
         .chain(b.stackup.iter().flat_map(super::stackup::judge))
         .map(|f| f.with("path", path))
         .collect()
@@ -95,6 +85,7 @@ fn load_one(
     let mut tracks = BTreeMap::new();
     let mut vias = BTreeMap::new();
     let mut holes = BTreeMap::new();
+    let mut rules = None;
     let mut any = false;
     for (name, kind) in src.list(dir)? {
         let path = join(dir, &name);
@@ -176,6 +167,29 @@ fn load_one(
                     hole_faults,
                 )?;
             }
+            (RULES_FILE, Kind::File) => {
+                any = true;
+                let bytes = read(src, &path)?;
+                piece(&mut h, name.as_bytes());
+                piece(&mut h, &bytes);
+                rules = Some(
+                    match doc::read::<super::rules::RulesFile>(
+                        &bytes,
+                        &path,
+                        RULES_KIND,
+                        super::rules::FORMAT,
+                    ) {
+                        Ok(r) => Loaded {
+                            item: Ok(r),
+                            faults: Vec::new(),
+                        },
+                        Err(e) => Loaded {
+                            item: Err(e),
+                            faults: Vec::new(),
+                        },
+                    },
+                );
+            }
             _ => faults.push(unknown(&path)),
         }
     }
@@ -231,6 +245,7 @@ fn load_one(
         tracks,
         vias,
         holes,
+        rules,
     }))
 }
 
@@ -391,6 +406,9 @@ impl BoardFiles {
         for h in self.holes.values() {
             one(h.item.as_ref().err(), &h.faults);
         }
+        if let Some(r) = &self.rules {
+            one(r.item.as_ref().err(), &r.faults);
+        }
         out
     }
 }
@@ -457,14 +475,6 @@ mod tests {
         let (boards, _) = load(&files(&[("boards/b/placements/r1.json", PLACED)])).unwrap();
         let b = &boards[&Id::parse("b", "board").unwrap()];
         assert_eq!(b.faults()[0].error.code, Code::InvalidDocument);
-    }
-
-    #[test]
-    fn an_unknown_preset_is_a_fault() {
-        let other = BOARD.replace("jlc-2l", "acme-6l");
-        let (boards, _) = load(&files(&[("boards/b/board.json", &other)])).unwrap();
-        let b = &boards[&Id::parse("b", "board").unwrap()];
-        assert_eq!(b.faults()[0].error.details["pointer"], "/preset");
     }
 
     #[test]

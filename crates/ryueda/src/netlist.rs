@@ -124,6 +124,10 @@ pub struct FlatNet {
     /// The rail, for a rail.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rail: Option<Id>,
+    /// Its net class (`classes/<id>.json`), from its rail or block net:
+    /// what a board's rules (design 924) select it by.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub class: Option<Id>,
     /// Its pins, as `(occurrence index, pin index)`, sorted by reference.
     #[serde(skip)]
     pub members: Vec<(usize, usize)>,
@@ -469,6 +473,7 @@ pub(crate) fn flatten_ungated(p: &Project, design: &Id) -> Result<Netlist> {
                 id: format!("{design}:rail:{rid}"),
                 name: r.name.clone(),
                 rail: Some(rid.clone()),
+                class: r.class.clone(),
                 members: Vec::new(),
                 ports: Vec::new(),
                 voltages: r
@@ -489,6 +494,7 @@ pub(crate) fn flatten_ungated(p: &Project, design: &Id) -> Result<Netlist> {
                     id: format!("{}{nid}", prefix(design, &occ.path)),
                     name: format!("{}{}", name_prefix(&occ.path), n.name),
                     rail: None,
+                    class: n.class.clone(),
                     members: Vec::new(),
                     ports: Vec::new(),
                     voltages: n
@@ -530,6 +536,7 @@ pub(crate) fn flatten_ungated(p: &Project, design: &Id) -> Result<Netlist> {
                     id: format!("{}port:{port}", prefix(design, &occ.path)),
                     name: format!("{}{name}", name_prefix(&occ.path)),
                     rail: None,
+                    class: None,
                     members: Vec::new(),
                     ports: Vec::new(),
                     voltages: Vec::new(),
@@ -839,6 +846,34 @@ pub(crate) mod tests {
         }
         let p = Project::load(&board).unwrap();
         (dir, p)
+    }
+
+    #[test]
+    fn nets_and_rails_carry_their_class() {
+        let (_dir, p) = project(&[
+            (
+                "classes/power.json",
+                json!({"format": 1, "kind": "ryueda.class", "name": "Power"}),
+            ),
+            (
+                "rails/gnd.json",
+                json!({"format": 1, "kind": "ryueda.rail", "name": "GND", "class": "power"}),
+            ),
+        ]);
+        let d = one_design(&p, None).unwrap();
+        let n = flatten(&p, &d).unwrap();
+        let classed: Vec<&FlatNet> = n.nets.iter().filter(|x| x.class.is_some()).collect();
+        assert_eq!(
+            classed.len(),
+            1,
+            "{:?}",
+            n.nets.iter().map(|x| (&x.id, &x.class)).collect::<Vec<_>>()
+        );
+        assert_eq!(classed[0].rail.as_ref().unwrap().as_str(), "gnd");
+        assert_eq!(classed[0].class.as_ref().unwrap().as_str(), "power");
+        assert_eq!(serde_json::to_value(classed[0]).unwrap()["class"], "power");
+        let plain = n.nets.iter().find(|x| x.class.is_none()).unwrap();
+        assert!(serde_json::to_value(plain).unwrap().get("class").is_none());
     }
 
     /// [`project`] with manifest properties `props` (plan 2.E's title

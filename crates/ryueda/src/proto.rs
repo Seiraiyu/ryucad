@@ -581,7 +581,34 @@ pub enum Request {
     },
     #[serde(rename = "design.list")]
     DesignList {},
-    /// A board for a design (design 732), with the `jlc-2l` preset.
+    #[serde(rename = "preset.list")]
+    PresetList {},
+    #[serde(rename = "preset.show")]
+    PresetShow { name: String },
+    /// A project preset copied from another (`presets/<name>.json`).
+    #[serde(rename = "preset.create")]
+    PresetCreate {
+        name: String,
+        from: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// `key=value` pairs set on a project preset.
+    #[serde(rename = "preset.edit")]
+    PresetEdit {
+        name: String,
+        set: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "preset.delete")]
+    PresetDelete {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// A board for a design (design 732), with the `jlc-2l` preset unless
+    /// another is named.
     #[serde(rename = "board.create")]
     BoardCreate {
         name: String,
@@ -596,6 +623,10 @@ pub enum Request {
         /// Copper layers: 2 (the default) or an even stackup of `n`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         layers: Option<u32>,
+        /// The fab preset: built in (`jlc-2l`, the default; `jlc-4l`) or
+        /// the project's own.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preset: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
         /// The project's revision.
@@ -801,6 +832,50 @@ pub enum Request {
         /// Only findings of these codes.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         codes: Vec<String>,
+    },
+    #[serde(rename = "board.rules.show")]
+    BoardRulesShow { board: String },
+    /// `key=value` rules set on the board's defaults, or on a class.
+    #[serde(rename = "board.rules.set")]
+    BoardRulesSet {
+        board: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        class: Option<String>,
+        set: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "board.rules.unset")]
+    BoardRulesUnset {
+        board: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        class: Option<String>,
+        keys: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "board.rules.explain")]
+    BoardRulesExplain { board: String, refs: Vec<String> },
+    /// The exact distance between two items of a board, per copper layer.
+    #[serde(rename = "board.measure")]
+    BoardMeasure {
+        board: String,
+        a: String,
+        b: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        layer: Option<String>,
+    },
+    /// A finding waived with a reason, or (`remove`) its waiver removed.
+    #[serde(rename = "board.waive")]
+    BoardWaive {
+        board: String,
+        finding: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        remove: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
     },
     /// A board's counts: parts placed, nets routed and open, findings.
     #[serde(rename = "board.status")]
@@ -1629,7 +1704,13 @@ impl Request {
                 | Request::DesignCreate { .. }
                 | Request::DesignEdit { .. }
                 | Request::DesignDelete { .. }
+                | Request::PresetCreate { .. }
+                | Request::PresetEdit { .. }
+                | Request::PresetDelete { .. }
                 | Request::BoardCreate { .. }
+                | Request::BoardRulesSet { .. }
+                | Request::BoardRulesUnset { .. }
+                | Request::BoardWaive { .. }
                 | Request::BoardEdit { .. }
                 | Request::BoardDelete { .. }
                 | Request::BoardPlace { .. }
@@ -1743,6 +1824,7 @@ mod tests {
                 rect: Some(["30 mm".into(), "20 mm".into()]),
                 outline: None,
                 layers: Some(4),
+                preset: None,
                 id: Some("main".into()),
                 expected_revision: None,
             },

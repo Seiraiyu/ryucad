@@ -558,6 +558,8 @@ pub struct Project {
     /// The faults of files under `boards/` that aren't a board's, and of
     /// boards naming a design the project doesn't have.
     pub board_faults: Vec<Fault>,
+    /// A project's own fab presets (design 924), by ID; in the revision.
+    pub presets: BTreeMap<Id, Loaded<crate::board::preset::Preset>>,
 }
 
 /// The organisation's style: the library project `schematic.style_from`
@@ -629,6 +631,8 @@ impl Project {
         let style = src.read(STYLE)?;
         let mut conn = design::load(src)?;
         let (boards, mut board_faults) = crate::board::load::load(src)?;
+        let (presets, preset_faults) = crate::board::preset::load(src)?;
+        board_faults.extend(preset_faults);
         let mut h = blake3::Hasher::new();
         h.update(b"ryueda.project.1");
         design::piece(&mut h, &bytes);
@@ -654,6 +658,15 @@ impl Project {
         if let Some(b) = &style {
             h.update(b"ryueda.style");
             design::piece(&mut h, b);
+        }
+        // And its own presets (design 924), when it has any.
+        if !presets.is_empty() {
+            h.update(b"ryueda.presets");
+            for id in presets.keys() {
+                let path = join(crate::board::preset::PRESETS, &format!("{id}.json"));
+                design::piece(&mut h, id.as_str().as_bytes());
+                design::piece(&mut h, &src.read(&path)?.unwrap_or_default());
+            }
         }
         let revision = h.finalize().to_hex()[..32].to_owned();
         let lint = match &lint {
@@ -810,6 +823,7 @@ impl Project {
             org_style,
             boards,
             board_faults: Vec::new(),
+            presets,
         };
         let builtin = crate::style::builtin();
         let org_palette: Vec<String> = p
@@ -882,6 +896,33 @@ impl Project {
                     .with("path", crate::board::file::board_path(id))
                     .with("pointer", "/design"),
                 );
+            }
+            if let Ok(board) = &b.board.item
+                && crate::board::preset::resolve(&p, &board.preset).is_none()
+            {
+                board_faults.push(
+                    Fault::error(
+                        Code::BoardPresetNotFound,
+                        format!(
+                            "board {id} names preset {}, which is neither built in nor the project's; presets are {}",
+                            board.preset,
+                            crate::board::preset::names_in(&p)
+                        ),
+                    )
+                    .with("path", crate::board::file::board_path(id))
+                    .with("pointer", "/preset"),
+                );
+            }
+            if let (Ok(board), Some(rules)) = (&b.board.item, &b.rules)
+                && let Ok(r) = &rules.item
+                && let Some(preset) = crate::board::preset::resolve(&p, &board.preset)
+            {
+                let classes: std::collections::BTreeSet<Id> =
+                    p.conn.classes.keys().cloned().collect();
+                let path = join(&crate::board::file::board_dir(id), crate::board::RULES_FILE);
+                for f in crate::board::rules::judge(r, &preset, &classes) {
+                    board_faults.push(f.with("path", &path));
+                }
             }
             // Route nets against the design's flattened nets: only for
             // boards with routes, and only when the design flattens (its
@@ -1251,6 +1292,15 @@ impl Project {
             out.extend(b.faults());
         }
         out.extend(self.board_faults.iter().cloned());
+        for l in self.presets.values() {
+            if let Err(e) = &l.item {
+                out.push(Fault {
+                    severity: Severity::Error,
+                    error: e.clone(),
+                });
+            }
+            out.extend(l.faults.iter().cloned());
+        }
         out
     }
 
@@ -1274,6 +1324,7 @@ impl Project {
             crate::conn::DESIGNS,
             crate::conn::RAILS,
             crate::conn::CLASSES,
+            crate::board::preset::PRESETS,
         ] {
             out.extend(files_of(root, folder));
         }
@@ -2034,6 +2085,134 @@ pub(crate) mod tests {
             t.contains(&"boards/b/placements/r1.json".to_owned()),
             "{t:?}"
         );
+    }
+
+    #[test]
+    fn a_project_preset_loads_and_a_board_may_name_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("board");
+        manifest(&root, ProjectKind::Design, &[]);
+        library_in(&root);
+        design_in(&root);
+        let mut doc = crate::board::preset::JLC_2L.document();
+        doc["name"] = serde_json::json!("acme-2l");
+        doc["clearance_nm"] = serde_json::json!(150_000);
+        std::fs::create_dir_all(root.join("presets")).unwrap();
+        std::fs::write(
+            root.join("presets/acme-2l.json"),
+            crate::canonical::to_string(&doc),
+        )
+        .unwrap();
+        let p = Project::load(&root).unwrap();
+        let id = Id::parse("acme-2l", "preset").unwrap();
+        assert!(
+            p.presets[&id].faults.is_empty(),
+            "{:?}",
+            p.presets[&id].faults
+        );
+        assert_eq!(
+            crate::board::preset::resolve(&p, "acme-2l")
+                .unwrap()
+                .clearance_nm,
+            150_000
+        );
+        // Its file is in the project's revision.
+        doc["clearance_nm"] = serde_json::json!(160_000);
+        std::fs::write(
+            root.join("presets/acme-2l.json"),
+            crate::canonical::to_string(&doc),
+        )
+        .unwrap();
+        assert_ne!(Project::load(&root).unwrap().revision, p.revision);
+        // A project preset can't take a built-in's name.
+        doc["name"] = serde_json::json!("jlc-2l");
+        std::fs::write(
+            root.join("presets/jlc-2l.json"),
+            crate::canonical::to_string(&doc),
+        )
+        .unwrap();
+        let p = Project::load(&root).unwrap();
+        assert!(
+            p.faults()
+                .iter()
+                .any(|f| f.error.details["path"] == "presets/jlc-2l.json"
+                    && f.error.code == Code::InvalidDocument),
+            "{:?}",
+            p.faults()
+        );
+    }
+
+    #[test]
+    fn a_board_rule_under_its_preset_is_a_fault() {
+        let dir = tempfile::tempdir().unwrap();
+        let top = dir.path().join("board");
+        manifest(&top, ProjectKind::Design, &[]);
+        library_in(&top);
+        design_in(&top);
+        let design = Project::load(&top)
+            .unwrap()
+            .conn
+            .designs
+            .keys()
+            .next()
+            .unwrap()
+            .clone();
+        let b = top.join("boards").join("b");
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(
+            b.join("board.json"),
+            format!(r#"{{"design":"{design}","format":1,"kind":"ryueda.board","name":"B","outline":{{"edges":[{{"to":[10,0],"type":"line"}},{{"to":[10,10],"type":"line"}},{{"to":[0,10],"type":"line"}},{{"to":[0,0],"type":"line"}}],"start":[0,0]}},"preset":"jlc-2l"}}"#),
+        )
+        .unwrap();
+        let before = Project::load(&top).unwrap();
+        let rev = before.boards[&Id::parse("b", "board").unwrap()]
+            .revision
+            .clone();
+        std::fs::write(
+            b.join("rules.json"),
+            r#"{"defaults":{"clearance_nm":1},"format":1,"kind":"ryueda.board-rules"}"#,
+        )
+        .unwrap();
+        let p = Project::load(&top).unwrap();
+        let faults = p.faults();
+        assert!(
+            faults.iter().any(|f| f.error.code == Code::RuleBelowPreset
+                && f.error.details["path"] == "boards/b/rules.json"),
+            "{faults:?}"
+        );
+        assert_ne!(p.boards[&Id::parse("b", "board").unwrap()].revision, rev);
+    }
+
+    #[test]
+    fn an_unknown_preset_is_a_fault() {
+        let dir = tempfile::tempdir().unwrap();
+        let top = dir.path().join("board");
+        manifest(&top, ProjectKind::Design, &[]);
+        library_in(&top);
+        design_in(&top);
+        let design = Project::load(&top)
+            .unwrap()
+            .conn
+            .designs
+            .keys()
+            .next()
+            .unwrap()
+            .clone();
+        let b = top.join("boards").join("b");
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(
+            b.join("board.json"),
+            format!(r#"{{"design":"{design}","format":1,"kind":"ryueda.board","name":"B","outline":{{"edges":[{{"to":[10,0],"type":"line"}},{{"to":[10,10],"type":"line"}},{{"to":[0,10],"type":"line"}},{{"to":[0,0],"type":"line"}}],"start":[0,0]}},"preset":"acme-6l"}}"#),
+        )
+        .unwrap();
+        let p = Project::load(&top).unwrap();
+        let faults = p.faults();
+        let f: Vec<&Fault> = faults
+            .iter()
+            .filter(|f| f.error.code == Code::BoardPresetNotFound)
+            .collect();
+        assert_eq!(f.len(), 1, "{faults:?}");
+        assert_eq!(f[0].error.details["pointer"], "/preset");
     }
 
     #[test]
