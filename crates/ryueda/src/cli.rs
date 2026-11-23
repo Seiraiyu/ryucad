@@ -2783,7 +2783,13 @@ enum DaemonCmd {
         #[arg(long)]
         idle_timeout: Option<u64>,
     },
-    Status,
+    /// Whether the project's daemon is running, and its details.
+    Status {
+        /// What the daemon spent by request method: time waiting for its
+        /// lock, holding it, and publishing.
+        #[arg(long)]
+        timings: bool,
+    },
     Stop {
         /// Every ryueda daemon of this user.
         #[arg(long)]
@@ -4594,7 +4600,9 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
             let idle = idle_timeout.map_or(daemon::DEFAULT_IDLE, Duration::from_secs);
             daemon::run(&find_root(&here)?, idle).map(|()| Value::Null)
         }
-        Command::Daemon(DaemonCmd::Status) => client::status(&find_root(&here)?),
+        Command::Daemon(DaemonCmd::Status { timings }) => {
+            client::status_with(&find_root(&here)?, *timings)
+        }
         Command::Git(GitCmd::Install { global }) => ryueda::drivers::install(&here, !global),
         Command::WhereUsed {
             part,

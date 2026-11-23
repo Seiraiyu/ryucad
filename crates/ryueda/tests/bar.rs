@@ -83,18 +83,53 @@ fn ten_thousand_occurrences_flatten_and_check_within_the_bars() {
         let out = cmd.args(args).output().unwrap();
         let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
         assert_eq!(v["ok"], true, "{args:?}: {v}");
+        v
     };
     // Warm: the daemon started, the project read, a write made.
     ryueda(&["block", "show", "top"]);
     ryueda(&["net", "rename", "top/l1", "LINK1_W"]);
     let mut worst = Duration::ZERO;
+    // Each round's phases (#981): a request the daemon answers without
+    // the project (a CLI process and its connection, no work), the write
+    // and the read; then what the daemon itself spent on each.
+    let mut rounds = Vec::new();
     for i in 0..5 {
+        let t = Instant::now();
+        ryueda(&["daemon", "status"]);
+        let bare = t.elapsed();
         let start = Instant::now();
         ryueda(&["net", "rename", "top/l1", &format!("LINK1_{i}")]);
+        let write = start.elapsed();
         ryueda(&["net", "show", "top/l1"]);
-        worst = worst.max(start.elapsed());
+        let both = start.elapsed();
+        worst = worst.max(both);
+        rounds.push(format!(
+            "{:.1}/{:.1}/{:.1}",
+            bare.as_secs_f64() * 1e3,
+            write.as_secs_f64() * 1e3,
+            (both - write).as_secs_f64() * 1e3
+        ));
     }
+    let spent = ryueda(&["daemon", "status", "--timings"]);
+    let method = |m: &str| {
+        let t = &spent["result"]["timings"]["methods"][m];
+        format!(
+            "{m} x{} held {:.1} ms, waited {:.1} ms, {} publishes {:.1} ms",
+            t["count"],
+            t["held_ms"].as_f64().unwrap_or(0.0),
+            t["wait_ms"].as_f64().unwrap_or(0.0),
+            t["publishes"],
+            t["publish_ms"].as_f64().unwrap_or(0.0)
+        )
+    };
     println!("a write and the next read through a warm daemon: {worst:?} at worst of five");
+    println!(
+        "  rounds (bare CLI/write/read, ms): {}; daemon: {}; {}; {}",
+        rounds.join(" "),
+        method("net.rename"),
+        method("net.show"),
+        method("session.refresh")
+    );
     let _ = Command::cargo_bin("ryueda")
         .unwrap()
         .current_dir(&board)

@@ -401,6 +401,17 @@ fn writes_are_logged_and_undone_through_the_daemon() {
     let (code, s) = run(&["daemon", "status"]);
     assert_eq!(code, 0, "{s}");
     assert!(s["result"]["version"]["ryueda"].is_string());
+    assert!(s["result"].get("timings").is_none(), "{s}");
+    // With --timings, what the daemon spent by method (#981): the undo
+    // and redo above among them.
+    let (code, s) = run(&["daemon", "status", "--timings"]);
+    assert_eq!(code, 0, "{s}");
+    let undo = &s["result"]["timings"]["methods"]["undo"];
+    assert!(undo["count"].as_u64().unwrap() >= 1, "{s}");
+    assert!(
+        undo["held_ms"].is_number() && undo["wait_ms"].is_number(),
+        "{s}"
+    );
 }
 
 #[test]
