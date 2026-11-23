@@ -211,8 +211,10 @@ jobs:
       - run: cargo test -p ryueda --release --test bar -- --nocapture
       # Design 734's bars: 100,000 items loaded, checked, imported and
       # imported again, and where-used over ten checkouts (ten times looser
-      # without RYUPLM_BARS).
-      - run: cargo test -p ryuplm --release --test bar -- --nocapture
+      # without RYUPLM_BARS). One test at a time: each bar times one
+      # operation, and ten 100,000-item tests at once on a 3-core runner
+      # measure each other (#1044), as bars.yml runs them.
+      - run: cargo test -p ryuplm --release --test bar -- --nocapture --test-threads 1
       - run: cargo test -p ryusch --release --test layout_props
       # Plan 2.G: the schematic fuzz case over 400 seeded inputs (#664, #665).
       - run: cargo test -p ryusch --release --test seeded_sweep
