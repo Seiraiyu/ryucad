@@ -595,6 +595,46 @@ pub fn resolve(
             }
         }
     }
+    // An area settled by one side takes that side's word on where its
+    // parts go (#858): the other side's own edge, beside and near on them
+    // leave; laid out again from the base, both sides' do. The base's stay.
+    let has = |l: &Layout, i: &Instruction| l.instructions.values().any(|x| x == i);
+    let settled: Vec<(BTreeSet<&str>, Repair)> = merged
+        .keys
+        .iter()
+        .zip(repairs)
+        .map(|(keys, r)| {
+            let parts = keys
+                .iter()
+                .filter(|k| k.section == "placed")
+                .map(|k| k.key.as_str())
+                .collect();
+            (parts, *r)
+        })
+        .collect();
+    l.instructions.retain(|_, i| {
+        if !matches!(
+            i,
+            Instruction::Edge { .. } | Instruction::Beside { .. } | Instruction::Near { .. }
+        ) || has(base, i)
+        {
+            return true;
+        }
+        let places: Vec<&str> = i
+            .parts()
+            .iter()
+            .flat_map(|s| crate::instr::parts_named(block, s))
+            .map(|p| block.parts[p].key.as_str())
+            .collect();
+        !settled.iter().any(|(parts, r)| {
+            places.iter().any(|k| parts.contains(k))
+                && match r {
+                    Repair::Ours => !has(ours, i),
+                    Repair::Theirs => !has(theirs, i),
+                    Repair::Relayout => true,
+                }
+        })
+    });
     let l = shifted_by_base(&l, base, -1);
     let mut again = block.clone();
     again.instructions = l.instructions.clone();
@@ -741,6 +781,58 @@ mod tests {
             "{:#?}",
             m.conflicts
         );
+    }
+
+    /// #858: both sides add a part and each says where it goes; settling
+    /// its area by either side, or laying it out again, holds.
+    #[test]
+    fn an_area_settled_takes_its_sides_word_on_where_a_part_goes() {
+        use crate::geom::Side;
+        let b = seeded(3, 4);
+        let base = engine::lay_out(&b).unwrap().layout;
+        let gnd = b.net("rail:gnd").unwrap();
+        let vcc = b.net("rail:vcc").unwrap();
+        let (k0, k1) = (b.parts[0].key.clone(), b.parts[1].key.clone());
+        let mut both = b.clone();
+        both.parts
+            .push(resistor("r901", "R901", "1k", [Some(vcc), Some(gnd)]));
+        let with = |ins: Instruction| {
+            let mut e = both.clone();
+            e.instructions.insert("i1".into(), ins);
+            e.previous = Some(base.clone());
+            engine::lay_out(&e).unwrap().layout
+        };
+        let ours = with(Instruction::Near {
+            parts: vec!["r901".into()],
+            to: k0.clone(),
+        });
+        let theirs = with(Instruction::Beside {
+            parts: vec!["r901".into()],
+            of: k1.clone(),
+            side: Side::Up,
+        });
+        let m = merge(&both, &base, &ours, &theirs);
+        assert_eq!(
+            m.layout.instructions.len(),
+            2,
+            "both sides' instructions merged"
+        );
+        assert!(!m.conflicts.is_empty(), "r901 placed apart");
+        let n = m.conflicts.len();
+        let near = |i: &&Instruction| matches!(i, Instruction::Near { .. });
+        let beside = |i: &&Instruction| matches!(i, Instruction::Beside { .. });
+        for repair in [Repair::Ours, Repair::Theirs, Repair::Relayout] {
+            let out = resolve(&both, &base, &ours, &theirs, &m, &vec![repair; n])
+                .unwrap_or_else(|e| panic!("{repair:?}: {}", e.message));
+            assert_eq!(crate::rules::check(&both, &out.layout), [], "{repair:?}");
+            let kept: Vec<&Instruction> = out.layout.instructions.values().collect();
+            let (has_near, has_beside) = (kept.iter().any(near), kept.iter().any(beside));
+            match repair {
+                Repair::Ours => assert!(has_near && !has_beside, "{kept:?}"),
+                Repair::Theirs => assert!(has_beside && !has_near, "{kept:?}"),
+                Repair::Relayout => assert!(!has_near && !has_beside, "{kept:?}"),
+            }
+        }
     }
 
     #[test]

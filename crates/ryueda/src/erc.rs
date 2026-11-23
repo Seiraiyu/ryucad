@@ -651,7 +651,21 @@ fn by_libcomp(n: &Netlist) -> BTreeMap<&str, Vec<&crate::netlist::Occurrence>> {
 /// Whether occurrence `o` is marked `dnp` (itself or its library
 /// component, when that loads).
 pub fn occurrence_dnp(p: &Project, o: &crate::netlist::Occurrence) -> bool {
-    match placed_libcomp(p, &o.of).and_then(|l| l.item.as_ref().ok()) {
+    occurrence_dnp_of(
+        p,
+        o,
+        placed_libcomp(p, &o.of).and_then(|l| l.item.as_ref().ok()),
+    )
+}
+
+/// Whether occurrence `o` is marked `dnp`, its placed library component
+/// already looked up (`c`, `None` when it doesn't load).
+pub(crate) fn occurrence_dnp_of(
+    p: &Project,
+    o: &crate::netlist::Occurrence,
+    c: Option<&crate::libcomp::LibComp>,
+) -> bool {
+    match c {
         Some(c) => is_dnp(p, o, c),
         None => dnp([component_parameters(p, o), None]),
     }
@@ -1202,6 +1216,23 @@ pub fn check_project(
 mod tests {
     use super::*;
     use crate::netlist::tests::project;
+
+    #[test]
+    fn dnp_with_the_component_given_judges_as_without() {
+        let (_d, p) = project(&[]);
+        let design = p.conn.designs.keys().next().unwrap().clone();
+        let n = crate::netlist::flatten(&p, &design).unwrap();
+        assert!(!n.occurrences.is_empty());
+        for o in &n.occurrences {
+            let c = placed_libcomp(&p, &o.of).and_then(|l| l.item.as_ref().ok());
+            assert_eq!(
+                occurrence_dnp_of(&p, o, c),
+                occurrence_dnp(&p, o),
+                "{}",
+                o.reference
+            );
+        }
+    }
 
     fn id(s: &str) -> Id {
         Id::parse(s, "test").unwrap()

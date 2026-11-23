@@ -517,6 +517,27 @@ fn place_from_passives(board: &Path, comp: &str) {
     assert!(moved, "the breakout places {comp}");
 }
 
+/// The first of `board`'s component files that places `comp`.
+fn component_file_of(board: &Path, comp: &str) -> PathBuf {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(board.join("blocks"))
+        .unwrap()
+        .flat_map(|b| {
+            std::fs::read_dir(b.unwrap().path().join("components"))
+                .into_iter()
+                .flatten()
+        })
+        .map(|f| f.unwrap().path())
+        .collect();
+    files.sort();
+    files
+        .into_iter()
+        .find(|f| {
+            let v: Value = serde_json::from_slice(&std::fs::read(f).unwrap()).unwrap();
+            v["of"]["id"] == comp
+        })
+        .unwrap_or_else(|| panic!("{} places {comp}", board.display()))
+}
+
 /// Edits the description of the first footprint `comp` lists in `lib`,
 /// so the component releases again.
 fn edit_footprint_of(lib: &Path, comp: &str, text: &str) {
@@ -722,6 +743,30 @@ fn boms_diffs_and_where_used_at_labels_and_in_checkouts() {
             csv.lines().count() == bom["lines"].as_array().unwrap().len() + 1,
             "{csv}"
         );
+        // A component's value edited between two warm BOMs shows in the
+        // second (#976: the session's netlist goes when the files move);
+        // put back, the BOM reads as before.
+        let file = component_file_of(&board, &comp);
+        let was = std::fs::read(&file).unwrap();
+        let mut v: Value = serde_json::from_slice(&was).unwrap();
+        v["value"] = json!("4k7 edited");
+        std::fs::write(
+            &file,
+            format!("{}\n", serde_json::to_string_pretty(&v).unwrap()),
+        )
+        .unwrap();
+        let edited = ok(&board, &run, daemon, &["bom"]);
+        assert!(
+            edited["lines"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|l| l["value"] == "4k7 edited"),
+            "{edited}"
+        );
+        std::fs::write(&file, &was).unwrap();
+        let back = ok(&board, &run, daemon, &["bom"]);
+        assert_eq!(back["lines"], bom["lines"], "put back");
         // The library moves to B; the pin follows; the diff says so.
         edit_footprint_of(&lib, &comp, "edited");
         ok(&lib, &run, daemon, &["release", "propose", "--all"]);

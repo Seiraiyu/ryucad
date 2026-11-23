@@ -81,6 +81,10 @@ enum Command {
         /// Also compare numbers with the catalogues under this folder.
         #[arg(long = "in", value_name = "DIR")]
         within: Vec<String>,
+        /// Compare with this Git revision: faults say whether they are
+        /// new since then, and the report lists what changed.
+        #[arg(long, value_name = "REV")]
+        against: Option<String>,
     },
     #[command(subcommand)]
     Release(ReleaseCmd),
@@ -110,16 +114,58 @@ enum Command {
         /// Working files only: no releases.
         #[arg(long)]
         working: bool,
+        /// Ask the hosted service instead: every repository of the
+        /// organization the token can read (review.url and its token).
+        #[arg(long, conflicts_with_all = ["within", "no_dependents", "working"])]
+        org: bool,
+    },
+    /// The projects this catalogue reaches, without reading them: each
+    /// ryucad or ryueda project its links name, each other catalogue its
+    /// lines name, and the folder each was found in.
+    Reps {
+        /// A Git revision of the catalogue: the working files by default.
+        #[arg(long, value_name = "REV")]
+        rev: Option<String>,
+        /// Also look under this folder.
+        #[arg(long = "in", value_name = "DIR")]
+        within: Vec<String>,
+    },
+    /// The whole catalogue as JSON lines in a file: a header, one line
+    /// per item (fields, links, joined BOM lines, state, labels, faults
+    /// counted), then the faults that name no item.
+    Index {
+        #[arg(long, value_name = "FILE")]
+        out: PathBuf,
+        /// A Git revision of the catalogue: the working files by default.
+        #[arg(long, value_name = "REV")]
+        rev: Option<String>,
+        /// Also look for representations under this folder.
+        #[arg(long = "in", value_name = "DIR")]
+        within: Vec<String>,
     },
     /// Items added, removed and changed between two revisions.
     Diff {
         from: Option<String>,
         to: Option<String>,
     },
+    /// Whether references (item/<id>, item/<id>/line/<line>) still stand
+    /// at a revision: here, removed from their item, or gone.
+    Resolve {
+        #[arg(value_name = "REF", required = true)]
+        refs: Vec<String>,
+        /// A Git revision of the catalogue: the working files by default.
+        #[arg(long, value_name = "REV")]
+        rev: Option<String>,
+    },
     #[command(subcommand)]
     Git(GitCmd),
     #[command(subcommand)]
     Merge(MergeCmd),
+    /// The hosted service for this clone's GitHub pull requests: status,
+    /// threads, comments, approvals. It needs a GitHub token
+    /// (RYUPLM_REVIEW_TOKEN, GH_TOKEN or gh).
+    #[command(subcommand)]
+    Review(ReviewCmd),
     History {
         #[arg(long)]
         limit: Option<usize>,
@@ -376,13 +422,30 @@ enum ItemCmd {
     Show {
         item: String,
     },
+    /// Items, a window at a time: --offset and --limit cut the rows from
+    /// the matches, whose number is the answer's `total`.
     List {
         #[arg(long)]
         number: Option<String>,
         #[arg(long)]
         class: Option<String>,
+        /// Found in the number, a previous number, the name or description.
         #[arg(long)]
         text: Option<String>,
+        /// in_work, released, modified or obsolete.
+        #[arg(long)]
+        state: Option<String>,
+        /// make or buy.
+        #[arg(long)]
+        make_buy: Option<String>,
+        /// errors or warnings: items with at least one.
+        #[arg(long)]
+        faults: Option<String>,
+        /// id (the default), number, name or class.
+        #[arg(long)]
+        sort: Option<String>,
+        #[arg(long)]
+        offset: Option<usize>,
         #[arg(long)]
         limit: Option<usize>,
     },
@@ -498,6 +561,10 @@ enum GitCmd {
         #[arg(long)]
         global: bool,
     },
+    /// The .gitattributes lines ryuplm's drivers need, relative to a
+    /// catalogue's folder: for a tool that sets up a clone itself (the
+    /// hosted service).
+    Attributes,
     /// Git's textconv: a file's lines (stdout, not JSON).
     Textconv { path: PathBuf },
     /// Git's merge driver: %O %A %B %P.
@@ -507,6 +574,44 @@ enum GitCmd {
         theirs: PathBuf,
         path: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum ReviewCmd {
+    /// The pull request's checks and threads (the branch's own pull
+    /// request unless named).
+    Status { pr: Option<u64> },
+    /// Its comment threads; --open for those not resolved.
+    Threads {
+        pr: Option<u64>,
+        #[arg(long)]
+        open: bool,
+    },
+    /// Start a thread pinned to a reference (item/<id>, or
+    /// item/<id>/line/<line>).
+    Comment {
+        #[arg(value_name = "REF")]
+        reference: String,
+        text: String,
+        #[arg(long)]
+        pr: Option<u64>,
+        /// The commit the reference was read at (the pull request's head
+        /// by default).
+        #[arg(long)]
+        commit: Option<String>,
+    },
+    /// Reply in a thread.
+    Reply { thread: String, text: String },
+    /// Resolve a thread.
+    Resolve { thread: String },
+    /// Reopen a thread.
+    Reopen { thread: String },
+    /// Merge the base into the pull request's head with ryuplm's driver
+    /// (Merge in), when GitHub's line merge conflicts and ryuplm's doesn't.
+    Update { pr: Option<u64> },
+    /// What the release records the pull request proposes still need,
+    /// and what blocks them.
+    Approvals { pr: Option<u64> },
 }
 
 #[derive(Subcommand)]
@@ -634,6 +739,11 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
             number,
             class,
             text,
+            state,
+            make_buy,
+            faults,
+            sort,
+            offset,
             limit,
         }) => (
             root()?,
@@ -641,6 +751,11 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
                 number: number.clone(),
                 class: class.clone(),
                 text: text.clone(),
+                state: state.clone(),
+                make_buy: make_buy.clone(),
+                faults: faults.clone(),
+                sort: sort.clone(),
+                offset: *offset,
                 limit: *limit,
             },
         ),
@@ -716,6 +831,7 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
             within,
             no_dependents,
             working,
+            org: false,
         } => (
             root()?,
             Request::BomWhereUsed {
@@ -723,6 +839,21 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
                 within: absolute(here, within),
                 no_dependents: *no_dependents,
                 working: *working,
+            },
+        ),
+        Command::Reps { rev, within } => (
+            root()?,
+            Request::RepsList {
+                rev: rev.clone(),
+                within: absolute(here, within),
+            },
+        ),
+        Command::Index { out, rev, within } => (
+            root()?,
+            Request::Index {
+                out: abs_file(here, out),
+                rev: rev.clone(),
+                within: absolute(here, within),
             },
         ),
         Command::Bom(BomCmd::Show {
@@ -850,10 +981,11 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
                 },
             )
         }
-        Command::Check { within } => (
+        Command::Check { within, against } => (
             root()?,
             Request::Check {
-                within: within.clone(),
+                within: absolute(here, within),
+                against: against.clone(),
             },
         ),
         Command::Release(ReleaseCmd::Propose {
@@ -898,6 +1030,13 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
                 to: to.clone(),
             },
         ),
+        Command::Resolve { refs, rev } => (
+            root()?,
+            Request::Resolve {
+                refs: refs.clone(),
+                rev: rev.clone(),
+            },
+        ),
         Command::History { limit, before } => (
             root()?,
             Request::ActivityLog {
@@ -908,15 +1047,17 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
         Command::Participants => (root()?, Request::ParticipantList {}),
         Command::Undo { entry } => (root()?, Request::Undo { entry: *entry }),
         Command::Redo { entry } => (root()?, Request::Redo { entry: *entry }),
-        // Version, Init, Watch, Daemon, Git, Merge and Number are not
-        // requests.
+        // Version, Init, Watch, Daemon, Git, Merge, Review, Number and
+        // where-used --org are not requests.
         Command::Version
         | Command::Init { .. }
         | Command::Watch { .. }
         | Command::Daemon(_)
         | Command::Git(_)
         | Command::Merge(_)
-        | Command::Number(_) => return Ok(None),
+        | Command::Review(_)
+        | Command::Number(_)
+        | Command::WhereUsed { org: true, .. } => return Ok(None),
     }))
 }
 
@@ -966,11 +1107,15 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
         Command::Daemon(DaemonCmd::Stop { all: true }) => client::stop_all(),
         Command::Daemon(DaemonCmd::Stop { all: false }) => client::stop(&find_root(&here)?),
         Command::Git(GitCmd::Install { global }) => ryuplm::drivers::install(&here, !global),
+        Command::Git(GitCmd::Attributes) => Ok(json!({
+            "schema": ryuplm::OUTPUT_SCHEMA,
+            "lines": ryuplm::drivers::LINES,
+        })),
         Command::Git(GitCmd::Textconv { .. } | GitCmd::MergeDriver { .. })
         | Command::Merge(MergeCmd::Status { hook: true }) => unreachable!("answered in main"),
         Command::Merge(MergeCmd::Status { hook: false }) => {
             let roots = ryu_git::merging_projects::<ryuplm::Plm>(&here)?;
-            Ok(json!({"merging": roots
+            Ok(json!({"schema": ryuplm::OUTPUT_SCHEMA, "merging": roots
                 .iter()
                 .map(|r| json!({"root": r, "unresolved": ryuplm::merge::unresolved(r)}))
                 .collect::<Vec<_>>()}))
@@ -991,6 +1136,43 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
                 *count,
                 Duration::from_secs(*timeout),
             )
+        }
+        Command::WhereUsed {
+            item, org: true, ..
+        } => ryuplm::review::where_used_org(&find_root(&here)?, item),
+        Command::Review(cmd) => {
+            use ryu_review::Action;
+            let action = match cmd {
+                ReviewCmd::Status { pr } => Action::Status { pr: *pr },
+                ReviewCmd::Threads { pr, open } => Action::Threads {
+                    pr: *pr,
+                    open: *open,
+                },
+                ReviewCmd::Comment {
+                    reference,
+                    text,
+                    pr,
+                    commit,
+                } => Action::Comment {
+                    reference: reference.clone(),
+                    text: text.clone(),
+                    pr: *pr,
+                    commit: commit.clone(),
+                },
+                ReviewCmd::Reply { thread, text } => Action::Reply {
+                    thread: thread.clone(),
+                    text: text.clone(),
+                },
+                ReviewCmd::Resolve { thread } => Action::Resolve {
+                    thread: thread.clone(),
+                },
+                ReviewCmd::Reopen { thread } => Action::Reopen {
+                    thread: thread.clone(),
+                },
+                ReviewCmd::Update { pr } => Action::Update { pr: *pr },
+                ReviewCmd::Approvals { pr } => Action::Approvals { pr: *pr },
+            };
+            ryuplm::review::run(&here, action)
         }
         Command::Number(cmd) => {
             let root = find_root(&here)?;

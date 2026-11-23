@@ -292,13 +292,27 @@ mod tests {
             crate::canonical::to_string(&good),
         )
         .unwrap();
-        let ok = ask(&root, Request::Check { within: vec![] }).unwrap();
+        let ok = ask(
+            &root,
+            Request::Check {
+                within: vec![],
+                against: None,
+            },
+        )
+        .unwrap();
         assert_eq!(ok["errors"], 0, "{ok}");
         let info = ask(&root, Request::ProjectInfo {}).unwrap();
         std::fs::write(root.join("imports/bad.json"), "{\"format\": 1}").unwrap();
         let info2 = ask(&root, Request::ProjectInfo {}).unwrap();
         assert_ne!(info["revision"], info2["revision"], "imports/ is tracked");
-        let e = ask(&root, Request::Check { within: vec![] }).unwrap_err();
+        let e = ask(
+            &root,
+            Request::Check {
+                within: vec![],
+                against: None,
+            },
+        )
+        .unwrap_err();
         let r = &e.details["report"];
         assert_eq!(r["faults"][0]["code"], "import_mapping_invalid");
         assert_eq!(r["faults"][0]["details"]["path"], "imports/bad.json");

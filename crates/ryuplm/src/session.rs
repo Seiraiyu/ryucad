@@ -18,6 +18,14 @@ pub struct Session {
     /// opening has just read every file (at 100,000 items a second scan
     /// costs as much as the answer).
     fresh: bool,
+    /// Counts catalogue loads: what was derived from the catalogue (the
+    /// listing) is good while it stands. Hashing every file for
+    /// [`Session::revision`] would cost more than a list window.
+    generation: u64,
+    /// The item list as last built ([`crate::listing`]), and how many
+    /// were built.
+    listing: Option<crate::listing::Listing>,
+    listings: u64,
 }
 
 pub fn path_of(root: &Path, rel: &str) -> PathBuf {
@@ -128,6 +136,9 @@ impl Session {
             stamps,
             pdm: None,
             fresh: false,
+            generation: 0,
+            listing: None,
+            listings: 0,
         })
     }
 
@@ -152,8 +163,24 @@ impl Session {
         let changes = self.stamps.scan(&self.root, listed(&self.root))?;
         if !changes.is_empty() {
             self.catalogue = load(&self.root, &self.stamps)?;
+            self.generation += 1;
         }
         Ok(changes)
+    }
+
+    /// How many times the catalogue has been read again since opening.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// The listing held, taken out, and how many have been built.
+    pub fn take_listing(&mut self) -> (Option<crate::listing::Listing>, u64) {
+        (self.listing.take(), self.listings)
+    }
+
+    pub fn keep_listing(&mut self, listing: crate::listing::Listing) {
+        self.listings = self.listings.max(listing.built());
+        self.listing = Some(listing);
     }
 
     pub fn reload(&mut self) -> Result<()> {

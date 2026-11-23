@@ -21,8 +21,10 @@ roxmltree = "0.21"
 gix = { version = "0.89", default-features = false, features = ["sha1", "revision"] }
 ryu-doc = { path = "../ryu-doc" }
 ryu-git = { path = "../ryu-git" }
-# The hosted service's client (design 936): the ledger's numbers, asked
-# by the CLI process only, never the daemon.
+# The hosted service's client: the ledger's numbers (design 936),
+# asked by the CLI process only, never the daemon; `ryuplm review` and
+# `where-used --org` (design 938). HTTPS on rustls, as ryucad's and
+# ryueda's.
 ryu-review = { path = "../ryu-review" }
 ryu-session = { path = "../ryu-session" }
 # AML names and lifecycles, shared with ryueda's part data (no project).

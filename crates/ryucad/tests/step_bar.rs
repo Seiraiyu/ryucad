@@ -267,7 +267,9 @@ fn the_race_imports_rebuilds_and_exports_within_its_bars() {
 /// The census (design 448) adds at most 5% to ryustep's parse and decode
 /// of the race's file, the best of five each way. With
 /// `RYUCAD_BARS=1` the bar is asserted as it is; elsewhere ten times
-/// looser. Also prints the census's size beside the source's.
+/// looser, with one plain read's time allowed on top for a shared
+/// runner's noise (#985). Also prints the census's size beside the
+/// source's.
 #[test]
 #[cfg_attr(debug_assertions, ignore = "minutes in a debug build")]
 fn the_census_adds_at_most_five_percent_to_reading() {
@@ -302,9 +304,19 @@ fn the_census_adds_at_most_five_percent_to_reading() {
         census.heap_bytes() as f64 / 1e6,
         bytes.len() as f64 / 1e6
     );
+    // The 5% bar holds on a quiet machine (RYUCAD_BARS=1). On a shared
+    // runner, allocating the census costs a noisy amount, up to the
+    // plain read's own time again (+78% to +100% on GitHub's runners,
+    // #985): without RYUCAD_BARS the census may add one more read's
+    // worth on top of the ten-times-looser bar.
+    let allowance = if std::env::var_os("RYUCAD_BARS").is_some() {
+        0.0
+    } else {
+        plain
+    };
     let bar = 1.0 + 0.05 * slack();
     assert!(
-        counted <= plain * bar,
+        counted <= plain * bar + allowance,
         "{counted:.2} s against {plain:.2} s"
     );
 }

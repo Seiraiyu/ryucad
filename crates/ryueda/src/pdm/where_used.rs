@@ -213,6 +213,36 @@ pub fn folders(root: &Path, within: &[String], skip: bool) -> Vec<PathBuf> {
     listed.iter().map(|f| root.join(f)).collect()
 }
 
+/// The projects under `folders`, each once by its canonical folder
+/// (#928), in the order first found, none of `skip` (canonical already);
+/// and a problem for each folder that can't be read.
+fn checkout_dirs(folders: &[PathBuf], skip: &[PathBuf]) -> (Vec<PathBuf>, Vec<Value>) {
+    let (mut dirs, mut problems, mut seen) = (Vec::new(), Vec::new(), Vec::new());
+    for f in folders {
+        match ryupdm::dependents::projects_under(f, crate::project::MANIFEST) {
+            Ok(found) => {
+                for d in found {
+                    let Ok(c) = std::fs::canonicalize(&d) else {
+                        continue;
+                    };
+                    if !skip.contains(&c) && !seen.contains(&c) {
+                        seen.push(c);
+                        dirs.push(d);
+                    }
+                }
+            }
+            Err(e) => problems.push(json!(
+                crate::error::Error::new(
+                    crate::error::Code::NotFound,
+                    format!("{} can't be read: {e}", f.display()),
+                )
+                .with("folder", f.display().to_string())
+            )),
+        }
+    }
+    (dirs, problems)
+}
+
 /// The projects in `folders` (none of `skip`, this repository's, already
 /// read) with their rows, working and released, side by side on the
 /// current rayon pool and gathered in folder order, so the answer doesn't
@@ -230,23 +260,8 @@ pub(crate) fn checkouts(
         .iter()
         .filter_map(|d| std::fs::canonicalize(d).ok())
         .collect();
-    let mut dirs = Vec::new();
-    for f in folders {
-        match ryupdm::dependents::projects_under(f, crate::project::MANIFEST) {
-            Ok(found) => dirs.extend(
-                found
-                    .into_iter()
-                    .filter(|d| std::fs::canonicalize(d).is_ok_and(|c| !skip.contains(&c))),
-            ),
-            Err(e) => problems.push(json!(
-                crate::error::Error::new(
-                    crate::error::Code::NotFound,
-                    format!("{} can't be read: {e}", f.display()),
-                )
-                .with("folder", f.display().to_string())
-            )),
-        }
-    }
+    let (dirs, found_problems) = checkout_dirs(folders, &skip);
+    problems.extend(found_problems);
     let answers: Vec<(Vec<Value>, Vec<Value>, Vec<Value>)> = dirs
         .par_iter()
         .map(|dir| {
@@ -357,6 +372,22 @@ pub fn answer(session: &mut crate::session::Session, ask: &Ask) -> crate::error:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_checkout_named_twice_is_searched_once() {
+        let d = tempfile::tempdir().unwrap();
+        let board = d.path().join("other/board");
+        std::fs::create_dir_all(&board).unwrap();
+        std::fs::write(board.join(crate::project::MANIFEST), "{}").unwrap();
+        let folders = [
+            d.path().join("other"),
+            board.clone(),
+            d.path().join("other/../other/board"),
+        ];
+        let (dirs, problems) = checkout_dirs(&folders, &[]);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(dirs.len(), 1, "{dirs:?}");
+    }
 
     #[test]
     fn a_design_places_a_component_of_the_library_its_alias_names() {
