@@ -440,6 +440,49 @@ import_mapping_invalid exit 1 "Import mapping invalid"
   missing arr The columns the mapping names that the source hasn't.
   columns arr The columns the source has.
 
+document_not_found exit 1 "Document not found"
+  document str The document asked for, by ID or number.
+
+document_bytes_missing exit 1 "Document bytes missing"
+  document str The document at fault.
+
+document_bytes_changed exit 1 "Document bytes changed"
+  document str The document at fault.
+  expected obj The size and BLAKE3 hash its record names.
+  actual obj The size and BLAKE3 hash of the bytes there.
+
+document_file_unknown exit 1 "Document file unknown"
+  document str The document at fault.
+
+document_large exit 1 "Document large"
+  document str The document at fault.
+  size num The file's size, in bytes.
+
+document_too_large exit 1 "Document too large"
+  document str The document at fault.
+  file str The file given.
+  size num The file's size, in bytes.
+
+document_missing exit 1 "Document missing"
+  item str The item whose record names the document.
+  document str The document named, which the catalogue doesn't have.
+
+document_unresolved exit 1 "Document unresolved"
+  item str The item whose record names the document.
+  document str The document named, as text.
+  searched arr The catalogues searched.
+
+document_in_use exit 1 "Document in use"
+  document str The document at fault.
+  items arr The items whose records name it.
+
+document_released exit 1 "Document released"
+  document str The document at fault.
+
+document_unreleased exit 1 "Document unreleased"
+  item str The item whose record names the document.
+  document str The document with no release of its current content.
+
 item_history_label_foreign exit 1 "Item history label foreign"
   item str The item whose history it is.
   label str The revision label outside the scheme.

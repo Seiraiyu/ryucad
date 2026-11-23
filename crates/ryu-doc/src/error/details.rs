@@ -591,6 +591,49 @@ details! {
         key("keeps", Arr, "What the keepout keeps out."),
     ],
     BoardContourInvalid => [],
+    DocumentNotFound => [
+        key("document", Str, "The document asked for, by ID or number."),
+    ],
+    DocumentBytesMissing => [
+        key("document", Str, "The document at fault."),
+    ],
+    DocumentBytesChanged => [
+        key("document", Str, "The document at fault."),
+        key("expected", Obj, "The size and BLAKE3 hash its record names."),
+        key("actual", Obj, "The size and BLAKE3 hash of the bytes there."),
+    ],
+    DocumentFileUnknown => [
+        key("document", Str, "The document at fault."),
+    ],
+    DocumentLarge => [
+        key("document", Str, "The document at fault."),
+        key("size", Num, "The file's size, in bytes."),
+    ],
+    DocumentTooLarge => [
+        key("document", Str, "The document at fault."),
+        key("file", Str, "The file given."),
+        key("size", Num, "The file's size, in bytes."),
+    ],
+    DocumentMissing => [
+        key("item", Str, "The item whose record names the document."),
+        key("document", Str, "The document named, which the catalogue doesn't have."),
+    ],
+    DocumentUnresolved => [
+        key("item", Str, "The item whose record names the document."),
+        key("document", Str, "The document named, as text."),
+        key("searched", Arr, "The catalogues searched."),
+    ],
+    DocumentInUse => [
+        key("document", Str, "The document at fault."),
+        key("items", Arr, "The items whose records name it."),
+    ],
+    DocumentReleased => [
+        key("document", Str, "The document at fault."),
+    ],
+    DocumentUnreleased => [
+        key("item", Str, "The item whose record names the document."),
+        key("document", Str, "The document with no release of its current content."),
+    ],
 }
 
 /// Words written their own way in titles.
