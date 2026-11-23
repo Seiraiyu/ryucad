@@ -231,12 +231,29 @@ impl Session {
 
     /// The catalogue's revision: BLAKE3 over every tracked file's path and
     /// bytes, 32 hex digits. What `--expect` guards on catalogue-wide
-    /// writes.
+    /// writes. A document's bytes go in as their own BLAKE3
+    /// ([`crate::digest`], design 937): hashed once per allocation on
+    /// threads, so a revision asked again, or after judging, doesn't read
+    /// hundreds of megabytes again.
     pub fn revision(&self) -> String {
+        let files = self.files();
+        let bulky: Vec<std::sync::Arc<[u8]>> = files
+            .iter()
+            .filter(|(p, _)| crate::ids::bytes_of(p).is_some())
+            .map(|(_, b)| b.clone())
+            .collect();
+        let mut digests = crate::digest::all(&bulky).into_iter();
         let mut h = blake3::Hasher::new();
         h.update(b"ryuplm.catalogue.1");
-        for (p, b) in self.files().iter() {
-            for piece in [p.as_bytes(), b] {
+        for (p, b) in files.iter() {
+            let digest;
+            let body: &[u8] = if crate::ids::bytes_of(p).is_some() {
+                digest = digests.next().expect("one digest per bytes file");
+                digest.as_bytes()
+            } else {
+                b
+            };
+            for piece in [p.as_bytes(), body] {
                 h.update(&(piece.len() as u64).to_le_bytes());
                 h.update(piece);
             }

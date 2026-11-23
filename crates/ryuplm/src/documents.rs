@@ -751,24 +751,69 @@ pub fn where_used(session: &mut Session, ask: &Ask) -> Result<Value> {
     }
     let folders = crate::where_used::folders(session.root(), ask.within, ask.no_dependents);
     let mut searched = Vec::new();
-    for dir in crate::numbers::others(session.root(), &folders) {
-        let shown = dir.display().to_string();
-        let mut s = match Session::open(&dir) {
-            Ok(s) => s,
-            Err(e) => {
-                problems.push(json!(e.with("folder", &shown)));
-                continue;
+    // Other checkouts opened and searched on threads, eight at a time, as
+    // items' where-used does (design 937's bar); the answer keeps the
+    // folders' order.
+    type Found = (
+        String,
+        std::result::Result<Option<(crate::id::ProjectId, Vec<Value>, Vec<Value>)>, Value>,
+        Vec<Value>,
+    );
+    let others = crate::numbers::others(session.root(), &folders);
+    let mut results: Vec<Found> = Vec::with_capacity(others.len());
+    for wave in others.chunks(8) {
+        results.extend(std::thread::scope(|s| {
+            let handles: Vec<_> = wave
+                .iter()
+                .map(|dir| {
+                    let (of, id, working_only) = (&of, &id, ask.working);
+                    s.spawn(move || -> Found {
+                        let shown = dir.display().to_string();
+                        let mut problems = Vec::new();
+                        let mut s = match Session::open(dir) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                return (
+                                    shown.clone(),
+                                    Err(json!(e.with("folder", &shown))),
+                                    problems,
+                                );
+                            }
+                        };
+                        let c = s.catalogue().clone();
+                        if c.manifest.project == *of {
+                            return (shown, Ok(None), problems);
+                        }
+                        let w = naming(&c, of, id);
+                        let r = if working_only {
+                            Vec::new()
+                        } else {
+                            released(&mut s, of, id, &mut problems, &shown)
+                        };
+                        (
+                            shown,
+                            Ok(Some((c.manifest.project.clone(), w, r))),
+                            problems,
+                        )
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("a where-used thread doesn't panic"))
+                .collect::<Vec<Found>>()
+        }));
+    }
+    for (shown, r, mut p) in results {
+        problems.append(&mut p);
+        match r {
+            Err(e) => problems.push(e),
+            Ok(None) => {}
+            Ok(Some((project, w, rel))) => {
+                searched.push(shown.clone());
+                working.extend(tag(w, &project, &shown));
+                released_rows.extend(tag(rel, &project, &shown));
             }
-        };
-        let c = s.catalogue().clone();
-        if c.manifest.project == of {
-            continue;
-        }
-        searched.push(shown.clone());
-        working.extend(tag(naming(&c, &of, &id), &c.manifest.project, &shown));
-        if !ask.working {
-            let r = released(&mut s, &of, &id, &mut problems, &shown);
-            released_rows.extend(tag(r, &c.manifest.project, &shown));
         }
     }
     Ok(json!({
