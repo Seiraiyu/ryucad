@@ -1012,7 +1012,7 @@ fn pinned_bodies_defeature() {
 /// chain by chain, cumulative, on seiraiyu1, 2026-11-18): each body
 /// SolidWorks refuses as one operation, the faces it deletes, and the
 /// faces ryukei picks under 2 mm (census VIII, plan 23.C, matches).
-const SOLIDWORKS_DELETES: &[(&str, u64, usize, usize)] = &[
+const SOLIDWORKS_DELETES: &[Row] = &[
     ("nist_ftc_07_asme1_rd.stp", 0, 75, 101),
     ("nist_ftc_10_asme1_rb.stp", 0, 90, 94),
     ("nist_stc_10_asme1_ap242-e2.stp", 3044, 104, 108),
@@ -1029,8 +1029,9 @@ const PARTIAL_WITHIN_DEADLINE: &[&str] = &[];
 /// partitioned into deleted and kept, one valid solid (`check`, and
 /// `check_intersections` but for a `CannotCheck` pair the input had), a
 /// clean mesh, every kept face under its name, each kept unit's cause
-/// typed. The time and units are printed.
-fn loses_what_solidworks_loses(row: &(&str, u64, usize, usize), body: &Body) {
+/// typed. The time and units are printed; a count below SolidWorks' is
+/// returned, so every body's run is reported before the test fails.
+fn loses_what_solidworks_loses(row: &Row, body: &Body) -> Option<String> {
     use ryukei::tweak::delete_blends_partial_with;
     let &(file, rep, sw, picked) = row;
     let spec = DeleteBlends {
@@ -1064,10 +1065,6 @@ fn loses_what_solidworks_loses(row: &(&str, u64, usize, usize), body: &Body) {
         );
     }
     assert_eq!(deleted + kept, picked, "{file} #{rep}: the picks");
-    assert!(
-        deleted >= sw,
-        "{file} #{rep}: {deleted} faces deleted, SolidWorks {sw}"
-    );
     for k in &r.kept {
         assert!(
             matches!(k.cause, Error::InvalidTweak(_)),
@@ -1094,17 +1091,35 @@ fn loses_what_solidworks_loses(row: &(&str, u64, usize, usize), body: &Body) {
     if bars() && PARTIAL_WITHIN_DEADLINE.contains(&file) {
         assert!(secs < DEADLINE.as_secs_f64(), "{file} #{rep}: {secs:.1} s");
     }
+    (deleted < sw).then(|| format!("{file} #{rep}: {deleted} faces deleted, SolidWorks {sw}"))
+}
+
+/// A row of [`SOLIDWORKS_DELETES`].
+type Row = (&'static str, u64, usize, usize);
+
+/// `run` over the rows a hand run takes (those whose file holds
+/// `RYUKEI_PARTIAL_ONLY`, if it is set), then every shortfall it returned
+/// asserted at once.
+fn each_row(rows: &[Row], run: impl FnMut(&Row) -> Option<String>) {
+    let only = std::env::var("RYUKEI_PARTIAL_ONLY").unwrap_or_default();
+    let short: Vec<String> = rows
+        .iter()
+        .filter(|r| r.0.contains(only.as_str()))
+        .filter_map(run)
+        .collect();
+    assert!(short.is_empty(), "{short:#?}");
 }
 
 /// The committed bodies SolidWorks 2026 refuses as one operation (FTC 07
 /// rd and FTC 10 rb), deleted partially (plan 23.C): each loses at least
 /// as many faces as SolidWorks deletes chain by chain. Minutes: run by
-/// hand, and the guide records each run (question 1245).
+/// hand, and the guide records each run (question 1245);
+/// `RYUKEI_PARTIAL_ONLY=<part of a file name>` runs one.
 #[test]
 #[ignore = "minutes: run by hand (plan 23.C, question 1245)"]
 fn the_refused_bodies_lose_what_solidworks_loses() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus");
-    for row in &SOLIDWORKS_DELETES[..2] {
+    each_row(&SOLIDWORKS_DELETES[..2], |row| {
         let bytes = std::fs::read(root.join(row.0)).unwrap();
         let m = read(
             &bytes,
@@ -1117,8 +1132,8 @@ fn the_refused_bodies_lose_what_solidworks_loses() {
         let Ok((body, _, _)) = &m.bodies[row.1 as usize].result else {
             panic!("{} #{}: not healed", row.0, row.1);
         };
-        loses_what_solidworks_loses(row, body);
-    }
+        loses_what_solidworks_loses(row, body)
+    });
 }
 
 /// The pinned bodies SolidWorks 2026 refuses as one operation (STC 10's
@@ -1128,7 +1143,7 @@ fn the_refused_bodies_lose_what_solidworks_loses() {
 #[test]
 #[ignore = "needs scripts/fetch-corpus.sh; minutes: run by hand (plan 23.C, question 1245)"]
 fn pinned_refused_bodies_lose_what_solidworks_loses() {
-    for row in &SOLIDWORKS_DELETES[2..] {
+    each_row(&SOLIDWORKS_DELETES[2..], |row| {
         let name = pinned_files()
             .into_iter()
             .find(|n| n.ends_with(row.0))
@@ -1137,6 +1152,6 @@ fn pinned_refused_bodies_lose_what_solidworks_loses() {
             .into_iter()
             .find(|(r, _)| *r == row.1)
             .unwrap_or_else(|| panic!("{name} #{}", row.1));
-        loses_what_solidworks_loses(row, &body);
-    }
+        loses_what_solidworks_loses(row, &body)
+    });
 }
