@@ -159,6 +159,18 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn a_document_has_a_line_per_field() {
+        let out = String::from_utf8(super::textconv(
+            crate::canonical::to_string(&crate::document::tests::full()).as_bytes(),
+        ))
+        .unwrap();
+        assert!(out.starts_with("ryuplm.document format 1\n"), "{out}");
+        assert!(out.contains("file.size = 482113\n"), "{out}");
+        assert!(out.contains("file.name = Spec A.pdf\n"), "{out}");
+        assert!(out.contains("pin.revision = 0B7x\n"), "{out}");
+    }
+
+    #[test]
     fn an_item_has_a_line_per_field() {
         let v = json!({"format": 1, "kind": "ryuplm.item", "number": "A-1",
             "aml": [{"manufacturer": "Acme", "mpn": "S-1", "status": "active"}],

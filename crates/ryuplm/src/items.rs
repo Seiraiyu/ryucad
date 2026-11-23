@@ -134,9 +134,8 @@ pub fn create(
     let number = number_for(session, number, next, fields.class.as_deref())?;
     let mut item = Item::new(&number);
     apply(&mut item, fields);
-    let id = crate::ids::random(|s| {
-        Id::parse(s, "item").is_ok_and(|i| session.catalogue().items.contains_key(&i))
-    })?;
+    let id =
+        crate::ids::random(|s| Id::parse(s, "item").is_ok_and(|i| session.catalogue().holds(&i)))?;
     let text = text_of(&id, &item)?;
     commit(
         session,

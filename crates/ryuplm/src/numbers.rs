@@ -8,20 +8,21 @@ use crate::id::Id;
 use crate::load::Catalogue;
 use crate::session::Session;
 use crate::source::Source;
-use ryupdm::config::{Config, NumberScheme, Template};
+use ryupdm::config::{Config, NumberScheme, SchemeKind, Template};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// Whether `scheme` applies to an item of `class`.
+/// Whether `scheme` applies to an item of `class`: never a document
+/// scheme (design 937).
 pub fn applies(scheme: &NumberScheme, class: Option<&str>) -> bool {
-    scheme.class.is_none() || scheme.class.as_deref() == class
+    scheme.kind == SchemeKind::Item && (scheme.class.is_none() || scheme.class.as_deref() == class)
 }
 
 /// `part_number_unschemed` for each item whose number matches no scheme
-/// that applies to it; none when there are no schemes.
+/// that applies to it; none when there are no item schemes.
 pub fn unschemed(cat: &Catalogue, config: &Config) -> Vec<Error> {
-    if config.schemes.is_empty() {
+    if !config.schemes.iter().any(|s| s.kind == SchemeKind::Item) {
         return Vec::new();
     }
     let mut out = Vec::new();
@@ -53,25 +54,50 @@ pub fn unschemed(cat: &Catalogue, config: &Config) -> Vec<Error> {
     out
 }
 
-/// The scheme `name` names, or the one `class` takes, or the only one.
+/// The item scheme `name` names, or the one `class` takes, or the only one.
 pub fn scheme<'a>(
     config: &'a Config,
     name: Option<&str>,
     class: Option<&str>,
 ) -> Result<&'a NumberScheme> {
-    if config.schemes.is_empty() {
+    scheme_of(config, name, class, SchemeKind::Item)
+}
+
+/// [`scheme`] among the schemes of `kind`: a named scheme of the other
+/// kind is refused (design 937).
+pub fn scheme_of<'a>(
+    config: &'a Config,
+    name: Option<&str>,
+    class: Option<&str>,
+    kind: SchemeKind,
+) -> Result<&'a NumberScheme> {
+    if !config.schemes.iter().any(|s| s.kind == kind) {
         return Err(Error::new(
             Code::InvalidParam,
-            "ryupdm.json declares no numbering schemes: add part_number.schemes",
+            format!(
+                "ryupdm.json declares no {} numbering schemes: add part_number.schemes",
+                kind.as_str()
+            ),
         ));
     }
     if let Some(n) = name {
-        return config.schemes.iter().find(|s| s.name == n).ok_or_else(|| {
+        let s = config.schemes.iter().find(|s| s.name == n).ok_or_else(|| {
             Error::new(Code::InvalidParam, format!("no numbering scheme {n:?}")).with("scheme", n)
-        });
+        })?;
+        if s.kind != kind {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!("scheme {n:?} numbers {}s", s.kind.as_str()),
+            )
+            .with("scheme", n));
+        }
+        return Ok(s);
     }
-    let with_next: Vec<&NumberScheme> =
-        config.schemes.iter().filter(|s| s.next.is_some()).collect();
+    let with_next: Vec<&NumberScheme> = config
+        .schemes
+        .iter()
+        .filter(|s| s.kind == kind && s.next.is_some())
+        .collect();
     if let Some(c) = class
         && let Some(s) = with_next.iter().find(|s| s.class.as_deref() == Some(c))
     {
@@ -88,6 +114,7 @@ pub fn scheme<'a>(
             config
                 .schemes
                 .iter()
+                .filter(|s| s.kind == kind)
                 .map(|s| s.name.as_str())
                 .collect::<Vec<_>>(),
         )),
@@ -120,7 +147,7 @@ pub fn highest(src: &dyn Source, cat: &Catalogue, t: &Template) -> u64 {
     cat.items
         .values()
         .flat_map(|i| std::iter::once(&i.number).chain(&i.previous_numbers))
-        .chain(held(src).keys())
+        .chain(held_by(src, cat).0.keys())
         .filter_map(|n| t.read(n))
         .max()
         .unwrap_or(0)
@@ -186,7 +213,7 @@ pub fn duplicates(src: &dyn Source, cat: &Catalogue) -> Vec<Error> {
             .into_iter()
             .map(|(id, e)| e.with("item", &id))
             .collect();
-    let held = held(src);
+    let held = held_by(src, cat).0;
     for (id, item) in &cat.items {
         let others: Vec<&Id> = held
             .get(&item.number)
@@ -231,6 +258,134 @@ pub fn held(src: &dyn Source) -> BTreeMap<String, Vec<Id>> {
         }
     }
     out
+}
+
+/// [`held`] split by number space (design 937, Decision 3): a record's
+/// number is held in the document space when its part is a live document,
+/// else in the item space.
+pub fn held_by(
+    src: &dyn Source,
+    cat: &Catalogue,
+) -> (BTreeMap<String, Vec<Id>>, BTreeMap<String, Vec<Id>>) {
+    let (mut items, mut docs): (BTreeMap<String, Vec<Id>>, BTreeMap<String, Vec<Id>>) =
+        Default::default();
+    for (n, parts) in held(src) {
+        for p in parts {
+            let to = if cat.documents.contains_key(&p) {
+                &mut docs
+            } else {
+                &mut items
+            };
+            to.entry(n.clone()).or_default().push(p);
+        }
+    }
+    (items, docs)
+}
+
+/// `part_number_duplicate` for each live document sharing its number with
+/// another live document, or whose number another document's release
+/// holds: documents' own number space.
+pub fn document_duplicates(src: &dyn Source, cat: &Catalogue) -> Vec<Error> {
+    let at = |id: &Id, e: Error| {
+        e.with("document", id)
+            .with("kind", "document")
+            .with("path", crate::ids::document_path(id))
+            .with("pointer", "/number")
+    };
+    let mut out: Vec<Error> =
+        ryupdm::props::duplicates(cat.documents.iter().map(|(id, d)| (id, d.number.as_str())))
+            .into_iter()
+            .map(|(id, e)| at(&id, e))
+            .collect();
+    let held = held_by(src, cat).1;
+    for (id, d) in &cat.documents {
+        let others: Vec<&Id> = held
+            .get(&d.number)
+            .map(|v| v.iter().filter(|p| *p != id).collect())
+            .unwrap_or_default();
+        if !others.is_empty() {
+            out.push(at(
+                id,
+                Error::new(
+                    Code::PartNumberDuplicate,
+                    format!(
+                        "document {id}: number {:?} is held by a release of {}",
+                        d.number, others[0]
+                    ),
+                )
+                .with("value", &d.number)
+                .with("records", &others),
+            ));
+        }
+    }
+    out.sort_by(|a, b| {
+        a.details["document"]
+            .as_str()
+            .cmp(&b.details["document"].as_str())
+    });
+    out
+}
+
+/// `part_number_unschemed` for each document whose number matches no
+/// document scheme; none when there are no document schemes.
+pub fn document_unschemed(cat: &Catalogue, config: &Config) -> Vec<Error> {
+    let schemes: Vec<&NumberScheme> = config
+        .schemes
+        .iter()
+        .filter(|s| s.kind == SchemeKind::Document)
+        .collect();
+    if schemes.is_empty() {
+        return Vec::new();
+    }
+    let names: Vec<&str> = schemes.iter().map(|s| s.name.as_str()).collect();
+    cat.documents
+        .iter()
+        .filter(|(_, d)| !schemes.iter().any(|s| s.pattern.matches(&d.number)))
+        .map(|(id, d)| {
+            Error::new(
+                Code::PartNumberUnschemed,
+                format!(
+                    "document {id}: number {:?} matches no document scheme ({})",
+                    d.number,
+                    names.join(", ")
+                ),
+            )
+            .with("document", id)
+            .with("kind", "document")
+            .with("path", crate::ids::document_path(id))
+            .with("pointer", "/number")
+            .with("value", &d.number)
+            .with("schemes", &names)
+        })
+        .collect()
+}
+
+/// The next number of document scheme `name` (or the one there is), from
+/// the highest documents' number in use or held.
+pub fn next_document(
+    src: &dyn Source,
+    cat: &Catalogue,
+    config: &Config,
+    name: Option<&str>,
+) -> Result<String> {
+    let s = scheme_of(config, name, None, SchemeKind::Document)?;
+    let t = s.next.as_ref().ok_or_else(|| {
+        Error::new(
+            Code::InvalidParam,
+            format!("scheme {:?} has no next template", s.name),
+        )
+        .with("scheme", &s.name)
+    })?;
+    let held = held_by(src, cat).1;
+    let highest = cat
+        .documents
+        .values()
+        .flat_map(|d| std::iter::once(&d.number).chain(&d.previous_numbers))
+        .chain(held.keys())
+        .filter_map(|n| t.read(n))
+        .max()
+        .unwrap_or(0);
+    Ok(t.fill(highest + 1))
 }
 
 /// The catalogues under `folders` and in `here`'s work tree, but `here`.
@@ -306,6 +461,70 @@ pub fn elsewhere(cat: &Catalogue, others: &[PathBuf]) -> Vec<Error> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn documents_have_their_own_number_space() {
+        let mut f = crate::load::tests::files(&[("0000000000001", "100-200")]);
+        f.insert(
+            "ryupdm.json".into(),
+            crate::canonical::to_string(&serde_json::json!({"format": 7, "kind": "ryupdm.config",
+                "release_branch": "main", "revisions": "letters",
+                "part_number": {"schemes": [
+                    {"name": "legacy", "pattern": "\\d{3}-\\d{3}"},
+                    {"name": "doc", "kind": "document", "pattern": "DOC-\\d{4}", "next": "DOC-{seq:4}"}]}}))
+            .into_bytes(),
+        );
+        let file = crate::document::File::of("a.pdf", b"a", None).unwrap();
+        for (id, n) in [
+            ("d1000000000000", "100-200"),
+            ("d2000000000000", "DOC-0007"),
+            ("d3000000000000", "DOC-0007"),
+        ] {
+            let d = crate::document::Document::new(n, "T", file.clone());
+            let id = Id::parse(id, "document").unwrap();
+            f.insert(crate::ids::document_path(&id), d.to_text().into_bytes());
+            f.insert(crate::ids::bytes_path(&id, "a.pdf"), b"a".to_vec());
+        }
+        let cat = Catalogue::load(&f).unwrap();
+        let config = Config::read_in(&f, "ryuplm").unwrap();
+        // The drawing shares its part's number: no duplicate across spaces.
+        let dups: Vec<(String, String)> = document_duplicates(&f, &cat)
+            .iter()
+            .map(|e| {
+                (
+                    e.details["document"].as_str().unwrap().to_owned(),
+                    e.details["kind"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            dups,
+            [
+                ("d2000000000000".into(), "document".into()),
+                ("d3000000000000".into(), "document".into())
+            ]
+        );
+        assert!(
+            duplicates(&f, &cat).is_empty(),
+            "the item's number is its own"
+        );
+        // 100-200 matches no document scheme; DOC-0007 does.
+        let un: Vec<String> = document_unschemed(&cat, &config)
+            .iter()
+            .map(|e| e.details["document"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(un, ["d1000000000000"]);
+        assert!(
+            unschemed(&cat, &config).is_empty(),
+            "the item scheme is the item's"
+        );
+        assert_eq!(next_document(&f, &cat, &config, None).unwrap(), "DOC-0008");
+        assert_eq!(
+            next(&f, &cat, &config, Some("doc"), None).unwrap_err().code,
+            Code::InvalidParam,
+            "a document scheme never numbers an item"
+        );
+    }
+
     use super::*;
     use crate::item::Item;
     use crate::judge::tests::{codes, files};

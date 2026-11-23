@@ -55,6 +55,7 @@ fn info(session: &Session) -> Value {
         "default_unit": c.manifest.default_unit,
         "classes": c.manifest.classes.keys().collect::<Vec<_>>(),
         "items": c.items.len(),
+        "documents": c.documents.len(),
         "revision": session.revision(),
         "version": VersionInfo::current(),
     })
@@ -218,6 +219,107 @@ fn dispatch(
             product,
             expected_revision,
         } => crate::links::unlink(session, &item, &product, expected_revision.as_deref())?,
+        Request::DocumentAdd {
+            file,
+            number,
+            next,
+            fields,
+            expected_revision,
+        } => crate::documents::add(
+            session,
+            Path::new(&file),
+            number,
+            next,
+            fields,
+            expected_revision.as_deref(),
+        )?,
+        Request::DocumentShow { document } => crate::documents::show(session, &document)?,
+        Request::DocumentList {
+            doc_type,
+            number,
+            text,
+            limit,
+        } => crate::documents::list(session, doc_type, number, text, limit),
+        Request::DocumentEdit {
+            document,
+            fields,
+            unset,
+            expected_revision,
+        } => crate::documents::edit(
+            session,
+            &document,
+            fields,
+            unset,
+            expected_revision.as_deref(),
+        )?,
+        Request::DocumentRenumber {
+            document,
+            number,
+            next,
+            expected_revision,
+        } => crate::documents::renumber(
+            session,
+            &document,
+            number,
+            next,
+            expected_revision.as_deref(),
+        )?,
+        Request::DocumentReplace {
+            document,
+            file,
+            media_type,
+            expected_revision,
+        } => crate::documents::replace(
+            session,
+            &document,
+            Path::new(&file),
+            media_type,
+            expected_revision.as_deref(),
+        )?,
+        Request::DocumentRemove {
+            document,
+            detach,
+            expected_revision,
+        } => crate::documents::remove(session, &document, detach, expected_revision.as_deref())?,
+        Request::DocumentGet { document, rev, out } => {
+            crate::documents::get(session, &document, rev.as_deref(), Path::new(&out))?
+        }
+        Request::DocumentAttach {
+            document,
+            items,
+            expected_revision,
+        } => crate::documents::attach(
+            session,
+            &document,
+            &items,
+            true,
+            expected_revision.as_deref(),
+        )?,
+        Request::DocumentDetach {
+            document,
+            items,
+            expected_revision,
+        } => crate::documents::attach(
+            session,
+            &document,
+            &items,
+            false,
+            expected_revision.as_deref(),
+        )?,
+        Request::DocumentWhereUsed {
+            document,
+            within,
+            no_dependents,
+            working,
+        } => crate::documents::where_used(
+            session,
+            &crate::documents::Ask {
+                document: &document,
+                within: &within,
+                no_dependents,
+                working,
+            },
+        )?,
         Request::BomAdd {
             item,
             fields,
@@ -472,6 +574,14 @@ pub(crate) mod tests {
         let attrs = std::fs::read_to_string(root.join(".gitattributes")).unwrap();
         assert!(
             attrs.contains("items/*/*.json merge=ryuplm diff=ryuplm text eol=lf"),
+            "{attrs}"
+        );
+        assert!(
+            attrs.contains("documents/*/*.json merge=ryuplm diff=ryuplm text eol=lf"),
+            "{attrs}"
+        );
+        assert!(
+            attrs.contains("documents/*/*/** -text -diff -merge"),
             "{attrs}"
         );
         assert_eq!(init(&root, None).unwrap_err().code, Code::ProjectExists);

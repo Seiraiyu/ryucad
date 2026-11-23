@@ -141,6 +141,106 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
+    #[serde(rename = "document.add")]
+    DocumentAdd {
+        /// The file to add: an absolute path the session reads.
+        file: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        number: Option<String>,
+        /// The document scheme whose next number to take ("" for the one
+        /// there is).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        next: Option<String>,
+        #[serde(default, flatten)]
+        fields: crate::documents::New,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "document.show")]
+    DocumentShow { document: String },
+    #[serde(rename = "document.list")]
+    DocumentList {
+        #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
+        doc_type: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        number: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
+    },
+    #[serde(rename = "document.edit")]
+    DocumentEdit {
+        document: String,
+        #[serde(default, flatten)]
+        fields: crate::documents::New,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        unset: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "document.renumber")]
+    DocumentRenumber {
+        document: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        number: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        next: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "document.replace")]
+    DocumentReplace {
+        document: String,
+        file: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        media_type: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "document.remove")]
+    DocumentRemove {
+        document: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        detach: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "document.get")]
+    DocumentGet {
+        document: String,
+        /// A Git revision, or `label:<L>`; the working files by default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+        /// Where to write the bytes: an absolute path.
+        out: String,
+    },
+    #[serde(rename = "document.attach")]
+    DocumentAttach {
+        /// A document of this catalogue (ID or number), or
+        /// `<catalogue project ID>:<document ID>`.
+        document: String,
+        items: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "document.detach")]
+    DocumentDetach {
+        document: String,
+        items: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "document.where_used")]
+    DocumentWhereUsed {
+        document: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        within: Vec<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        no_dependents: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        working: bool,
+    },
     #[serde(rename = "bom.add")]
     BomAdd {
         item: String,
@@ -415,6 +515,13 @@ impl Request {
                 | Request::ItemDelete { .. }
                 | Request::ItemLink { .. }
                 | Request::ItemUnlink { .. }
+                | Request::DocumentAdd { .. }
+                | Request::DocumentEdit { .. }
+                | Request::DocumentRenumber { .. }
+                | Request::DocumentReplace { .. }
+                | Request::DocumentRemove { .. }
+                | Request::DocumentAttach { .. }
+                | Request::DocumentDetach { .. }
                 | Request::BomAdd { .. }
                 | Request::BomEdit { .. }
                 | Request::BomRemove { .. }
@@ -473,6 +580,22 @@ mod tests {
     fn requests_round_trip_through_rpc() {
         let reqs = [
             Request::ProjectInfo {},
+            Request::DocumentAdd {
+                file: "/tmp/spec.pdf".into(),
+                number: None,
+                next: Some(String::new()),
+                fields: crate::documents::New {
+                    title: Some("Spec".into()),
+                    doc_type: Some("specification".into()),
+                    ..Default::default()
+                },
+                expected_revision: None,
+            },
+            Request::DocumentGet {
+                document: "DOC-1".into(),
+                rev: Some("label:A".into()),
+                out: "/tmp/out.pdf".into(),
+            },
             Request::ItemCreate {
                 fields: crate::items::Fields {
                     name: Some("Bracket".into()),
