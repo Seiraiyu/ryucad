@@ -113,6 +113,7 @@ invalid_param exit 1 "Invalid param"
   listed arr The values the standard lists.
   todo arr What is left to fix before it can be saved.
   constraint str The sketch constraint at fault.
+  allowed arr The values the parameter takes.
 
 duplicate_id exit 1 "Duplicate ID"
   id str The ID already taken.

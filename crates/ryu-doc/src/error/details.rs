@@ -247,6 +247,7 @@ details! {
         key("listed", Arr, "The values the standard lists."),
         key("todo", Arr, "What is left to fix before it can be saved."),
         key("constraint", Str, "The sketch constraint at fault."),
+        key("allowed", Arr, "The values the parameter takes."),
     ],
     NotFound => [
         key("part", Str, "The part asked for."),
