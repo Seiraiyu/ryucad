@@ -432,6 +432,15 @@ pub fn replace(
     expected: Option<&str>,
 ) -> Result<Value> {
     let (id, mut d) = current(session, document, expected)?;
+    if d.storage == Storage::Service {
+        // 3.A writes only Git storage (Decision 7): 3.B uploads.
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!("document {id}'s bytes are on the service, which this build doesn't write"),
+        )
+        .with("document", &id)
+        .with("storage", "service"));
+    }
     let (name, bytes) = read_source(file)?;
     let old = bytes_path(&id, &d.file.name);
     d.file = File::of(&name, &bytes, media_type.as_deref())?;
@@ -1395,5 +1404,47 @@ pub(crate) mod tests {
             .map(|f| f["details"]["document"].as_str().unwrap())
             .collect();
         assert_eq!(unresolved, [format!("{pa}:k3v9q2m8x4c1p").as_str()]);
+    }
+
+    #[test]
+    fn a_service_stored_document_is_never_replaced_here() {
+        let (_d, root) = catalogue();
+        let outside = tempfile::tempdir().unwrap();
+        let file = source(outside.path(), "a.pdf", b"%PDF a");
+        let made = ask(
+            &root,
+            Request::DocumentAdd {
+                file,
+                number: Some("D-1".into()),
+                next: None,
+                fields: New {
+                    title: Some("A".into()),
+                    ..Default::default()
+                },
+                expected_revision: None,
+            },
+        )
+        .unwrap();
+        let path = root.join(made["path"].as_str().unwrap());
+        let mut v: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        v["storage"] = json!("service");
+        std::fs::write(&path, crate::canonical::to_string(&v)).unwrap();
+        std::fs::remove_file(root.join(made["bytes"].as_str().unwrap())).unwrap();
+        let other = source(outside.path(), "b.pdf", b"%PDF b");
+        let e = ask(
+            &root,
+            Request::DocumentReplace {
+                document: "D-1".into(),
+                file: other,
+                media_type: None,
+                expected_revision: None,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            (e.code, e.details["storage"].clone()),
+            (Code::InvalidParam, json!("service"))
+        );
     }
 }

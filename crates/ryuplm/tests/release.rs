@@ -591,7 +591,34 @@ fn documents_release_and_items_wait_for_theirs() {
     let e = ask(&root, propose(vec![item.clone()])).unwrap_err();
     assert_eq!(e.code, ryuplm::error::Code::ReleaseNotReady);
     assert_eq!(e.details["problems"][0]["code"], "document_unreleased");
-    // Both in one proposal: fine.
+    // Beside a document that is itself refused (its bytes changed), the
+    // item is refused too: it would be released against a draft.
+    let bytes = root.join(made["bytes"].as_str().unwrap());
+    std::fs::write(&bytes, b"tampered").unwrap();
+    let e = ask(&root, propose(vec![item.clone(), doc.clone()])).unwrap_err();
+    let mut why: Vec<(String, String)> =
+        std::iter::once(json!({"item": e.details["item"], "error": e}))
+            .chain(e.details["refused"].as_array().unwrap().iter().cloned())
+            .map(|r| {
+                let err = &r["error"];
+                let code = err["details"]["problems"][0]["code"]
+                    .as_str()
+                    .or(err["code"].as_str())
+                    .unwrap()
+                    .to_owned();
+                (r["item"].as_str().unwrap().to_owned(), code)
+            })
+            .collect();
+    why.sort();
+    let mut want = vec![
+        (doc.clone(), "document_bytes_changed".to_owned()),
+        (item.clone(), "document_unreleased".to_owned()),
+    ];
+    want.sort();
+    assert_eq!(why, want);
+    assert!(!root.join("releases").exists(), "nothing released");
+    std::fs::write(&bytes, b"%PDF one").unwrap();
+    // Both in one proposal, the document ready: fine.
     let v = ask(&root, propose(vec![item.clone(), doc.clone()])).unwrap();
     let mut kinds: Vec<&str> = v["proposed"]
         .as_array()

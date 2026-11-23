@@ -60,8 +60,8 @@ fn check_expected(session: &Session, expected: Option<&str>) -> Result<()> {
 
 /// Every reason `id` can't be released: its error faults, then each
 /// required property an item lacks, then each of an item's documents with
-/// no release of its current content that isn't in `proposing` (design
-/// 937).
+/// no release of its current content that isn't in `proposing`, the
+/// documents of the same proposal already found ready (design 937).
 pub fn problems(session: &Session, config: &Config, id: &Id, proposing: &[Id]) -> Vec<Value> {
     let files = session.snapshot();
     let mut out: Vec<Value> = crate::judge::all(&files, session.catalogue(), &Default::default())
@@ -181,20 +181,35 @@ pub fn propose(
     let config = Config::read_in(&files, NAME)?;
     let records = Records::read_in(&files, NAME)?;
     let (mut ready, mut refused) = (Vec::new(), Vec::new());
-    for id in &ids {
+    // Documents first, then items: an item proposed beside one of its
+    // documents is exempt from `document_unreleased` only when that
+    // document is itself ready, never when it is refused (design 937).
+    let (docs, items): (Vec<&Id>, Vec<&Id>) = ids
+        .iter()
+        .partition(|id| session.catalogue().documents.contains_key(*id));
+    let mut ready_docs: Vec<Id> = Vec::new();
+    for id in docs.into_iter().chain(items) {
         let next = ryupdm::release::next_for::<Plm>(&files, &config, &records, &releases, id);
-        let p = problems(session, &config, id, &ids);
+        let p = problems(session, &config, id, &ready_docs);
         let outcome = match next {
             Err(e) => Err(e),
             Ok(_) if !p.is_empty() => Err(not_ready(id, p)),
             Ok(n) => Ok(n),
         };
         match outcome {
-            Ok(n) => ready.push((id.clone(), n)),
+            Ok(n) => {
+                if session.catalogue().documents.contains_key(id) {
+                    ready_docs.push(id.clone());
+                }
+                ready.push((id.clone(), n));
+            }
             Err(e) if alone && !dry_run => return Err(e),
             Err(e) => refused.push((id.clone(), e)),
         }
     }
+    // Answers keep ID order, as before documents.
+    ready.sort_by(|a, b| a.0.cmp(&b.0));
+    refused.sort_by(|a, b| a.0.cmp(&b.0));
     if dry_run {
         let mut out: Vec<Value> = ready
             .iter()
