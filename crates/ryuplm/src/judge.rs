@@ -136,6 +136,16 @@ fn numbers(src: &dyn Source, cat: &Catalogue, config: &Config, cx: &Context) -> 
         .map(err)
         .collect();
     out.extend(crate::numbers::unschemed(cat, config).into_iter().map(warn));
+    out.extend(
+        crate::numbers::document_duplicates(src, cat)
+            .into_iter()
+            .map(err),
+    );
+    out.extend(
+        crate::numbers::document_unschemed(cat, config)
+            .into_iter()
+            .map(warn),
+    );
     let others = match &cx.here {
         Some(h) => crate::numbers::others(h, &cx.elsewhere),
         None => cx
