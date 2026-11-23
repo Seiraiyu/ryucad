@@ -15,7 +15,12 @@ use ryupdm::{PDM_CONFIG, RELEASES};
 use serde_json::Value;
 
 pub const ROOT_FILES: [&str; 3] = [MANIFEST, PDM_CONFIG, ".gitattributes"];
-pub const FOLDERS: [&str; 3] = [ITEMS, RELEASES, crate::import::IMPORTS];
+pub const FOLDERS: [&str; 4] = [
+    ITEMS,
+    crate::ids::DOCUMENTS,
+    RELEASES,
+    crate::import::IMPORTS,
+];
 
 impl ryu_git::Layout for Plm {
     const NAME: &'static str = crate::catalogue::NAME;
@@ -25,6 +30,8 @@ impl ryu_git::Layout for Plm {
     fn project_file(rel: &str) -> bool {
         ROOT_FILES.contains(&rel)
             || item_of(rel).is_some()
+            || crate::ids::document_of(rel).is_some()
+            || crate::ids::bytes_of(rel).is_some()
             || rel
                 .strip_prefix("releases/")
                 .is_some_and(|f| f.matches('/').count() == 1)
@@ -69,17 +76,59 @@ pub fn content_of(item: &Item) -> String {
     h.finalize().to_hex().to_string()
 }
 
+/// A document's fields ryupdm reads as properties: `number`, its title as
+/// `name`, and `description`.
+pub fn document_properties(d: &crate::document::Document) -> Properties {
+    let mut values = std::collections::BTreeMap::new();
+    values.insert("number".into(), Value::from(d.number.clone()));
+    values.insert("name".into(), Value::from(d.title.clone()));
+    if let Some(x) = &d.description {
+        values.insert("description".into(), Value::from(x.clone()));
+    }
+    Properties { values }
+}
+
+/// The content a document's release names (`ryuplm.document.1`): its
+/// record without `storage`, `pin` and `previous_numbers`. The bytes are in
+/// it through `file.blake3`, so it never reads them.
+pub fn document_content(d: &crate::document::Document) -> String {
+    let mut v = d.to_json();
+    let o = v.as_object_mut().expect("an object");
+    for k in ["storage", "pin", "previous_numbers"] {
+        o.remove(k);
+    }
+    let body = crate::canonical::to_string(&v);
+    let mut h = blake3::Hasher::new();
+    for piece in [b"ryuplm.document.1".as_slice(), body.as_bytes()] {
+        h.update(&(piece.len() as u64).to_le_bytes());
+        h.update(piece);
+    }
+    h.finalize().to_hex().to_string()
+}
+
 impl Product for Plm {
-    const PART_FOLDERS: &'static [&'static str] = &[ITEMS];
+    const PART_FOLDERS: &'static [&'static str] = &[ITEMS, crate::ids::DOCUMENTS];
 
     fn parts(src: &dyn Source) -> Result<Vec<(Id, PartKind)>> {
         let mut out = Vec::new();
-        for (shard, _) in src.list(ITEMS)? {
-            for (name, kind) in src.list(&format!("{ITEMS}/{shard}"))? {
-                if kind == crate::source::Kind::File
-                    && let Some(id) = item_of(&format!("{ITEMS}/{shard}/{name}"))
-                {
-                    out.push((id, PartKind::Item));
+        for (top, kind, of) in [
+            (ITEMS, PartKind::Item, item_of as fn(&str) -> Option<Id>),
+            (
+                crate::ids::DOCUMENTS,
+                PartKind::Document,
+                crate::ids::document_of,
+            ),
+        ] {
+            for (shard, k) in src.list(top)? {
+                if k != crate::source::Kind::Dir {
+                    continue;
+                }
+                for (name, kind_of) in src.list(&format!("{top}/{shard}"))? {
+                    if kind_of == crate::source::Kind::File
+                        && let Some(id) = of(&format!("{top}/{shard}/{name}"))
+                    {
+                        out.push((id, kind));
+                    }
                 }
             }
         }
@@ -87,33 +136,63 @@ impl Product for Plm {
         Ok(out)
     }
 
+    /// Where `part`'s properties are when the snapshot has no file of it:
+    /// the item's file (as before documents).
     fn properties_path(part: &Id) -> String {
         item_path(part)
     }
 
+    /// Items and documents share one ID space: the file that is there says
+    /// which kind `part` is.
+    fn properties_path_in(src: &dyn Source, part: &Id) -> String {
+        let doc = crate::ids::document_path(part);
+        match (src.read_shared(&item_path(part)), src.read_shared(&doc)) {
+            (Ok(None), Ok(Some(_))) => doc,
+            _ => item_path(part),
+        }
+    }
+
     fn part_files(part: &Id) -> PartFiles {
         PartFiles {
-            files: vec![item_path(part)],
-            folders: Vec::new(),
+            files: vec![item_path(part), crate::ids::document_path(part)],
+            folders: vec![crate::ids::bytes_dir(part)],
         }
     }
 
     fn part_of(path: &str) -> Option<Id> {
         item_of(path)
+            .or_else(|| crate::ids::document_of(path))
+            .or_else(|| crate::ids::bytes_of(path).map(|(id, _)| id))
+    }
+
+    fn content(src: &dyn Source, part: &Id) -> Result<String> {
+        let at = item_path(part);
+        if let Some(bytes) = src.read(&at)? {
+            return Ok(content_of(&Item::read(part, &bytes)?));
+        }
+        let doc = crate::ids::document_path(part);
+        match src.read(&doc)? {
+            Some(bytes) => Ok(document_content(&crate::document::Document::read(
+                part, &bytes,
+            )?)),
+            None => Err(Error::new(Code::ItemNotFound, format!("no {at} or {doc}"))
+                .with("path", &at)
+                .with("document_path", &doc)),
+        }
+    }
+
+    fn properties_from(v: &Value) -> Option<Result<Properties>> {
+        if v["kind"] == crate::item::KIND {
+            return Some(Item::from_json(v).map(|i| properties(&i)));
+        }
+        (v["kind"] == crate::document::KIND)
+            .then(|| crate::document::Document::from_json(v).map(|d| document_properties(&d)))
     }
 
     /// The manifest (classes, the default unit) may change how any item
     /// is judged.
     fn shared(path: &str) -> bool {
         path == MANIFEST
-    }
-
-    fn content(src: &dyn Source, part: &Id) -> Result<String> {
-        let at = item_path(part);
-        let bytes = src
-            .read(&at)?
-            .ok_or_else(|| Error::new(Code::ItemNotFound, format!("no {at}")).with("path", &at))?;
-        Ok(content_of(&Item::read(part, &bytes)?))
     }
 
     fn identity(manifest: &Value) -> Option<Identity> {
@@ -123,10 +202,6 @@ impl Product for Plm {
             forked_from: m.forked_from.map(|f| f.project),
             unit: m.default_unit,
         })
-    }
-
-    fn properties_from(v: &Value) -> Option<Result<Properties>> {
-        (v["kind"] == crate::item::KIND).then(|| Item::from_json(v).map(|i| properties(&i)))
     }
 
     /// An item whose legacy history carried a label of the scheme
@@ -207,9 +282,14 @@ pub(crate) mod tests {
         assert!(<Plm as Product>::shared("ryuplm.json"));
         assert_eq!(
             <Plm as Product>::part_files(&id("k3v9q2m8x4c1p")),
+            // One ID space (design 937): either kind's file, and a
+            // document's bytes folder.
             PartFiles {
-                files: vec!["items/k3/k3v9q2m8x4c1p.json".into()],
-                folders: vec![]
+                files: vec![
+                    "items/k3/k3v9q2m8x4c1p.json".into(),
+                    "documents/k3/k3v9q2m8x4c1p.json".into()
+                ],
+                folders: vec!["documents/k3/k3v9q2m8x4c1p".into()]
             }
         );
         let p = ryupdm::props::read_for::<Plm>(&f, &id("k3v9q2m8x4c1p")).unwrap();
@@ -254,5 +334,57 @@ pub(crate) mod tests {
             before
         );
         assert_eq!(before.len(), 64);
+    }
+    #[test]
+    fn documents_are_parts_beside_items() {
+        let mut f = files();
+        let d = id("d1000000000000");
+        let mut doc = crate::document::Document::new(
+            "DOC-1",
+            "Spec",
+            crate::document::File::of("Spec.pdf", b"%PDF", None).unwrap(),
+        );
+        doc.description = Some("Finish".into());
+        f.insert(crate::ids::document_path(&d), doc.to_text().into_bytes());
+        f.insert(crate::ids::bytes_path(&d, "Spec.pdf"), b"%PDF".to_vec());
+        let parts = <Plm as Product>::parts(&f).unwrap();
+        assert!(parts.contains(&(d.clone(), PartKind::Document)));
+        assert!(parts.iter().any(|(_, k)| *k == PartKind::Item));
+        assert_eq!(
+            <Plm as Product>::properties_path_in(&f, &d),
+            "documents/d1/d1000000000000.json"
+        );
+        let props = ryupdm::props::read_for::<Plm>(&f, &d).unwrap();
+        assert_eq!(props.values["number"], "DOC-1");
+        assert_eq!(props.values["name"], "Spec");
+        assert_eq!(props.values["description"], "Finish");
+        // Moving tier, re-pinning and renumbering history keep the content.
+        let c = <Plm as Product>::content(&f, &d).unwrap();
+        doc.storage = crate::document::Storage::Service;
+        doc.pin = Some(crate::document::Pin {
+            drive_id: "x".into(),
+            revision: "y".into(),
+        });
+        doc.previous_numbers.push("OLD".into());
+        assert_eq!(document_content(&doc), c);
+        doc.file.blake3 = "b".repeat(64);
+        assert_ne!(document_content(&doc), c, "new bytes are a new revision");
+        assert_eq!(
+            <Plm as Product>::part_of("documents/d1/d1000000000000/Spec.pdf"),
+            Some(d.clone())
+        );
+        assert_eq!(
+            <Plm as Product>::part_of("documents/d1/d1000000000000.json"),
+            Some(d.clone())
+        );
+        assert!(<Plm as ryu_git::Layout>::project_file(
+            "documents/d1/d1000000000000/Spec.pdf"
+        ));
+        let own = <Plm as Product>::part_files(&d);
+        assert!(
+            own.files
+                .contains(&"documents/d1/d1000000000000.json".to_owned())
+        );
+        assert_eq!(own.folders, ["documents/d1/d1000000000000"]);
     }
 }

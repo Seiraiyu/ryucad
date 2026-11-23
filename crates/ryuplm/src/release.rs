@@ -37,6 +37,15 @@ pub fn releases_or_none(session: &mut Session) -> Releases {
     history(session).map(|(_, r)| r).unwrap_or_default()
 }
 
+/// `item` or `document`: what `id` is in the catalogue now.
+fn kind_of(session: &Session, id: &Id) -> &'static str {
+    if session.catalogue().documents.contains_key(id) {
+        "document"
+    } else {
+        "item"
+    }
+}
+
 fn check_expected(session: &Session, expected: Option<&str>) -> Result<()> {
     match expected {
         Some(e) if e != session.revision() => Err(Error::new(
@@ -50,17 +59,24 @@ fn check_expected(session: &Session, expected: Option<&str>) -> Result<()> {
 }
 
 /// Every reason `id` can't be released: its error faults, then each
-/// required property it lacks.
-pub fn problems(session: &Session, config: &Config, id: &Id) -> Vec<Value> {
-    let mut out: Vec<Value> = crate::judge::all(
-        &session.snapshot(),
-        session.catalogue(),
-        &Default::default(),
-    )
-    .into_iter()
-    .filter(|f| f.is_error() && f.error.details["item"] == json!(id))
-    .map(|f| f.to_json())
-    .collect();
+/// required property an item lacks, then each of an item's documents with
+/// no release of its current content that isn't in `proposing`, the
+/// documents of the same proposal already found ready (design 937).
+pub fn problems(session: &Session, config: &Config, id: &Id, proposing: &[Id]) -> Vec<Value> {
+    let files = session.snapshot();
+    let mut out: Vec<Value> = crate::judge::all(&files, session.catalogue(), &Default::default())
+        .into_iter()
+        .filter(|f| {
+            f.is_error()
+                && (f.error.details["item"] == json!(id)
+                    || (f.error.details["document"] == json!(id)
+                        && f.error.details.get("item").is_none()))
+        })
+        .map(|f| f.to_json())
+        .collect();
+    let Some(item) = session.catalogue().items.get(id) else {
+        return out; // a document: its own faults only
+    };
     // As ryueda writes a missing property: `property_invalid`, `missing`.
     for name in crate::judge::missing(session.catalogue(), config, id) {
         let mut v = json!(
@@ -74,6 +90,43 @@ pub fn problems(session: &Session, config: &Config, id: &Id) -> Vec<Value> {
         );
         v["severity"] = json!("error");
         out.push(v);
+    }
+    // An item is never released against a draft document (design 937):
+    // each of its own documents needs a release record of its current
+    // content, official or proposed, or to be proposed with it.
+    let own = &session.catalogue().manifest.project;
+    let records = Records::read_in(&files, NAME).unwrap_or_default();
+    for (i, r) in item.documents.iter().enumerate() {
+        let d = &r.document;
+        if !r.is_in(own) || !session.catalogue().documents.contains_key(d) || proposing.contains(d)
+        {
+            continue;
+        }
+        let Ok(content) = <Plm as Product>::content(&files, d) else {
+            continue;
+        };
+        let released = records.entries.iter().any(|e| {
+            e.record
+                .as_ref()
+                .ok()
+                .and_then(|x| x.release())
+                .is_some_and(|x| x.part == *d && x.content == content)
+        });
+        if !released {
+            let mut v = json!(
+                Error::new(
+                    Code::DocumentUnreleased,
+                    format!(
+                        "item {id}: document {d} has no release of its current content; release it with the item, or first"
+                    ),
+                )
+                .with("item", id)
+                .with("document", d)
+                .with("pointer", format!("/documents/{i}"))
+            );
+            v["severity"] = json!("error");
+            out.push(v);
+        }
     }
     out
 }
@@ -106,14 +159,12 @@ pub fn propose(
     ryupdm::history::check_folder(repo.prefix())?;
     let mut ids: Vec<Id> = items
         .iter()
-        .map(|s| session.catalogue().find(s))
+        .map(|s| session.catalogue().find_part(s))
         .collect::<Result<_>>()?;
     let files = session.snapshot();
     if all {
         for (id, s) in ryupdm::state::derive_all_for::<Plm>(&files, &releases) {
-            if matches!(s.status.name(), "in_work" | "modified")
-                && session.catalogue().items.contains_key(&id)
-            {
+            if matches!(s.status.name(), "in_work" | "modified") && session.catalogue().holds(&id) {
                 ids.push(id);
             }
         }
@@ -123,31 +174,46 @@ pub fn propose(
     if ids.is_empty() && !all {
         return Err(Error::new(
             Code::Usage,
-            "name an item to release, or pass --all",
+            "name an item or document to release, or pass --all",
         ));
     }
     let alone = ids.len() == 1 && !all;
     let config = Config::read_in(&files, NAME)?;
     let records = Records::read_in(&files, NAME)?;
     let (mut ready, mut refused) = (Vec::new(), Vec::new());
-    for id in &ids {
+    // Documents first, then items: an item proposed beside one of its
+    // documents is exempt from `document_unreleased` only when that
+    // document is itself ready, never when it is refused (design 937).
+    let (docs, items): (Vec<&Id>, Vec<&Id>) = ids
+        .iter()
+        .partition(|id| session.catalogue().documents.contains_key(*id));
+    let mut ready_docs: Vec<Id> = Vec::new();
+    for id in docs.into_iter().chain(items) {
         let next = ryupdm::release::next_for::<Plm>(&files, &config, &records, &releases, id);
-        let p = problems(session, &config, id);
+        let p = problems(session, &config, id, &ready_docs);
         let outcome = match next {
             Err(e) => Err(e),
             Ok(_) if !p.is_empty() => Err(not_ready(id, p)),
             Ok(n) => Ok(n),
         };
         match outcome {
-            Ok(n) => ready.push((id.clone(), n)),
+            Ok(n) => {
+                if session.catalogue().documents.contains_key(id) {
+                    ready_docs.push(id.clone());
+                }
+                ready.push((id.clone(), n));
+            }
             Err(e) if alone && !dry_run => return Err(e),
             Err(e) => refused.push((id.clone(), e)),
         }
     }
+    // Answers keep ID order, as before documents.
+    ready.sort_by(|a, b| a.0.cmp(&b.0));
+    refused.sort_by(|a, b| a.0.cmp(&b.0));
     if dry_run {
         let mut out: Vec<Value> = ready
             .iter()
-            .map(|(id, n)| json!({"item": id, "label": n.label, "supersedes": n.supersedes, "ready": true, "problems": []}))
+            .map(|(id, n)| json!({"item": id, "kind": kind_of(session, id), "label": n.label, "supersedes": n.supersedes, "ready": true, "problems": []}))
             .collect();
         for (id, e) in &refused {
             let problems = match e.code {
@@ -157,7 +223,7 @@ pub fn propose(
                     .unwrap_or_default(),
                 _ => vec![json!(e)],
             };
-            out.push(json!({"item": id, "label": null, "supersedes": null, "ready": false, "problems": problems}));
+            out.push(json!({"item": id, "kind": kind_of(session, id), "label": null, "supersedes": null, "ready": false, "problems": problems}));
         }
         out.sort_by(|a, b| a["item"].as_str().cmp(&b["item"].as_str()));
         return Ok(json!({"items": out}));
@@ -210,7 +276,7 @@ pub fn propose(
         .iter()
         .map(|r| {
             let s = ryupdm::state::derive_for::<Plm>(&files, r.part(), &releases);
-            let mut v = json!({"item": r.part(), "label": r.label(), "path": r.path(), "record": r.to_json(), "state": s.to_json()});
+            let mut v = json!({"item": r.part(), "kind": kind_of(session, r.part()), "label": r.label(), "path": r.path(), "record": r.to_json(), "state": s.to_json()});
             if let Some(a) = ryupdm::release::required(r.part(), &releases) {
                 v["approval"] = a;
             }
@@ -236,7 +302,7 @@ pub fn obsolete(
     // The item may be gone: an ID names it then.
     let id = session
         .catalogue()
-        .find(item)
+        .find_part(item)
         .or_else(|e| Id::parse(item, "item").map_err(|_| e))?;
     let (repo, releases) = history(session)?;
     ryupdm::history::check_folder(repo.prefix())?;
@@ -271,7 +337,7 @@ pub fn list(session: &mut Session, item: Option<&str>) -> Result<Value> {
         .map(|s| {
             session
                 .catalogue()
-                .find(s)
+                .find_part(s)
                 .or_else(|e| Id::parse(s, "item").map_err(|_| e))
         })
         .transpose()?;
@@ -296,6 +362,7 @@ pub fn list(session: &mut Session, item: Option<&str>) -> Result<Value> {
         .map(|(p, s)| {
             let mut v = s.to_json();
             v["item"] = json!(p);
+            v["kind"] = json!(kind_of(session, &p));
             v
         })
         .collect();

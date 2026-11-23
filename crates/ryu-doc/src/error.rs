@@ -1236,6 +1236,40 @@ pub enum Code {
     /// a column the source hasn't, or a property, class or scheme the
     /// catalogue doesn't declare (an error).
     ImportMappingInvalid,
+    /// No document of that ID or number in the catalogue (ryuplm 3).
+    DocumentNotFound,
+    /// A Git-stored document's bytes aren't at `documents/<ab>/<id>/<name>`
+    /// (an error): restore them from Git, or `document replace`. Also a
+    /// service-stored document's bytes a command can't reach.
+    DocumentBytesMissing,
+    /// A document's bytes aren't the length and BLAKE3 its record names (an
+    /// error): `details.expected` and `details.actual`; restore them, or
+    /// `document replace` to record the new bytes.
+    DocumentBytesChanged,
+    /// ryuplm check finding (a warning): a file in a document's folder that
+    /// isn't its bytes, a folder with no record, or bytes committed for a
+    /// document whose record says they are on the service.
+    DocumentFileUnknown,
+    /// ryuplm check finding (a warning): a Git-stored document over 50 MiB;
+    /// a large file that changes often belongs on the service.
+    DocumentLarge,
+    /// A Git-stored document over 100 MiB, which GitHub refuses (an error).
+    DocumentTooLarge,
+    /// An item names a document this catalogue hasn't (an error).
+    DocumentMissing,
+    /// ryuplm check finding (a warning): an item names another catalogue's
+    /// document that no catalogue this clone can see holds.
+    DocumentUnresolved,
+    /// Removing a document items still name (`details.items`); detach it
+    /// first, or pass `--detach`.
+    DocumentInUse,
+    /// Removing a document that has release records: obsolete its releases
+    /// instead.
+    DocumentReleased,
+    /// Releasing an item that names a document with no release record of its
+    /// current content (an error of release readiness); release the document
+    /// in the same proposal, or first.
+    DocumentUnreleased,
     /// ryuplm check finding (a warning): the label an item's legacy
     /// history carried isn't one of the catalogue's revision scheme, so its
     /// first release takes the scheme's first label (design 935).
@@ -1670,6 +1704,17 @@ impl Code {
         Code::ImportConflict,
         Code::ImportMissing,
         Code::ImportMappingInvalid,
+        Code::DocumentNotFound,
+        Code::DocumentBytesMissing,
+        Code::DocumentBytesChanged,
+        Code::DocumentFileUnknown,
+        Code::DocumentLarge,
+        Code::DocumentTooLarge,
+        Code::DocumentMissing,
+        Code::DocumentUnresolved,
+        Code::DocumentInUse,
+        Code::DocumentReleased,
+        Code::DocumentUnreleased,
         Code::ItemHistoryLabelForeign,
         Code::PartNumberTaken,
         Code::LedgerUnavailable,
@@ -1776,6 +1821,27 @@ mod tests {
             &Code::ALL[Code::ALL.len() - 2..],
             &[Code::PartNumberTaken, Code::LedgerUnavailable]
         );
+    }
+
+    #[test]
+    fn document_codes() {
+        for (c, s) in [
+            (Code::DocumentNotFound, "document_not_found"),
+            (Code::DocumentBytesMissing, "document_bytes_missing"),
+            (Code::DocumentBytesChanged, "document_bytes_changed"),
+            (Code::DocumentFileUnknown, "document_file_unknown"),
+            (Code::DocumentLarge, "document_large"),
+            (Code::DocumentTooLarge, "document_too_large"),
+            (Code::DocumentMissing, "document_missing"),
+            (Code::DocumentUnresolved, "document_unresolved"),
+            (Code::DocumentInUse, "document_in_use"),
+            (Code::DocumentReleased, "document_released"),
+            (Code::DocumentUnreleased, "document_unreleased"),
+        ] {
+            assert_eq!(json!(c), json!(s));
+            assert_eq!(c.exit_code(), 1);
+            assert!(Code::ALL.contains(&c), "{c:?} in ALL");
+        }
     }
 
     #[test]

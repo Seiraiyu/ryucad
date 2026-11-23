@@ -74,6 +74,10 @@ enum Command {
     Info,
     #[command(subcommand)]
     Item(ItemCmd),
+    /// Controlled documents (specifications, datasheets, drawing PDFs,
+    /// certificates): their records, bytes and items.
+    #[command(subcommand)]
+    Document(DocumentCmd),
     #[command(subcommand)]
     Settings(SettingsCmd),
     /// Every finding: file faults, AML, classes, properties, numbers, releases.
@@ -491,6 +495,132 @@ enum ItemCmd {
     },
 }
 
+#[derive(Args)]
+struct DocArgs {
+    #[arg(long)]
+    title: Option<String>,
+    /// specification, datasheet, drawing, certificate, procedure or other.
+    #[arg(long = "type")]
+    doc_type: Option<String>,
+    #[arg(long)]
+    description: Option<String>,
+}
+
+impl DocArgs {
+    fn fields(&self, media_type: Option<String>) -> ryuplm::documents::New {
+        ryuplm::documents::New {
+            title: self.title.clone(),
+            doc_type: self.doc_type.clone(),
+            description: self.description.clone(),
+            media_type,
+        }
+    }
+}
+
+#[derive(Subcommand)]
+enum DocumentCmd {
+    /// A new document: FILE's bytes in Git beside its record.
+    Add {
+        file: PathBuf,
+        #[arg(long)]
+        number: Option<String>,
+        /// Take the next number of SCHEME (or of the document scheme there is).
+        #[arg(long, num_args = 0..=1, default_missing_value = "")]
+        next: Option<String>,
+        #[command(flatten)]
+        fields: DocArgs,
+        /// The media type, else the one FILE's extension gives.
+        #[arg(long)]
+        media_type: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    Show {
+        document: String,
+    },
+    List {
+        #[arg(long = "type")]
+        doc_type: Option<String>,
+        #[arg(long)]
+        number: Option<String>,
+        /// Number, title or description containing TEXT (any case).
+        #[arg(long)]
+        text: Option<String>,
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+    /// Change the title, type or description; --unset description clears it.
+    Edit {
+        document: String,
+        #[command(flatten)]
+        fields: DocArgs,
+        #[arg(long)]
+        unset: Vec<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    Renumber {
+        document: String,
+        number: Option<String>,
+        #[arg(long, num_args = 0..=1, default_missing_value = "")]
+        next: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// New bytes for the document, from FILE.
+    Replace {
+        document: String,
+        file: PathBuf,
+        #[arg(long)]
+        media_type: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Remove a document with no releases; --detach takes it off its items too.
+    Remove {
+        document: String,
+        #[arg(long)]
+        detach: bool,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Write the document's bytes to --out, checked against its record.
+    Get {
+        document: String,
+        /// A Git revision, or label:<L> for an official release.
+        #[arg(long, value_name = "REV")]
+        rev: Option<String>,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Name DOCUMENT (this catalogue's, or <project>:<id>) on each ITEM.
+    Attach {
+        document: String,
+        #[arg(required = true)]
+        items: Vec<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    Detach {
+        document: String,
+        #[arg(required = true)]
+        items: Vec<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Every item naming DOCUMENT: here, in other catalogues' checkouts,
+    /// and in their releases.
+    WhereUsed {
+        document: String,
+        #[arg(long = "in", value_name = "DIR")]
+        within: Vec<String>,
+        #[arg(long)]
+        no_dependents: bool,
+        #[arg(long)]
+        working: bool,
+    },
+}
+
 /// Parsed once per run: the size of a variant doesn't matter.
 #[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
@@ -508,6 +638,9 @@ enum SettingsCmd {
         pattern: Option<String>,
         #[arg(long)]
         scheme_class: Option<String>,
+        /// With --scheme: what it numbers, item (the default) or document.
+        #[arg(long)]
+        scheme_kind: Option<String>,
         #[arg(long)]
         next_template: Option<String>,
         #[arg(long)]
@@ -718,6 +851,143 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
             },
         ),
         Command::Import(ImportCmd::List) => (root()?, Request::ImportList {}),
+        Command::Document(DocumentCmd::Add {
+            file,
+            number,
+            next,
+            fields,
+            media_type,
+            expect,
+        }) => (
+            root()?,
+            Request::DocumentAdd {
+                file: abs_file(here, file),
+                number: number.clone(),
+                next: next.clone(),
+                fields: fields.fields(media_type.clone()),
+                expected_revision: exp(expect),
+            },
+        ),
+        Command::Document(DocumentCmd::Show { document }) => (
+            root()?,
+            Request::DocumentShow {
+                document: document.clone(),
+            },
+        ),
+        Command::Document(DocumentCmd::List {
+            doc_type,
+            number,
+            text,
+            limit,
+        }) => (
+            root()?,
+            Request::DocumentList {
+                doc_type: doc_type.clone(),
+                number: number.clone(),
+                text: text.clone(),
+                limit: *limit,
+            },
+        ),
+        Command::Document(DocumentCmd::Edit {
+            document,
+            fields,
+            unset,
+            expect,
+        }) => (
+            root()?,
+            Request::DocumentEdit {
+                document: document.clone(),
+                fields: fields.fields(None),
+                unset: unset.clone(),
+                expected_revision: exp(expect),
+            },
+        ),
+        Command::Document(DocumentCmd::Renumber {
+            document,
+            number,
+            next,
+            expect,
+        }) => (
+            root()?,
+            Request::DocumentRenumber {
+                document: document.clone(),
+                number: number.clone(),
+                next: next.clone(),
+                expected_revision: exp(expect),
+            },
+        ),
+        Command::Document(DocumentCmd::Replace {
+            document,
+            file,
+            media_type,
+            expect,
+        }) => (
+            root()?,
+            Request::DocumentReplace {
+                document: document.clone(),
+                file: abs_file(here, file),
+                media_type: media_type.clone(),
+                expected_revision: exp(expect),
+            },
+        ),
+        Command::Document(DocumentCmd::Remove {
+            document,
+            detach,
+            expect,
+        }) => (
+            root()?,
+            Request::DocumentRemove {
+                document: document.clone(),
+                detach: *detach,
+                expected_revision: exp(expect),
+            },
+        ),
+        Command::Document(DocumentCmd::Get { document, rev, out }) => (
+            root()?,
+            Request::DocumentGet {
+                document: document.clone(),
+                rev: rev.clone(),
+                out: abs_file(here, out),
+            },
+        ),
+        Command::Document(DocumentCmd::Attach {
+            document,
+            items,
+            expect,
+        }) => (
+            root()?,
+            Request::DocumentAttach {
+                document: document.clone(),
+                items: items.clone(),
+                expected_revision: exp(expect),
+            },
+        ),
+        Command::Document(DocumentCmd::Detach {
+            document,
+            items,
+            expect,
+        }) => (
+            root()?,
+            Request::DocumentDetach {
+                document: document.clone(),
+                items: items.clone(),
+                expected_revision: exp(expect),
+            },
+        ),
+        Command::Document(DocumentCmd::WhereUsed {
+            document,
+            within,
+            no_dependents,
+            working,
+        }) => (
+            root()?,
+            Request::DocumentWhereUsed {
+                document: document.clone(),
+                within: absolute(here, within),
+                no_dependents: *no_dependents,
+                working: *working,
+            },
+        ),
         Command::Item(ItemCmd::Create {
             number,
             next,
@@ -951,6 +1221,7 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
             scheme,
             pattern,
             scheme_class,
+            scheme_kind,
             next_template,
             property,
             declaration,
@@ -971,6 +1242,7 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
                         scheme: scheme.clone(),
                         pattern: pattern.clone(),
                         scheme_class: scheme_class.clone(),
+                        scheme_kind: scheme_kind.clone(),
                         next_template: next_template.clone(),
                         property: property.clone(),
                         declaration,

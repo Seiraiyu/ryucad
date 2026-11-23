@@ -515,3 +515,207 @@ fn a_check_against_a_base_marks_what_is_new() {
         ryuplm::error::Code::RevNotFound
     );
 }
+
+#[test]
+fn documents_release_and_items_wait_for_theirs() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    git(&root, &["init", "-q", "-b", "main"]);
+    ryuplm::server::init(&root, None).unwrap();
+    ask(
+        &root,
+        Request::SettingsEdit {
+            change: ryuplm::settings::Change {
+                scheme: Some("doc".into()),
+                scheme_kind: Some("document".into()),
+                pattern: Some("DOC-\\d{4}".into()),
+                next_template: Some("DOC-{seq:4}".into()),
+                ..Default::default()
+            },
+            expected_revision: None,
+        },
+    )
+    .unwrap();
+    let spec = outside.path().join("spec.pdf");
+    std::fs::write(&spec, b"%PDF one").unwrap();
+    let made = ask(
+        &root,
+        Request::DocumentAdd {
+            file: spec.display().to_string(),
+            number: None,
+            next: Some(String::new()),
+            fields: ryuplm::documents::New {
+                title: Some("Spec".into()),
+                ..Default::default()
+            },
+            expected_revision: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(made["document"]["number"], "DOC-0001");
+    let doc = made["document"]["id"].as_str().unwrap().to_owned();
+    let item = ask(
+        &root,
+        Request::ItemCreate {
+            fields: Default::default(),
+            number: Some("A-1".into()),
+            next: None,
+            expected_revision: None,
+        },
+    )
+    .unwrap()["item"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    ask(
+        &root,
+        Request::DocumentAttach {
+            document: doc.clone(),
+            items: vec![item.clone()],
+            expected_revision: None,
+        },
+    )
+    .unwrap();
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-q", "-m", "an item and its spec"]);
+    git(&root, &["checkout", "-q", "-b", "rel"]);
+    let propose = |items: Vec<String>| Request::ReleasePropose {
+        items,
+        all: false,
+        dry_run: false,
+        note: None,
+        expected_revision: None,
+    };
+    // The item alone can't be released against a draft document.
+    let e = ask(&root, propose(vec![item.clone()])).unwrap_err();
+    assert_eq!(e.code, ryuplm::error::Code::ReleaseNotReady);
+    assert_eq!(e.details["problems"][0]["code"], "document_unreleased");
+    // Beside a document that is itself refused (its bytes changed), the
+    // item is refused too: it would be released against a draft.
+    let bytes = root.join(made["bytes"].as_str().unwrap());
+    std::fs::write(&bytes, b"tampered").unwrap();
+    let e = ask(&root, propose(vec![item.clone(), doc.clone()])).unwrap_err();
+    let mut why: Vec<(String, String)> =
+        std::iter::once(json!({"item": e.details["item"], "error": e}))
+            .chain(e.details["refused"].as_array().unwrap().iter().cloned())
+            .map(|r| {
+                let err = &r["error"];
+                let code = err["details"]["problems"][0]["code"]
+                    .as_str()
+                    .or(err["code"].as_str())
+                    .unwrap()
+                    .to_owned();
+                (r["item"].as_str().unwrap().to_owned(), code)
+            })
+            .collect();
+    why.sort();
+    let mut want = vec![
+        (doc.clone(), "document_bytes_changed".to_owned()),
+        (item.clone(), "document_unreleased".to_owned()),
+    ];
+    want.sort();
+    assert_eq!(why, want);
+    assert!(!root.join("releases").exists(), "nothing released");
+    std::fs::write(&bytes, b"%PDF one").unwrap();
+    // Both in one proposal, the document ready: fine.
+    let v = ask(&root, propose(vec![item.clone(), doc.clone()])).unwrap();
+    let mut kinds: Vec<&str> = v["proposed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["kind"].as_str().unwrap())
+        .collect();
+    kinds.sort();
+    assert_eq!(kinds, ["document", "item"]);
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-q", "-m", "release A-1 and its spec"]);
+    // A released document isn't removed; new bytes make it modified.
+    let e = ask(
+        &root,
+        Request::DocumentRemove {
+            document: doc.clone(),
+            detach: true,
+            expected_revision: None,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(e.code, ryuplm::error::Code::DocumentReleased);
+    let spec2 = outside.path().join("spec2.pdf");
+    std::fs::write(&spec2, b"%PDF two").unwrap();
+    ask(
+        &root,
+        Request::DocumentReplace {
+            document: doc.clone(),
+            file: spec2.display().to_string(),
+            media_type: None,
+            expected_revision: None,
+        },
+    )
+    .unwrap();
+    let listed = ask(
+        &root,
+        Request::ReleaseList {
+            item: Some(doc.clone()),
+        },
+    )
+    .unwrap();
+    assert_eq!(listed["items"][0]["kind"], "document");
+    assert_eq!(listed["items"][0]["item"], json!(doc));
+}
+
+#[test]
+fn diff_lists_documents() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    git(&root, &["init", "-q", "-b", "main"]);
+    ryuplm::server::init(&root, None).unwrap();
+    let spec = outside.path().join("spec.pdf");
+    std::fs::write(&spec, b"%PDF one").unwrap();
+    let add = |n: &str| Request::DocumentAdd {
+        file: spec.display().to_string(),
+        number: Some(n.into()),
+        next: None,
+        fields: ryuplm::documents::New {
+            title: Some("Spec".into()),
+            ..Default::default()
+        },
+        expected_revision: None,
+    };
+    ask(&root, add("DOC-1")).unwrap();
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-q", "-m", "a spec"]);
+    ask(
+        &root,
+        Request::DocumentEdit {
+            document: "DOC-1".into(),
+            fields: ryuplm::documents::New {
+                title: Some("New".into()),
+                ..Default::default()
+            },
+            unset: vec![],
+            expected_revision: None,
+        },
+    )
+    .unwrap();
+    let v = ask(
+        &root,
+        Request::Diff {
+            from: None,
+            to: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(v["documents"]["changed"][0]["number"], "DOC-1");
+    assert_eq!(
+        v["documents"]["changed"][0]["added"],
+        json!(["title = New"])
+    );
+    assert_eq!(
+        v["documents"]["changed"][0]["removed"],
+        json!(["title = Spec"])
+    );
+    assert_eq!(v["documents"]["added"], json!([]));
+    assert_eq!(v["changed"], json!([]), "items' keys are items'");
+}

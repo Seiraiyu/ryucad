@@ -8,7 +8,10 @@
 //! imported onto an existing master in 45 s, and again unchanged in
 //! 10 s. Design 936's: a 100,000-row first import on a ledger catalogue,
 //! its numbers in one request to the ledger's stand-in, within the same
-//! 20 s, and 100,000 numbers asked and read in 2 s. With
+//! 20 s, and 100,000 numbers asked and read in 2 s. Design 937's: 10,000
+//! documents (640 MiB) beside them loaded by a cold daemon in 2.5 s; a
+//! cold check hashing them in 3 s and a warm one in 1 s; document
+//! where-used across 10 checkouts in 1 s. With
 //! `RYUPLM_BARS=1` the bars are asserted as they are, else ten times
 //! looser (a shared CI runner is no measuring instrument). Run with
 //! `--nocapture` to see the times.
@@ -656,4 +659,189 @@ fn a_hundred_thousand_numbers_from_the_ledger() {
         Duration::from_secs(2),
     );
     assert_eq!(more["numbers"][0], "MECH-100001");
+}
+
+/// `m` documents of `size` bytes written into the catalogue at `root`,
+/// numbered `DOC-<k>`; the first `named` items each naming the first
+/// document.
+fn write_documents(root: &Path, m: usize, size: usize, named: usize) -> Vec<String> {
+    let mut ids = Vec::with_capacity(m);
+    let mut seeded = ryuplm::ids::Seeded::new("bar.documents");
+    for k in 0..m {
+        let id = seeded.next().unwrap();
+        let mut bytes = vec![0u8; size];
+        let mut h = blake3::Hasher::new();
+        h.update(&(k as u64).to_le_bytes());
+        h.finalize_xof().fill(&mut bytes);
+        let d = ryuplm::document::Document::new(
+            &format!("DOC-{k:05}"),
+            "Spec",
+            ryuplm::document::File::of("spec.pdf", &bytes, None).unwrap(),
+        );
+        for (p, b) in [
+            (ryuplm::ids::document_path(&id), d.to_text().into_bytes()),
+            (ryuplm::ids::bytes_path(&id, "spec.pdf"), bytes),
+        ] {
+            let at = root.join(p);
+            std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+            std::fs::write(at, b).unwrap();
+        }
+        ids.push(id.to_string());
+    }
+    let items: Vec<std::path::PathBuf> = walk_items(root).into_iter().take(named).collect();
+    for p in items {
+        let id = ryuplm::ids::item_of(&rel(root, &p)).unwrap();
+        let mut item = ryuplm::item::Item::read(&id, &std::fs::read(&p).unwrap()).unwrap();
+        item.documents
+            .push(ryuplm::document::DocRef::parse(&ids[0]).unwrap());
+        std::fs::write(&p, item.to_text()).unwrap();
+    }
+    ids
+}
+
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "release only: the bars time a release build"
+)]
+fn ten_thousand_documents() {
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path().join("big");
+    std::fs::create_dir_all(&root).unwrap();
+    let root = root.canonicalize().unwrap();
+    write_catalogue(&root, "bar", 100_000);
+    write_documents(&root, 10_000, 64 << 10, 0);
+    let run = d.path().join("run");
+    let t = Instant::now();
+    let out = Command::cargo_bin("ryuplm")
+        .unwrap()
+        .current_dir(&root)
+        .env("RYUPLM_RUNTIME_DIR", &run)
+        .env("RYUPLM_CONFIG_DIR", d.path().join("config"))
+        .env_remove("RYUPLM_NO_DAEMON")
+        .arg("info")
+        .output()
+        .unwrap();
+    within(
+        "cold daemon load of 100,000 items and 10,000 documents (640 MiB)",
+        t.elapsed(),
+        Duration::from_millis(2500),
+    );
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["result"]["documents"], 10_000, "{v}");
+    let _ = Command::cargo_bin("ryuplm")
+        .unwrap()
+        .current_dir(&root)
+        .env("RYUPLM_RUNTIME_DIR", &run)
+        .args(["daemon", "stop"])
+        .output();
+    // A cold check: a fresh process's session, every file hashed.
+    let mut slot = None;
+    let t = Instant::now();
+    ask(&mut slot, &root, Request::ProjectInfo {});
+    let _ = ryuplm::server::handle_safely(
+        &mut slot,
+        None,
+        None,
+        &root,
+        Request::Check {
+            within: vec![],
+            against: None,
+        },
+    );
+    within(
+        "cold check hashing 10,000 documents",
+        t.elapsed(),
+        Duration::from_secs(3),
+    );
+    // Warm: nothing hashed again.
+    let t = Instant::now();
+    let _ = ryuplm::server::handle_safely(
+        &mut slot,
+        None,
+        None,
+        &root,
+        Request::Check {
+            within: vec![],
+            against: None,
+        },
+    );
+    within(
+        "warm check of 100,000 items and 10,000 documents",
+        t.elapsed(),
+        Duration::from_secs(1),
+    );
+}
+
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "release only: the bars time a release build"
+)]
+fn document_where_used_across_ten_checkouts() {
+    let d = tempfile::tempdir().unwrap();
+    let top = d.path().canonicalize().unwrap();
+    let here = top.join("c0");
+    std::fs::create_dir_all(&here).unwrap();
+    write_catalogue(&here, "bar0", 10_000);
+    let doc = write_documents(&here, 1, 1024, 100).remove(0);
+    let project =
+        ryuplm::catalogue::Manifest::read(&std::fs::read(here.join("ryuplm.json")).unwrap())
+            .unwrap()
+            .project;
+    for k in 1..10 {
+        let c = top.join(format!("c{k}"));
+        std::fs::create_dir_all(&c).unwrap();
+        write_catalogue(&c, &format!("bar{k}"), 10_000);
+        // Each names c0's document from 100 of its items.
+        for p in walk_items(&c).into_iter().take(100) {
+            let id = ryuplm::ids::item_of(&rel(&c, &p)).unwrap();
+            let mut item = ryuplm::item::Item::read(&id, &std::fs::read(&p).unwrap()).unwrap();
+            item.documents
+                .push(ryuplm::document::DocRef::parse(&format!("{project}:{doc}")).unwrap());
+            std::fs::write(&p, item.to_text()).unwrap();
+        }
+    }
+    let mut slot = None;
+    ask(&mut slot, &here, Request::ProjectInfo {});
+    let t = Instant::now();
+    let v = ask(
+        &mut slot,
+        &here,
+        Request::DocumentWhereUsed {
+            document: doc,
+            within: vec![top.display().to_string()],
+            no_dependents: true,
+            working: false,
+        },
+    );
+    within(
+        "document where-used across 10 checkouts of 10,000 items",
+        t.elapsed(),
+        Duration::from_secs(1),
+    );
+    assert_eq!(
+        v["working"].as_array().unwrap().len(),
+        1000,
+        "{}",
+        v["problems"]
+    );
+}
+
+fn walk_items(root: &Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    for shard in std::fs::read_dir(root.join("items")).unwrap().flatten() {
+        for f in std::fs::read_dir(shard.path()).unwrap().flatten() {
+            out.push(f.path());
+        }
+    }
+    out.sort();
+    out
+}
+
+fn rel(root: &Path, p: &Path) -> String {
+    p.strip_prefix(root)
+        .unwrap()
+        .to_string_lossy()
+        .replace('\\', "/")
 }

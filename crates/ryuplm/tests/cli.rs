@@ -261,6 +261,31 @@ fn every_protocol_method_has_a_command() {
     let commands: &[(&str, &[&str])] = &[
         ("project.info", &["info"]),
         ("item.create", &["item", "create"]),
+        (
+            "document.add",
+            &[
+                "document", "add", "../x.pdf", "--number", "D-1", "--title", "X",
+            ],
+        ),
+        ("document.show", &["document", "show", "D-1"]),
+        ("document.list", &["document", "list"]),
+        (
+            "document.edit",
+            &["document", "edit", "D-1", "--title", "Y"],
+        ),
+        ("document.renumber", &["document", "renumber", "D-1", "D-2"]),
+        (
+            "document.replace",
+            &["document", "replace", "D-1", "../x.pdf"],
+        ),
+        ("document.remove", &["document", "remove", "D-1"]),
+        (
+            "document.get",
+            &["document", "get", "D-1", "--out", "../y.pdf"],
+        ),
+        ("document.attach", &["document", "attach", "D-1", "A-1"]),
+        ("document.detach", &["document", "detach", "D-1", "A-1"]),
+        ("document.where_used", &["document", "where-used", "D-1"]),
         ("item.show", &["item", "show"]),
         ("item.list", &["item", "list"]),
         ("item.edit", &["item", "edit"]),
@@ -509,6 +534,105 @@ fn imports_from_the_cli() {
         &["import", "guess", "bom.csv", "--save", "bom"],
         "invalid_param",
         1,
+    );
+}
+
+#[test]
+fn documents_from_the_cli() {
+    let p = Pair::project();
+    for top in [&p.direct, &p.daemon] {
+        fs::write(top.join("spec.pdf"), b"%PDF-1.7 one").unwrap();
+        fs::write(top.join("spec v2.pdf"), b"%PDF-1.7 two!").unwrap();
+    }
+    p.ok(&[
+        "settings",
+        "edit",
+        "--scheme",
+        "doc",
+        "--scheme-kind",
+        "document",
+        "--pattern",
+        "DOC-\\d{4}",
+        "--next-template",
+        "DOC-{seq:4}",
+    ]);
+    let d = p.ok(&[
+        "document",
+        "add",
+        "../spec.pdf",
+        "--next",
+        "--title",
+        "Bracket spec",
+        "--type",
+        "specification",
+    ]);
+    assert_eq!(d["document"]["number"], "DOC-0001");
+    let id = d["document"]["id"].as_str().unwrap().to_owned();
+    let item = p.ok(&["item", "create", "100-200"])["item"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    p.ok(&["document", "attach", "DOC-0001", "100-200"]);
+    assert_eq!(
+        p.ok(&["document", "show", &id])["items"][0]["number"],
+        "100-200"
+    );
+    assert_eq!(
+        p.ok(&["document", "list", "--type", "specification"])["count"],
+        1
+    );
+    let (code, v) = p.both(&["check"]);
+    assert_eq!((code, &v["result"]["errors"]), (0, &json!(0)), "{v}");
+    let got = p.ok(&["document", "get", "DOC-0001", "--out", "../got.pdf"]);
+    assert_eq!(got["size"], 12);
+    for top in [&p.direct, &p.daemon] {
+        assert_eq!(fs::read(top.join("got.pdf")).unwrap(), b"%PDF-1.7 one");
+    }
+    // Bytes changed by hand fail check, both ways, until replaced.
+    let bytes = format!("p/documents/{}/{id}/spec.pdf", &id[..2]);
+    for top in [&p.direct, &p.daemon] {
+        fs::write(top.join(&bytes), b"tampered").unwrap();
+    }
+    p.fails(&["check"], "check_failed", 1);
+    p.ok(&["document", "replace", &id, "../spec v2.pdf"]);
+    let (code, _) = p.both(&["check"]);
+    assert_eq!(code, 0);
+    p.fails(&["document", "remove", &id], "document_in_use", 1);
+    p.ok(&["document", "detach", &id, &item]);
+    p.ok(&["document", "remove", &id]);
+    p.fails(&["document", "show", &id], "document_not_found", 1);
+    assert_eq!(p.files(&p.direct), p.files(&p.daemon));
+}
+
+#[test]
+fn a_replaced_document_is_undone_through_the_daemon() {
+    let p = Pair::project();
+    fs::write(p.daemon.join("a.pdf"), b"%PDF a").unwrap();
+    fs::write(p.daemon.join("b.pdf"), b"%PDF b").unwrap();
+    let (code, d) = p.run_in(
+        &p.daemon,
+        &[
+            "document", "add", "../a.pdf", "--number", "D-1", "--title", "A",
+        ],
+    );
+    assert_eq!(code, 0, "{d}");
+    let id = d["result"]["document"]["id"].as_str().unwrap().to_owned();
+    let (code, _) = p.run_in(&p.daemon, &["document", "replace", "D-1", "../b.pdf"]);
+    assert_eq!(code, 0);
+    let (code, _) = p.run_in(&p.daemon, &["undo"]);
+    assert_eq!(code, 0);
+    let back = p
+        .daemon
+        .join(format!("p/documents/{}/{id}/a.pdf", &id[..2]));
+    assert_eq!(
+        fs::read(back).unwrap(),
+        b"%PDF a",
+        "undo brings the old bytes back"
+    );
+    assert!(
+        !p.daemon
+            .join(format!("p/documents/{}/{id}/b.pdf", &id[..2]))
+            .exists()
     );
 }
 

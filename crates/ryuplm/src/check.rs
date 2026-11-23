@@ -69,6 +69,7 @@ fn base(session: &mut Session, rev: &str, within: &[String]) -> Result<(String, 
         &others,
         &crate::reps::At::Commit(commit.clone()),
     ));
+    faults.extend(crate::documents::elsewhere(&cat, &others));
     Ok((commit, Some(faults.iter().map(key).collect())))
 }
 
@@ -94,6 +95,7 @@ pub fn report(session: &mut Session, within: &[String], against: Option<&str>) -
         &others,
         &crate::reps::At::Working,
     ));
+    faults.extend(crate::documents::elsewhere(session.catalogue(), &others));
     let release = crate::release::findings(session)?;
     let errors = faults.iter().filter(|f| f.is_error()).count()
         + release.iter().filter(|f| f["severity"] == "error").count();

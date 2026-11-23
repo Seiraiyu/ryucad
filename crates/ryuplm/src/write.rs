@@ -66,6 +66,18 @@ pub fn proposed(session: &Session, writes: &Writes) -> Files {
     f
 }
 
+/// Binary files to write, by path: documents' bytes (design 937).
+pub type Bytes = Vec<(String, std::sync::Arc<[u8]>)>;
+
+/// The session's files with `writes` and `bytes` applied, in memory.
+pub fn proposed_with(session: &Session, writes: &Writes, bytes: &Bytes) -> Files {
+    let mut f = proposed(session, writes);
+    for (p, b) in bytes {
+        f.insert(p.clone(), b.clone());
+    }
+    f
+}
+
 /// Judges the catalogue's own files only: numbers elsewhere are warnings
 /// and never refuse, so a write never reads other folders.
 fn faults(files: &Files, cat: &Catalogue) -> Vec<Fault> {
@@ -74,18 +86,28 @@ fn faults(files: &Files, cat: &Catalogue) -> Vec<Fault> {
 
 /// The error faults `writes` would add: what `commit` refuses.
 pub fn would_add(session: &Session, writes: &Writes) -> Result<Vec<Fault>> {
-    let after_files = proposed(session, writes);
+    would_add_with(session, writes, &Vec::new())
+}
+
+/// [`would_add`], with binary files written too.
+pub fn would_add_with(session: &Session, writes: &Writes, bytes: &Bytes) -> Result<Vec<Fault>> {
+    let after_files = proposed_with(session, writes, bytes);
     let after = Catalogue::load(&after_files)?;
     let before = faults(&session.snapshot(), session.catalogue());
     Ok(added_errors(&before, &faults(&after_files, &after)))
 }
 
 pub fn commit(session: &mut Session, what: &str, writes: Writes) -> Result<()> {
-    let added = would_add(session, &writes)?;
+    commit_with(session, what, writes, Vec::new())
+}
+
+/// [`commit`], with binary files written too.
+pub fn commit_with(session: &mut Session, what: &str, writes: Writes, bytes: Bytes) -> Result<()> {
+    let added = would_add_with(session, &writes, &bytes)?;
     if !added.is_empty() {
         return Err(refused(what, &added));
     }
-    write_all(session.root(), &writes)?;
+    write_all(session.root(), &writes, &bytes)?;
     session.reload()
 }
 
@@ -96,7 +118,7 @@ const PARALLEL_FROM: usize = 64;
 /// folders it empties), files on up to eight threads once there are many,
 /// with syncs deferred and all waited for before returning (#270), so a
 /// 100,000-item import waits on the journal once.
-fn write_all(root: &std::path::Path, writes: &Writes) -> Result<()> {
+fn write_all(root: &std::path::Path, writes: &Writes, bytes: &Bytes) -> Result<()> {
     let (files, deletes): (Vec<_>, Vec<_>) = writes.0.iter().partition(|(_, t)| t.is_some());
     if files.len() < PARALLEL_FROM {
         for (p, t) in &files {
@@ -135,6 +157,9 @@ fn write_all(root: &std::path::Path, writes: &Writes) -> Result<()> {
         crate::source::flush_syncs();
         results.into_iter().collect::<Result<()>>()?;
     }
+    for (p, b) in bytes {
+        crate::source::write_atomic(&path_of(root, p), &**b)?;
+    }
     for (p, _) in &deletes {
         remove_file(root, &path_of(root, p))?;
     }
@@ -160,6 +185,41 @@ fn sync_filesystem(_: &std::path::Path) {}
 mod tests {
     use super::*;
     use crate::item::Item;
+
+    #[test]
+    fn bytes_are_written_beside_their_record_and_tracked() {
+        let (_d, root) = crate::server::tests::catalogue();
+        let mut session = Session::open(&root).unwrap();
+        let id = crate::id::Id::parse("k3v9q2m8x4c1p", "document").unwrap();
+        let bytes: &[u8] = b"%PDF-1.7 bytes";
+        let rec = crate::document::Document::new(
+            "DOC-1",
+            "Spec",
+            crate::document::File::of("Spec.pdf", bytes, None).unwrap(),
+        );
+        commit_with(
+            &mut session,
+            "adding",
+            Writes(vec![(crate::ids::document_path(&id), Some(rec.to_text()))]),
+            vec![(
+                crate::ids::bytes_path(&id, "Spec.pdf"),
+                std::sync::Arc::from(bytes),
+            )],
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(root.join("documents/k3/k3v9q2m8x4c1p/Spec.pdf")).unwrap(),
+            bytes
+        );
+        assert!(
+            session
+                .files()
+                .contains_key("documents/k3/k3v9q2m8x4c1p/Spec.pdf")
+        );
+        assert_eq!(session.catalogue().documents.len(), 1);
+        assert!(session.document_revision(&id).is_some());
+        assert!(session.revisions().contains_key("document/k3v9q2m8x4c1p"));
+    }
 
     #[test]
     fn a_large_write_lands_whole_and_synced() {

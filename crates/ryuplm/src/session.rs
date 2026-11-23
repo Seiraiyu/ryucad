@@ -101,6 +101,40 @@ pub fn tracked(root: &Path) -> Vec<(String, std::fs::Metadata)> {
         });
         out.extend(listed.into_iter().flatten());
     }
+    // Documents (design 937): files directly under documents/ and at each
+    // shard (records, and misplaced files, reported), then each document's
+    // folder of bytes, one level below its shard. Listed on threads by
+    // shard, as items are.
+    let docs = crate::ids::DOCUMENTS;
+    out.extend(files(docs));
+    let shards: Vec<String> = dirs(docs)
+        .into_iter()
+        .map(|d| format!("{docs}/{d}"))
+        .collect();
+    let per = shards.len().div_ceil(8).max(1);
+    let listed: Vec<Vec<(String, std::fs::Metadata)>> = std::thread::scope(|s| {
+        let handles: Vec<_> = shards
+            .chunks(per)
+            .map(|c| {
+                let (files, dirs) = (&files, &dirs);
+                s.spawn(move || {
+                    let mut v = Vec::new();
+                    for shard in c {
+                        v.extend(files(shard));
+                        for d in dirs(shard) {
+                            v.extend(files(&format!("{shard}/{d}")));
+                        }
+                    }
+                    v
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("a listing thread doesn't panic"))
+            .collect()
+    });
+    out.extend(listed.into_iter().flatten());
     // Mapping files (`imports/<name>.json`): one level, no shards.
     out.extend(files(crate::import::IMPORTS));
     out
@@ -197,12 +231,29 @@ impl Session {
 
     /// The catalogue's revision: BLAKE3 over every tracked file's path and
     /// bytes, 32 hex digits. What `--expect` guards on catalogue-wide
-    /// writes.
+    /// writes. A document's bytes go in as their own BLAKE3
+    /// ([`crate::digest`], design 937): hashed once per allocation on
+    /// threads, so a revision asked again, or after judging, doesn't read
+    /// hundreds of megabytes again.
     pub fn revision(&self) -> String {
+        let files = self.files();
+        let bulky: Vec<std::sync::Arc<[u8]>> = files
+            .iter()
+            .filter(|(p, _)| crate::ids::bytes_of(p).is_some())
+            .map(|(_, b)| b.clone())
+            .collect();
+        let mut digests = crate::digest::all(&bulky).into_iter();
         let mut h = blake3::Hasher::new();
         h.update(b"ryuplm.catalogue.1");
-        for (p, b) in self.files().iter() {
-            for piece in [p.as_bytes(), b] {
+        for (p, b) in files.iter() {
+            let digest;
+            let body: &[u8] = if crate::ids::bytes_of(p).is_some() {
+                digest = digests.next().expect("one digest per bytes file");
+                digest.as_bytes()
+            } else {
+                b
+            };
+            for piece in [p.as_bytes(), body] {
                 h.update(&(piece.len() as u64).to_le_bytes());
                 h.update(piece);
             }
@@ -219,6 +270,16 @@ impl Session {
         Some(h.finalize().to_hex()[..32].to_owned())
     }
 
+    /// Document `id`'s revision: BLAKE3 over its record's bytes, 32 hex
+    /// digits. The record names the bytes by hash, so it is the whole.
+    pub fn document_revision(&self, id: &crate::id::Id) -> Option<String> {
+        let b = self.files().get(&crate::ids::document_path(id)).cloned()?;
+        let mut h = blake3::Hasher::new();
+        h.update(b"ryuplm.document.1");
+        h.update(&b);
+        Some(h.finalize().to_hex()[..32].to_owned())
+    }
+
     /// Every item's revision, and `catalogue`'s: what `project.changed`
     /// tells subscribers.
     pub fn revisions(&self) -> std::collections::BTreeMap<String, serde_json::Value> {
@@ -228,6 +289,11 @@ impl Session {
             .keys()
             .filter_map(|id| Some((format!("item/{id}"), self.item_revision(id)?.into())))
             .collect();
+        out.extend(
+            self.catalogue.documents.keys().filter_map(|id| {
+                Some((format!("document/{id}"), self.document_revision(id)?.into()))
+            }),
+        );
         out.insert("catalogue".into(), self.revision().into());
         out
     }
