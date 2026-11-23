@@ -20,7 +20,8 @@
 //! The file is written at the lowest format holding its keys: 1, or 2
 //! with `approvals` (design 261), 5 with numbering schemes
 //! (`part_number.schemes`, design 734), 6 with the ledger
-//! (`part_number.ledger`, design 936). A key a newer format added is
+//! (`part_number.ledger`, design 936), 7 with document schemes (a
+//! scheme's `kind`, design 937). A key a newer format added is
 //! refused in a file that declares an older one.
 
 use crate::PDM_CONFIG;
@@ -36,8 +37,8 @@ pub const KIND: &str = "ryupdm.config";
 /// The newest format this build reads: 2 added `approvals` (and
 /// `dependencies`), 3 teams in its rules and revoked keys, 4 `packages`
 /// (design 436), 5 `part_number.schemes` (design 734), 6
-/// `part_number.ledger` (design 936).
-pub const FORMAT: u64 = 6;
+/// `part_number.ledger` (design 936), 7 schemes' `kind` (design 937).
+pub const FORMAT: u64 = 7;
 
 /// How a part's revisions are labelled. Labels are always derived from the
 /// scheme, never typed.
@@ -384,12 +385,38 @@ impl Template {
     }
 }
 
+/// What a numbering scheme numbers: items (the default), or documents
+/// (format 7, ryuplm design 937). A document scheme never numbers an item.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SchemeKind {
+    #[default]
+    Item,
+    Document,
+}
+
+impl SchemeKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SchemeKind::Item => "item",
+            SchemeKind::Document => "document",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<SchemeKind> {
+        [SchemeKind::Item, SchemeKind::Document]
+            .into_iter()
+            .find(|k| k.as_str() == s)
+    }
+}
+
 /// A named numbering scheme (format 5): the numbers of items of `class`
 /// (every class when `None`) that match `pattern`, `next` making new ones.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NumberScheme {
     pub name: String,
     pub class: Option<String>,
+    /// What it numbers (format 7): items unless written.
+    pub kind: SchemeKind,
     pub pattern: Pattern,
     pub next: Option<Template>,
 }
@@ -400,13 +427,16 @@ impl NumberScheme {
         if let Some(c) = &self.class {
             v["class"] = json!(c);
         }
+        if self.kind == SchemeKind::Document {
+            v["kind"] = json!(self.kind.as_str());
+        }
         if let Some(n) = &self.next {
             v["next"] = json!(n.text());
         }
         v
     }
 
-    fn from_json(v: &Value, at: &str) -> Result<NumberScheme> {
+    fn from_json(v: &Value, at: &str, declared: u64) -> Result<NumberScheme> {
         let mut o = Obj::new(v, at)?;
         let name = o.take("name")?;
         let name = name
@@ -428,6 +458,22 @@ impl NumberScheme {
                     .to_owned(),
             ),
         };
+        let kind = match o.take_opt("kind") {
+            None => SchemeKind::Item,
+            Some(k) => {
+                let kind = k
+                    .as_str()
+                    .and_then(SchemeKind::parse)
+                    .ok_or_else(|| invalid(&format!("{at}/kind"), "kind is item or document"))?;
+                if kind == SchemeKind::Document && declared < 7 {
+                    return Err(invalid(
+                        &format!("{at}/kind"),
+                        "document schemes need format 7: write the file at format 7",
+                    ));
+                }
+                kind
+            }
+        };
         let p = o.take("pattern")?;
         let p = p
             .as_str()
@@ -446,6 +492,7 @@ impl NumberScheme {
         Ok(NumberScheme {
             name,
             class,
+            kind,
             pattern,
             next,
         })
@@ -524,7 +571,9 @@ impl Config {
 
     /// The lowest format that holds these settings.
     pub fn format(&self) -> u64 {
-        if self.ledger {
+        if self.schemes.iter().any(|s| s.kind == SchemeKind::Document) {
+            7
+        } else if self.ledger {
             6
         } else if !self.schemes.is_empty() {
             5
@@ -654,7 +703,7 @@ impl Config {
                     .ok_or_else(|| invalid("/part_number/schemes", "schemes must be a list"))?;
                 for (i, s) in items.iter().enumerate() {
                     let at = format!("/part_number/schemes/{i}");
-                    let s = NumberScheme::from_json(s, &at)?;
+                    let s = NumberScheme::from_json(s, &at, declared)?;
                     if c.schemes.iter().any(|o| o.name == s.name) {
                         return Err(invalid(
                             &format!("{at}/name"),
@@ -1079,6 +1128,39 @@ mod tests {
                            "format": 3, "kind": "ryupdm.config"});
         assert_eq!(Config::from_json(&plain).unwrap().to_json()["format"], 2);
     }
+    #[test]
+    fn document_schemes_need_format_7_and_write_it() {
+        let v = json!({"format": 7, "kind": "ryupdm.config", "release_branch": "main", "revisions": "letters",
+            "part_number": {"schemes": [
+                {"name": "mech", "pattern": "MECH-\\d{5}", "next": "MECH-{seq:5}"},
+                {"name": "doc", "kind": "document", "pattern": "DOC-\\d{4}", "next": "DOC-{seq:4}"}]}});
+        let c = Config::from_json(&v).unwrap();
+        assert_eq!(c.schemes[0].kind, SchemeKind::Item);
+        assert_eq!(c.schemes[1].kind, SchemeKind::Document);
+        assert_eq!(c.format(), 7);
+        let back = c.to_json();
+        assert_eq!(back["part_number"]["schemes"][1]["kind"], "document");
+        assert!(
+            back["part_number"]["schemes"][0].get("kind").is_none(),
+            "item is unwritten"
+        );
+        assert_eq!(Config::from_json(&back).unwrap(), c);
+        // Item schemes alone stay format 5; a document scheme at 6 is refused.
+        let mut six = v.clone();
+        six["format"] = json!(6);
+        let e = Config::from_json(&six).unwrap_err();
+        assert_eq!(e.details["pointer"], "/part_number/schemes/1/kind");
+        let mut items_only = c.clone();
+        items_only.schemes.truncate(1);
+        assert_eq!(items_only.format(), 5);
+        let mut bad = v.clone();
+        bad["part_number"]["schemes"][1]["kind"] = json!("drawing");
+        assert_eq!(
+            Config::from_json(&bad).unwrap_err().details["pointer"],
+            "/part_number/schemes/1/kind"
+        );
+    }
+
     #[test]
     fn schemes_need_format_5_and_write_it() {
         let v = json!({

@@ -26,6 +26,9 @@ pub struct Change {
     pub scheme_class: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_template: Option<String>,
+    /// With `scheme`: `item` (the default) or `document` (design 937).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheme_kind: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub property: Option<String>,
     /// With `property`: its declaration, as `ryupdm.json` writes one.
@@ -120,6 +123,15 @@ pub fn edit(session: &mut Session, change: Change, expected: Option<&str>) -> Re
             let s = NumberScheme {
                 name: name.clone(),
                 class: change.scheme_class.clone(),
+                kind: match change.scheme_kind.as_deref() {
+                    None | Some("item") => ryupdm::config::SchemeKind::Item,
+                    Some("document") => ryupdm::config::SchemeKind::Document,
+                    Some(o) => {
+                        return Err(bad(&format!(
+                            "a scheme's kind is item or document, not {o:?}"
+                        )));
+                    }
+                },
                 pattern,
                 next,
             };

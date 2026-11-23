@@ -508,6 +508,9 @@ enum SettingsCmd {
         pattern: Option<String>,
         #[arg(long)]
         scheme_class: Option<String>,
+        /// With --scheme: what it numbers, item (the default) or document.
+        #[arg(long)]
+        scheme_kind: Option<String>,
         #[arg(long)]
         next_template: Option<String>,
         #[arg(long)]
@@ -951,6 +954,7 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
             scheme,
             pattern,
             scheme_class,
+            scheme_kind,
             next_template,
             property,
             declaration,
@@ -971,6 +975,7 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
                         scheme: scheme.clone(),
                         pattern: pattern.clone(),
                         scheme_class: scheme_class.clone(),
+                        scheme_kind: scheme_kind.clone(),
                         next_template: next_template.clone(),
                         property: property.clone(),
                         declaration,
