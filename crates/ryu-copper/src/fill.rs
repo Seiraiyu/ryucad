@@ -72,6 +72,29 @@ pub fn union_all(ps: &[Polygons]) -> Polygons {
     poly::simplify(&rings, FillRule::Positive)
 }
 
+/// A thermal pad's four spokes, along its axes from its centre out past
+/// its gap by the least width.
+fn spokes(t: &ThermalPad, min_width: Nm) -> Vec<Polygons> {
+    let w = t.spoke / 2;
+    (0..4)
+        .map(|k| {
+            let length = t.half[k % 2] + t.gap + min_width.max(t.spoke);
+            let place = Place {
+                at: t.at,
+                rot: Mdeg::new(t.rotation_mdeg + 90_000 * k as i64),
+                mirror: false,
+                scale: None,
+            };
+            let ring: Vec<Point> = [(0, -w), (length, -w), (length, w), (0, w)]
+                .iter()
+                .map(|&(x, y)| place.point(Point::new(x, y)))
+                .collect();
+            // A turn off the axes rounds each corner to the nanometre.
+            poly::simplify(&Rings::new(vec![ring], 1), FillRule::NonZero)
+        })
+        .collect()
+}
+
 /// The fill.
 pub fn fill(ask: &Ask) -> Fill {
     let cut = poly::difference(&ask.area, &union_all(&ask.obstacles));
@@ -80,11 +103,31 @@ pub fn fill(ask: &Ask) -> Fill {
     } else {
         cut
     };
+    let blocked = union_all(&ask.spoke_obstacles);
+    let mut kept: Vec<Polygons> = vec![opened.clone()];
+    let mut counts = Vec::with_capacity(ask.thermals.len());
+    for t in &ask.thermals {
+        let mut n = 0u8;
+        for s in spokes(t, ask.min_width) {
+            let reaches = !poly::intersection(&s, &opened).is_empty();
+            let clear = poly::intersection(&s, &blocked).is_empty();
+            if reaches && clear {
+                kept.push(s);
+                n += 1;
+            }
+        }
+        counts.push(n);
+    }
+    let joined = if kept.len() > 1 {
+        union_all(&kept)
+    } else {
+        opened
+    };
     Fill {
-        polygons: opened,
+        polygons: joined,
         islands_removed: 0,
         uncertain: Vec::new(),
-        spokes: vec![0; ask.thermals.len()],
+        spokes: counts,
     }
 }
 
@@ -153,5 +196,38 @@ pub(crate) mod tests {
             1,
             "a wide enough neck stays"
         );
+    }
+    fn thermal(at: Point) -> ThermalPad {
+        ThermalPad {
+            at,
+            rotation_mdeg: 0,
+            half: [MM / 2, MM / 2],
+            gap: MM / 2,
+            spoke: MM / 4,
+        }
+    }
+
+    #[test]
+    fn a_thermal_pad_gets_four_spokes_and_loses_one_per_blocked_side() {
+        let pad = rect(9 * MM / 2, 9 * MM / 2, 11 * MM / 2, 11 * MM / 2);
+        let mut a = ask(rect(0, 0, 10 * MM, 10 * MM));
+        // The pad's own gap: the pad grown by 0.5 mm.
+        a.obstacles.push(poly::grow(&pad, MM / 2, &opts()));
+        a.thermals.push(thermal(Point::new(5 * MM, 5 * MM)));
+        a.min_width = MM / 5;
+        let f = fill(&a);
+        assert_eq!(f.spokes, [4]);
+        assert_eq!(f.polygons.polygons.len(), 1);
+        assert!(
+            f.polygons
+                .contains(Point::new(5 * MM, 5 * MM + 3 * MM / 4))
+                .is_yes(),
+            "the up spoke crosses the gap"
+        );
+        // Another net's copper to the right, in the spoke's way.
+        let other = rect(6 * MM + MM / 10, 4 * MM, 7 * MM, 6 * MM);
+        a.obstacles.push(other.clone());
+        a.spoke_obstacles.push(other);
+        assert_eq!(fill(&a).spokes, [3]);
     }
 }
