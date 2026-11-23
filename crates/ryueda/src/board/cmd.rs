@@ -328,9 +328,18 @@ pub fn drc(session: &mut Session, board: &str, codes: &[String]) -> Result<Value
         "findings": owned,
         "counts": counts(&owned),
         "errors": errors,
-        "warnings": owned.len() - errors,
+        "warnings": owned
+            .iter()
+            .filter(|f| f.severity == crate::fault::Severity::Warning)
+            .count(),
         "incomplete": c.incomplete,
     });
+    // ryueda 7.B: waived findings counted only when there are any, so
+    // boards without waivers answer as before.
+    let waived = owned.iter().filter(|f| f.waived.is_some()).count();
+    if waived > 0 {
+        v["waived"] = json!(waived);
+    }
     // ryueda 7.A's rules, shown for boards with a stackup of their own:
     // added to `rules` they would move every stage 5 answer.
     if board_of(&session.project().boards[&id]).is_ok_and(|f| f.stackup.is_some()) {
@@ -373,7 +382,7 @@ pub fn status(session: &mut Session, board: &str) -> Result<Value> {
         .iter()
         .filter(|f| f.code == Code::BoardUnplaced)
         .count();
-    Ok(json!({
+    let mut v = json!({
         "board": format!("board/{id}"),
         "revision": b.revision,
         "placed": b.placements.len(),
@@ -383,7 +392,11 @@ pub fn status(session: &mut Session, board: &str) -> Result<Value> {
         "errors": c.errors(),
         "warnings": c.warnings(),
         "incomplete": c.incomplete,
-    }))
+    });
+    if c.waived() > 0 {
+        v["waived"] = json!(c.waived());
+    }
+    Ok(v)
 }
 
 pub fn list(p: &Project) -> Value {

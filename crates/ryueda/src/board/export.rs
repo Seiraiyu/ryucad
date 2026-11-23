@@ -124,6 +124,10 @@ pub fn package(
         "counts": cmd::counts(&check.findings),
         "incomplete": check.incomplete,
     });
+    let mut drc = drc;
+    if check.waived() > 0 {
+        drc["waived"] = json!(check.waived());
+    }
     if errors > 0 && !allow_errors {
         return Err(Error::new(
             Code::DrcFailed,
@@ -192,6 +196,22 @@ pub fn package(
     if let Some(st) = &file.stackup {
         manifest["copper_layers"] = json!(st.copper());
         manifest["stackup"] = json!(st);
+    }
+    // ryueda 7.B: the waivers the package was released under, only when
+    // the board has any.
+    if let Some(r) = b.rules.as_ref().and_then(|l| l.item.as_ref().ok())
+        && !r.waivers.is_empty()
+    {
+        manifest["waivers"] = json!(
+            r.waivers
+                .iter()
+                .map(|(id, w)| {
+                    let mut v = serde_json::to_value(w).expect("serialises");
+                    v["id"] = json!(id);
+                    v
+                })
+                .collect::<Vec<_>>()
+        );
     }
     files.push(File {
         name: MANIFEST.to_owned(),

@@ -1399,13 +1399,19 @@ pub fn section(p: &Project) -> Vec<Value> {
     p.boards
         .iter()
         .map(|(id, b)| match check(p, b) {
-            Ok(c) => json!({
-                "board": format!("board/{id}"),
-                "revision": b.revision,
-                "findings": c.findings,
-                "errors": c.errors(),
-                "warnings": c.warnings(),
-            }),
+            Ok(c) => {
+                let mut v = json!({
+                    "board": format!("board/{id}"),
+                    "revision": b.revision,
+                    "findings": c.findings,
+                    "errors": c.errors(),
+                    "warnings": c.warnings(),
+                });
+                if c.waived() > 0 {
+                    v["waived"] = json!(c.waived());
+                }
+                v
+            }
             Err(e) => json!({"board": format!("board/{id}"), "error": e}),
         })
         .collect()

@@ -5930,12 +5930,90 @@ fn findings_waived_from_the_cli() {
         1,
     );
     p.fails(&["board", "waive", id, fid], "invalid_param", 1); // no reason
+    // Every other gap under 0.3 mm waived too: the board passes again.
+    let gaps: Vec<String> = report["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["code"] == "drc_clearance")
+        .map(|f| f["id"].as_str().unwrap().to_owned())
+        .collect();
+    let others: Vec<&Value> = report["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["severity"] == "error" && f["code"] != "drc_clearance")
+        .map(|f| &f["code"])
+        .collect();
+    assert!(others.is_empty(), "only gaps fail at 0.3 mm: {d}");
+    for g in gaps.iter().filter(|g| g.as_str() != fid) {
+        p.ok(&[
+            "board",
+            "waive",
+            id,
+            g,
+            "--reason",
+            "checked against the fab's DFM",
+        ]);
+    }
+    let ok = p.ok(&["board", "drc", id]);
+    assert_eq!(ok["errors"], 0, "{ok}");
+    assert_eq!(ok["waived"], gaps.len(), "{ok}");
+    let listed = ok["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["id"] == fid)
+        .unwrap_or_else(|| panic!("the waived gap still listed: {ok}"));
+    assert!(listed["waived"].is_object(), "{listed}");
+    let s = p.ok(&["board", "status", id]);
+    assert_eq!(
+        (&s["errors"], &s["waived"]),
+        (&json!(0), &json!(gaps.len())),
+        "{s}"
+    );
+    let (_, v) = p.both_in("board", &["check"]);
+    let creport = if v["ok"] == true {
+        &v["result"]
+    } else {
+        &v["error"]["details"]["report"]
+    };
+    let ours = creport["boards"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["board"] == format!("board/{id}"))
+        .unwrap();
+    assert_eq!(
+        (&ours["errors"], &ours["waived"]),
+        (&json!(0), &json!(gaps.len())),
+        "{ours}"
+    );
+    let r = p.ok(&["board", "export", id, "--out", "fabw"]);
+    assert_eq!(r["allow_errors"], false, "{r}");
+    for top in [&p.direct, &p.daemon] {
+        let m: Value = serde_json::from_str(
+            &fs::read_to_string(top.join("board/fabw/manifest.json")).unwrap(),
+        )
+        .unwrap();
+        let ws = m["waivers"].as_array().unwrap_or_else(|| panic!("{m}"));
+        assert_eq!(ws.len(), gaps.len(), "{m}");
+        let w = ws.iter().find(|w| w["id"] == fid).unwrap();
+        for k in ["code", "refs", "reason", "by", "limit"] {
+            assert!(!w[k].is_null(), "{k} in {w}");
+        }
+        assert_eq!(m["drc"]["waived"], gaps.len(), "{m}");
+    }
+
     p.ok(&["board", "waive", id, fid, "--remove"]);
     p.fails(
         &["board", "waive", id, fid, "--remove"],
         "finding_not_found",
         1,
     );
+    for g in gaps.iter().filter(|g| g.as_str() != fid) {
+        p.ok(&["board", "waive", id, g, "--remove"]);
+    }
     p.ok(&["board", "rules", "unset", id, "clearance"]);
 
     // A short can't be waived: a second board with a track drawn across
