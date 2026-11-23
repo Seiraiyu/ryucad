@@ -184,6 +184,14 @@ pub fn show(ui: &mut egui::Ui, icon: Icon, size: f32, colour: Color32) -> egui::
     r
 }
 
+/// The room an icon [`button`] of `size` points takes: its icon and frame.
+pub fn button_size(size: f32) -> Vec2 {
+    Vec2::splat(size) + 2.0 * BUTTON_PAD
+}
+
+/// The frame round an icon [`button`]'s icon.
+const BUTTON_PAD: Vec2 = Vec2::new(4.0, 3.0);
+
 /// An icon button: `size` points of icon in a frame, named `title` for
 /// screen readers and the window tests, with `title` (and its keys) as
 /// its tooltip; `on` draws it chosen. Disabled, it says `reason` on hover.
@@ -196,9 +204,9 @@ pub fn button(
     on: bool,
     enabled: Result<(), &str>,
 ) -> egui::Response {
-    let pad = Vec2::new(4.0, 3.0);
+    let pad = BUTTON_PAD;
     let (rect, r) = ui.allocate_exact_size(
-        Vec2::splat(size) + 2.0 * pad,
+        button_size(size),
         if enabled.is_ok() {
             egui::Sense::click()
         } else {
