@@ -46,6 +46,8 @@ pub enum PartKind {
     Component,
     /// ryuplm's: an item of a catalogue (design 734).
     Item,
+    /// ryuplm's: a controlled document of a catalogue (design 937).
+    Document,
 }
 
 impl PartKind {
@@ -56,6 +58,7 @@ impl PartKind {
             PartKind::Design => "design",
             PartKind::Component => "component",
             PartKind::Item => "item",
+            PartKind::Document => "document",
         }
     }
 
@@ -67,6 +70,7 @@ impl PartKind {
             PartKind::Design,
             PartKind::Component,
             PartKind::Item,
+            PartKind::Document,
         ]
         .into_iter()
         .find(|k| k.as_str() == s)
@@ -85,6 +89,15 @@ pub trait Product: ryu_git::Layout {
 
     /// Where `part`'s properties live, relative to the project.
     fn properties_path(part: &Id) -> String;
+
+    /// Where `part`'s properties live in `src`: [`Product::properties_path`]
+    /// unless the product's parts of several kinds share one ID space
+    /// (ryuplm's items and documents, design 937), when only the files say
+    /// which kind `part` is.
+    fn properties_path_in(src: &dyn Source, part: &Id) -> String {
+        let _ = src;
+        Self::properties_path(part)
+    }
 
     /// The files `part`'s revision reads at a commit.
     fn part_files(part: &Id) -> PartFiles;
@@ -165,11 +178,21 @@ mod tests {
             (PartKind::Design, "design"),
             (PartKind::Component, "component"),
             (PartKind::Item, "item"),
+            (PartKind::Document, "document"),
         ] {
             assert_eq!(k.as_str(), s);
             assert_eq!(PartKind::parse(s), Some(k));
             assert_eq!(serde_json::to_value(k).unwrap(), s);
         }
-        assert_eq!(PartKind::parse("document"), None);
+        assert_eq!(PartKind::parse("drawing"), None);
+    }
+
+    #[test]
+    fn properties_live_where_the_product_says_in_a_snapshot() {
+        use crate::product::Product;
+        use crate::testing::Toy;
+        let files: std::collections::BTreeMap<String, Vec<u8>> = Default::default();
+        let a = ryu_doc::id::Id::parse("a", "part").unwrap();
+        assert_eq!(Toy::properties_path_in(&files, &a), Toy::properties_path(&a));
     }
 }
