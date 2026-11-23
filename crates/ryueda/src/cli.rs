@@ -1800,6 +1800,13 @@ enum BoardCmd {
     /// parts or holes out.
     #[command(subcommand)]
     Keepout(KeepoutCmd),
+    /// Text on silk, fab, mask or a documentation layer.
+    #[command(subcommand)]
+    Text(TextCmd),
+    /// Drawings on silk, fab, mask or a documentation layer: lines,
+    /// rectangles, arcs, circles, polygons, Béziers, text.
+    #[command(subcommand)]
+    Drawing(DrawingCmd),
     /// The exact distance between two items (R1/1, track/t1, via/v1,
     /// hole/h1, R1/1#hole, R1 by its courtyard, net:NAME) on each copper
     /// layer they share, with the clearance the rules ask of them.
@@ -1964,6 +1971,67 @@ enum HoleCmd {
         board: String,
         #[arg(required = true)]
         holes: Vec<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+}
+
+#[derive(Subcommand)]
+enum TextCmd {
+    /// Text centred on --at on --layer (silk.top, silk.bottom, fab.*, mask.*,
+    /// drawings, comments, eco.1, eco.2, user.N); on a bottom layer it reads
+    /// from below. Copper layers are refused: copper is tracks and pours.
+    Add {
+        board: String,
+        #[arg(long)]
+        layer: String,
+        #[arg(long, value_name = "X,Y", allow_hyphen_values = true)]
+        at: String,
+        #[arg(long)]
+        text: String,
+        /// Character height and width (1mm by default).
+        #[arg(long)]
+        size: Option<String>,
+        /// Stroke width (a seventh of the size, at least 0.1mm, by default).
+        #[arg(long)]
+        thickness: Option<String>,
+        /// Degrees counterclockwise.
+        #[arg(long, allow_hyphen_values = true)]
+        rotation: Option<String>,
+        #[arg(long)]
+        id: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+}
+
+#[derive(Subcommand)]
+enum DrawingCmd {
+    /// Drawings from --ops, all or nothing.
+    Add {
+        board: String,
+        /// JSON: [{layer, type: line|rect|arc|circle|polygon|bezier|text, …,
+        /// id?}] as a footprint's graphics; integers are nanometres, strings
+        /// lengths; a text's rotation in degrees as "rotation".
+        #[arg(long, value_name = "OPS")]
+        ops: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Change a drawing's keys: --ops is a JSON object of them.
+    Edit {
+        board: String,
+        drawing: String,
+        #[arg(long, value_name = "OPS")]
+        ops: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Delete drawings by ID.
+    Delete {
+        board: String,
+        #[arg(required = true)]
+        drawings: Vec<String>,
         #[command(flatten)]
         expect: Expect,
     },
@@ -4264,6 +4332,54 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             a: a.clone(),
             b: b.clone(),
             layer: layer.clone(),
+        },
+        Command::Board(BoardCmd::Text(TextCmd::Add {
+            board,
+            layer,
+            at,
+            text,
+            size,
+            thickness,
+            rotation,
+            id,
+            expect,
+        })) => Request::BoardTextAdd {
+            board: board.clone(),
+            layer: layer.clone(),
+            at: pair_arg("--at", at)?,
+            text: text.clone(),
+            size: size.clone(),
+            thickness: thickness.clone(),
+            rotation: rotation.clone(),
+            id: id.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Board(BoardCmd::Drawing(DrawingCmd::Add { board, ops, expect })) => {
+            Request::BoardDrawingAdd {
+                board: board.clone(),
+                ops: json_arg("--ops", ops)?,
+                expected_revision: expect.expect.clone(),
+            }
+        }
+        Command::Board(BoardCmd::Drawing(DrawingCmd::Edit {
+            board,
+            drawing,
+            ops,
+            expect,
+        })) => Request::BoardDrawingEdit {
+            board: board.clone(),
+            drawing: drawing.clone(),
+            ops: json_arg("--ops", ops)?,
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Board(BoardCmd::Drawing(DrawingCmd::Delete {
+            board,
+            drawings,
+            expect,
+        })) => Request::BoardDrawingDelete {
+            board: board.clone(),
+            drawings: drawings.clone(),
+            expected_revision: expect.expect.clone(),
         },
         Command::Board(BoardCmd::Keepout(KeepoutCmd::Add {
             board,

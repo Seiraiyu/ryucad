@@ -851,6 +851,10 @@ fn every_protocol_method_has_a_command() {
         ("board.measure", &["board", "measure"]),
         ("board.group.list", &["board", "group", "list"]),
         ("board.keepout.add", &["board", "keepout", "add"]),
+        ("board.text.add", &["board", "text", "add"]),
+        ("board.drawing.add", &["board", "drawing", "add"]),
+        ("board.drawing.edit", &["board", "drawing", "edit"]),
+        ("board.drawing.delete", &["board", "drawing", "delete"]),
         ("board.keepout.edit", &["board", "keepout", "edit"]),
         ("board.keepout.delete", &["board", "keepout", "delete"]),
         ("board.group.move", &["board", "group", "move"]),
@@ -6286,4 +6290,89 @@ fn keepouts_from_the_cli() {
     );
     p.ok(&["board", "keepout", "delete", id, "k1"]);
     p.fails(&["board", "keepout", "delete", id, "k1"], "not_found", 1);
+}
+
+/// Text and drawings from the CLI (ryueda 7.C): text on the top and the
+/// bottom silk, in the silk Gerbers; a line on fab; copper refused;
+/// edited and deleted.
+#[test]
+fn text_and_drawings_from_the_cli() {
+    let p = Pair::breakout();
+    for args in breakout_board::script() {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        p.ok(&args);
+    }
+    let id = breakout_board::BOARD;
+    let gto = |dir: &str| -> Vec<u8> {
+        let e = std::fs::read_dir(p.direct.join("board").join(dir))
+            .unwrap()
+            .flatten()
+            .find(|e| e.file_name().to_string_lossy().ends_with(".gto"))
+            .unwrap();
+        std::fs::read(e.path()).unwrap()
+    };
+    p.ok(&["board", "export", id, "--out", "fab0"]);
+    let t = p.ok(&[
+        "board", "text", "add", id, "--layer", "silk.top", "--at", "8,10", "--text", "REV A",
+        "--id", "rev",
+    ]);
+    assert_eq!(
+        t["drawings"][0]["reference"],
+        format!("{id}:drawing/rev"),
+        "{t}"
+    );
+    p.ok(&[
+        "board",
+        "text",
+        "add",
+        id,
+        "--layer",
+        "silk.bottom",
+        "--at",
+        "8,1",
+        "--text",
+        "BACK",
+        "--size",
+        "0.8mm",
+    ]);
+    let line = json!([{"layer": "fab.top", "type": "line", "start": ["1mm", "1mm"], "end": ["3mm", "1mm"], "width_nm": 100_000}]);
+    p.ok(&["board", "drawing", "add", id, "--ops", &line.to_string()]);
+    p.fails(
+        &[
+            "board",
+            "text",
+            "add",
+            id,
+            "--layer",
+            "copper.top",
+            "--at",
+            "1,1",
+            "--text",
+            "X",
+        ],
+        "invalid_document",
+        1,
+    );
+    p.ok(&[
+        "board",
+        "drawing",
+        "edit",
+        id,
+        "rev",
+        "--ops",
+        &json!({"text": "REV B"}).to_string(),
+    ]);
+    p.ok(&["board", "export", id, "--out", "fabd"]);
+    assert_ne!(gto("fab0"), gto("fabd"), "the text is in the top silk");
+    for top in [&p.direct, &p.daemon] {
+        let gto = std::fs::read_dir(top.join("board/fabd"))
+            .unwrap()
+            .flatten()
+            .find(|e| e.file_name().to_string_lossy().ends_with(".gto"))
+            .unwrap();
+        let bytes = std::fs::read(gto.path()).unwrap();
+        assert!(!bytes.is_empty());
+    }
+    p.ok(&["board", "drawing", "delete", id, "rev"]);
+    p.fails(&["board", "drawing", "delete", id, "rev"], "not_found", 1);
 }

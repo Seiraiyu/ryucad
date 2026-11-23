@@ -889,6 +889,50 @@ pub enum Request {
     },
     #[serde(rename = "board.rules.explain")]
     BoardRulesExplain { board: String, refs: Vec<String> },
+    /// Text on a non-copper layer, centred on `at`, mirrored on a bottom layer.
+    #[serde(rename = "board.text.add")]
+    BoardTextAdd {
+        board: String,
+        layer: String,
+        at: [String; 2],
+        text: String,
+        /// Its character height and width (1 mm by default).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        size: Option<String>,
+        /// Its stroke (a seventh of the size by default, at least 0.1 mm).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thickness: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rotation: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// Drawings: `ops` is a list of `{layer, type, …}` as a footprint's graphics.
+    #[serde(rename = "board.drawing.add")]
+    BoardDrawingAdd {
+        board: String,
+        ops: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// A drawing's keys changed: `ops` an object of them.
+    #[serde(rename = "board.drawing.edit")]
+    BoardDrawingEdit {
+        board: String,
+        drawing: String,
+        ops: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "board.drawing.delete")]
+    BoardDrawingDelete {
+        board: String,
+        drawings: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     /// A keepout: an area on copper layers keeping kinds of item out.
     #[serde(rename = "board.keepout.add")]
     BoardKeepoutAdd {
@@ -1819,6 +1863,10 @@ impl Request {
                 | Request::BoardWaive { .. }
                 | Request::BoardGroupMove { .. }
                 | Request::BoardKeepoutAdd { .. }
+                | Request::BoardTextAdd { .. }
+                | Request::BoardDrawingAdd { .. }
+                | Request::BoardDrawingEdit { .. }
+                | Request::BoardDrawingDelete { .. }
                 | Request::BoardKeepoutEdit { .. }
                 | Request::BoardKeepoutDelete { .. }
                 | Request::BoardGroupFlip { .. }

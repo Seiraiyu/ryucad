@@ -1438,6 +1438,59 @@ fn dispatch(
         Request::BoardMeasure { board, a, b, layer } => {
             crate::board::cmd::measure(session, &board, &a, &b, layer.as_deref())
         }
+        Request::BoardTextAdd {
+            board,
+            layer,
+            at,
+            text,
+            size,
+            thickness,
+            rotation,
+            id,
+            expected_revision,
+        } => {
+            let unit = session.project().manifest.default_unit;
+            let s = crate::coord::nm(&json!(size.unwrap_or_else(|| "1mm".into())), unit)?;
+            let t = match thickness {
+                Some(t) => crate::coord::nm(&json!(t), unit)?,
+                None => (s / 7).max(100_000),
+            };
+            let op = json!({
+                "layer": layer, "type": "text", "text": text, "at": at,
+                "rotation": rotation.unwrap_or_else(|| "0".into()),
+                "size_nm": [s, s], "thickness_nm": t, "id": id,
+            });
+            crate::board::drawcmd::add(session, &board, vec![op], expected_revision.as_deref())
+        }
+        Request::BoardDrawingAdd {
+            board,
+            ops,
+            expected_revision,
+        } => crate::board::drawcmd::add(
+            session,
+            &board,
+            crate::board::route::asks(Some(ops), Value::Null)?,
+            expected_revision.as_deref(),
+        ),
+        Request::BoardDrawingEdit {
+            board,
+            drawing,
+            ops,
+            expected_revision,
+        } => crate::board::drawcmd::edit(
+            session,
+            &board,
+            &drawing,
+            &ops,
+            expected_revision.as_deref(),
+        ),
+        Request::BoardDrawingDelete {
+            board,
+            drawings,
+            expected_revision,
+        } => {
+            crate::board::drawcmd::delete(session, &board, &drawings, expected_revision.as_deref())
+        }
         Request::BoardKeepoutAdd {
             board,
             contour,
