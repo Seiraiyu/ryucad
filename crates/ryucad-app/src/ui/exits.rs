@@ -51,6 +51,9 @@ static FILE: Mutex<Option<File>> = Mutex::new(None);
 /// `main` has written how the process exited: anything ending it after
 /// that is the ordinary end, not an `exit()` from elsewhere.
 static ENDED: AtomicBool = AtomicBool::new(false);
+/// [`install`] ran: the trace began, so an exit `main` didn't end is news.
+/// Before it (`--version`) the process traces nothing at all (#1019).
+static BEGUN: AtomicBool = AtomicBool::new(false);
 /// The main thread panicked: the process ends with it.
 static MAIN_PANICKED: AtomicBool = AtomicBool::new(false);
 /// The window's `on_exit` ran: what follows is a quit, even if the
@@ -309,6 +312,7 @@ pub fn memory() -> Option<(u64, u64)> {
 /// the hooks for exits, faults and (on Windows) dumps.
 pub fn install() {
     started();
+    BEGUN.store(true, Ordering::SeqCst);
     if let Some(path) = trace_path() {
         let mut file = FILE.lock().unwrap_or_else(|e| e.into_inner());
         if file.is_none() {
@@ -324,7 +328,7 @@ pub fn install() {
 /// Called as the process exits by any means but a kill: says so if
 /// `main` didn't, which means something called `exit()`.
 fn exiting_unexpectedly() -> Option<&'static str> {
-    if ENDED.load(Ordering::SeqCst) {
+    if ENDED.load(Ordering::SeqCst) || !BEGUN.load(Ordering::SeqCst) {
         None
     } else if MAIN_PANICKED.load(Ordering::SeqCst) {
         Some("exited: after the main thread's panic")

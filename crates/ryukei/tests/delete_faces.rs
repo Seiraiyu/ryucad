@@ -461,3 +461,60 @@ fn deleting_a_drilled_plates_side_is_refused() {
         r.map(|(b, _)| b.counts().faces)
     );
 }
+
+/// #979: a small rounded corner (three r 2 mm fillets meeting in a ball
+/// on a 60 mm cube) with two of its fillets deleted is a build or a typed
+/// refusal, never the re-trim's "a region holds a face" panic.
+#[test]
+fn a_small_rounded_corners_two_fillets_deleted_never_panics() {
+    let (b, _) = primitive::block(OpKey(0x22c0), 0.06, 0.06, 0.06, &Rigid::IDENTITY).unwrap();
+    let f = |a: FaceRole, c: FaceRole| EdgeBlend {
+        edge: edge_between(&b, face_of(a), face_of(c)),
+        kind: BlendKind::Fillet { radius: 0.002 },
+    };
+    let (rb, _) = blend(
+        OpKey(0x22c1),
+        &b,
+        &[
+            f(FaceRole::MinusY, FaceRole::PlusZ),
+            f(FaceRole::PlusX, FaceRole::PlusZ),
+            f(FaceRole::PlusX, FaceRole::MinusY),
+        ],
+    )
+    .unwrap();
+    // The fillets along y and along z; the one along x is kept.
+    let along = |axis: fn(Vector3) -> f64| -> Name {
+        let f = rb
+            .faces()
+            .find(
+                |&f| match rb.surface(rb.face(f).unwrap().surface).unwrap() {
+                    s @ Surface::Cylinder(_) => axis(s.frame().unwrap().z().get()).abs() > 0.9,
+                    _ => false,
+                },
+            )
+            .unwrap();
+        name(&rb, f)
+    };
+    let faces = vec![along(|v| v.y), along(|v| v.z)];
+    let got = std::panic::catch_unwind(|| {
+        delete_faces(
+            OpKey(0x22c5),
+            &rb,
+            &DeleteSpec {
+                faces,
+                heal: Heal::Grow,
+            },
+        )
+    });
+    match got.expect("delete_faces panicked") {
+        Ok((o, _)) => {
+            assert_eq!(check(&o), []);
+        }
+        Err(e) => assert!(matches!(e, Error::InvalidTweak(_)), "{e:?}"),
+    }
+}
+
+/// A face of the 0x22c0 block, by role.
+fn face_of(r: FaceRole) -> Name {
+    Name::derive(OpKey(0x22c0), Role::Face(r), &[])
+}

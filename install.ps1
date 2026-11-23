@@ -136,6 +136,15 @@ function Install-Ryucad {
         New-Item -ItemType Directory -Force -Path $bin | Out-Null
         $exe = Join-Path $bin 'ryucad.exe'
         if (Test-Path $exe) { & $exe daemon stop --all *> $null }
+        # The new binary asks again, for daemons of any version, and says
+        # which outlived the wait (#1023): an old one never says so.
+        $new = Join-Path $tmp "ryucad-$version-$target\ryucad.exe"
+        # Its stderr is dropped, never an error record (Windows PowerShell
+        # 5.1 throws on one under 'Stop').
+        try { $stopped = & $new daemon stop --all 2> $null | Out-String } catch { $stopped = '' }
+        if ($stopped -match 'still_running') {
+            Write-Host "ryucad-install: warning: a ryucad daemon didn't stop and still runs the old version; close its window, or end it in Task Manager, then run: ryucad daemon stop --all"
+        }
         Clear-OldCopy $exe
         Move-Aside $exe
         Copy-Item (Join-Path $tmp "ryucad-$version-$target\ryucad.exe") $exe

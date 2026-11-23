@@ -120,6 +120,12 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // On native Wayland the desktop's Large Text reaches the window only
+    // if it applies it itself, as XWayland's DPI does for it (#1026).
+    #[cfg(target_os = "linux")]
+    if let Some(f) = platform::wayland_text_scale() {
+        ryucad_app::ui::app::set_desktop_text_scale(f);
+    }
     // The size the last window was left at (`app.window`), else 1280×800.
     let saved = ryucad_app::ui::app::saved_geometry();
     let options = eframe::NativeOptions {

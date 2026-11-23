@@ -1791,6 +1791,37 @@ impl Model {
             .or_else(|| self.parts.keys().next().cloned())
     }
 
+    /// Whether a choice on `part` is stale (#1027, as #869 for the Part
+    /// tile): the window is focused on another part, which doesn't place
+    /// `part` at any depth. With nothing focused it never is.
+    pub fn choice_is_hidden(&self, part: &str) -> bool {
+        let Some(f) = self
+            .focus
+            .as_deref()
+            .filter(|f| self.parts.contains_key(*f))
+        else {
+            return false;
+        };
+        let mut seen = std::collections::BTreeSet::new();
+        let mut next = vec![f];
+        while let Some(p) = next.pop() {
+            if p == part {
+                return false;
+            }
+            if !seen.insert(p) {
+                continue;
+            }
+            if let Some(q) = self.parts.get(p) {
+                next.extend(
+                    q.features
+                        .iter()
+                        .filter_map(|x| Some(x.instance.as_ref()?.part.as_str())),
+                );
+            }
+        }
+        true
+    }
+
     /// The parts the window shows: its focus, else the project's one root
     /// assembly (one nothing places), else every part that isn't an
     /// assembly, as the daemon has it.
@@ -2111,6 +2142,28 @@ mod tests {
         // Nothing focused, so the choice wins (#741), whatever is shown.
         let b = ("bolt".to_owned(), "b".to_owned());
         assert_eq!(m.followed_part(Some(&b)).as_deref(), Some("bolt"));
+    }
+
+    /// #1027: the Properties tile's form is hidden while another part is
+    /// shown, unless that part places the form's (an assembly's part).
+    #[test]
+    fn a_choice_is_hidden_while_another_part_is_shown() {
+        let mut m = Model::default();
+        for id in ["twkv", "ann-block", "bolt"] {
+            m.apply_part(&json!({"part": id, "revision": "r", "features": []}));
+        }
+        m.apply_part(
+            &json!({"part": "rig", "kind": "assembly", "revision": "r", "features": [
+            {"id": "i", "type": "instance", "ok": true, "instance": {"part": "bolt"}}]}),
+        );
+        assert!(!m.choice_is_hidden("twkv"));
+        m.focus = Some("twkv".into());
+        assert!(!m.choice_is_hidden("twkv"));
+        m.focus = Some("ann-block".into());
+        assert!(m.choice_is_hidden("twkv"));
+        m.focus = Some("rig".into());
+        assert!(!m.choice_is_hidden("bolt"), "rig places bolt");
+        assert!(m.choice_is_hidden("twkv"));
     }
 
     #[test]

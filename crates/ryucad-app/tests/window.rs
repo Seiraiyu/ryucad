@@ -820,6 +820,51 @@ fn the_window_follows_an_agent_until_the_human_navigates() {
     assert_ne!(h.state().opened().view.nav.camera, agent);
 }
 
+/// #1027: showing another part leaves the Properties tile empty, not on
+/// the chosen feature of the part no longer shown; showing it again puts
+/// the feature back.
+#[test]
+fn the_property_panel_follows_the_shown_part() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    p.ok(&["part", "create", "q"]);
+    p.ok(&[
+        "feature", "add", "q", "box", "--id", "b", "--param", "x=5", "--param", "y=5", "--param",
+        "z=5",
+    ]);
+    let mut h = window(&p);
+    frames(&mut h, |a| {
+        matches!(a.screen, ryucad_app::ui::app::Screen::Opened(_))
+            && a.opened().ws.idle()
+            && a.opened().ws.model.parts.len() == 2
+    });
+    p.ok(&["focus", "p"]);
+    frames(&mut h, |a| {
+        a.opened().ws.idle() && a.opened().ws.model.focus.as_deref() == Some("p")
+    });
+    h.run_steps(2);
+    h.get_by_label("boss (cylinder)").click();
+    frames(&mut h, |a| a.opened().ws.forms.form.is_some());
+    h.run_steps(2);
+    h.get_by_label("cylinder in part p");
+    p.ok(&["focus", "q"]);
+    frames(&mut h, |a| {
+        a.opened().ws.idle() && a.opened().ws.model.focus.as_deref() == Some("q")
+    });
+    h.run_steps(2);
+    assert!(h.query_by_label("cylinder in part p").is_none());
+    h.get_by_label("Choose a feature in the tree to see and edit it");
+    p.ok(&["focus", "p"]);
+    frames(&mut h, |a| {
+        a.opened().ws.idle() && a.opened().ws.model.focus.as_deref() == Some("p")
+    });
+    h.run_steps(2);
+    h.get_by_label("cylinder in part p");
+}
+
 #[test]
 fn a_parameter_is_edited_in_the_property_panel() {
     let _one = one_at_a_time();
@@ -4389,6 +4434,15 @@ fn view_show_scrolls_to_every_part() {
             .find(|r| !tree.contains(r))
             .unwrap_or_else(|| panic!("{id} isn't in the menu"))
     };
+    // View flows into columns here (#728): Show's submenu opens beside
+    // its column, clear of the column's wider items, whose clicks would
+    // otherwise take the rows over them (#974).
+    let wide = h
+        .query_all_by_label_contains("Compare with")
+        .map(|n| n.rect().right())
+        .fold(0.0_f32, f32::max);
+    let rows = in_menu(&h, "p00", &first);
+    assert!(wide > 0.0 && rows.left() >= wide, "{rows:?} over x {wide}");
     let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 1000.0));
     // The wheel over the list scrolls it until the last part shows.
     h.event(egui::Event::PointerMoved(
@@ -5341,6 +5395,46 @@ fn an_explode_is_chosen_and_played_from_its_tile() {
             .origin[2]
             == before
     });
+}
+
+/// #1027: the Motion list follows the shown part: an assembly's motions,
+/// then, a plain part shown, none, never the assembly it listed last.
+#[test]
+fn the_motion_list_follows_the_shown_part() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = two_bolts();
+    p.ok(&[
+        "motion",
+        "save",
+        "frame",
+        "slam",
+        "--steps",
+        "11",
+        "--drives",
+        r#"[{"instances": ["b2"], "translate": {"direction": [-1, 0, 0], "from": "0 mm", "to": "40 mm"}}]"#,
+    ]);
+    let mut h = window(&p);
+    both_bolts(&mut h);
+    menu(&mut h, "View", "Motion");
+    frames(&mut h, |a| a.opened().ws.assembly.motions.list.len() == 1);
+    shown(&mut h, "Motions of frame");
+    p.ok(&["focus", "bolt"]);
+    frames(&mut h, |a| {
+        a.opened().ws.idle() && a.opened().ws.model.focus.as_deref() == Some("bolt")
+    });
+    shown(
+        &mut h,
+        "Show an assembly to play its motions (View > Show).",
+    );
+    assert!(h.query_by_label("Motions of frame").is_none());
+    p.ok(&["focus", "frame"]);
+    frames(&mut h, |a| {
+        a.opened().ws.idle() && a.opened().ws.model.focus.as_deref() == Some("frame")
+    });
+    shown(&mut h, "Motions of frame");
 }
 
 #[test]

@@ -72,6 +72,21 @@ fn the_app_leaves_a_trace() {
     assert!(trace.contains("exited: project_not_found"), "{trace}");
 }
 
+/// #1019: `--version` ends before the trace begins, so it leaves no
+/// line in it, least of all Windows's detach callback's `exit() called`.
+#[test]
+fn version_leaves_no_trace() {
+    let run = tempfile::tempdir().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_ryucad-app"))
+        .env("RYUCAD_RUNTIME_DIR", run.path())
+        .arg("--version")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let trace = std::fs::read_to_string(run.path().join("ryucad-app.log")).unwrap_or_default();
+    assert!(!trace.contains("exited"), "{trace}");
+}
+
 #[test]
 fn help_and_unknown_arguments_open_no_window() {
     let run = |args: &[&str]| {

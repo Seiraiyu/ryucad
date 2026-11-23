@@ -98,6 +98,8 @@ impl<P: Serve> State<P> {
 struct Running {
     /// Its agent's name: what a cancel without a hello names it by.
     agent: Option<String>,
+    /// Its method, for the log of a shutdown waiting on it (#1023).
+    method: String,
     cancel: Arc<AtomicBool>,
     /// Set once it begins writing: a cancel no longer stops it.
     writing: Arc<AtomicBool>,
@@ -549,9 +551,15 @@ fn serve<P: Serve>(
             // has begun writing finishes), then wait for it and go: a long
             // request a client left behind (an app killed mid-render) kept
             // the daemon past `daemon stop`'s wait (#391).
+            // What it waits on is logged first: a daemon that never
+            // gets the lock says why it hasn't gone (#1023).
+            log(&format!(
+                "stopping: asked to shut down; {}",
+                waiting_for(state)
+            ));
             cancel_all(state);
             let _busy = state.core.lock();
-            stop(state, "asked to shut down");
+            stop(state, "asked to shut down, nothing left running");
         }
     }
 }
@@ -590,6 +598,7 @@ fn start<P: Serve>(
             key.clone(),
             Running {
                 agent,
+                method: method.to_owned(),
                 cancel,
                 writing: w,
             },
@@ -666,6 +675,29 @@ fn cancel<P: Serve>(state: &State<P>, me: Option<&str>, token: &str, name: Optio
         v["writing"] = json!(true);
     }
     v
+}
+
+/// What a shutdown waits on before it goes: the long requests running
+/// now, by method, token and participant, and whether each has begun
+/// writing (which a cancel no longer stops); else only the lock.
+fn waiting_for<P: Serve>(state: &State<P>) -> String {
+    let running = lock(&state.running);
+    if running.is_empty() {
+        return "waiting for the lock".to_owned();
+    }
+    let each: Vec<String> = running
+        .iter()
+        .map(|((who, token), r)| {
+            let by = r.agent.as_deref().unwrap_or(who);
+            let writing = if r.writing.load(Ordering::SeqCst) {
+                ", writing"
+            } else {
+                ""
+            };
+            format!("{} (token {token}, {by}{writing})", r.method)
+        })
+        .collect();
+    format!("cancelling and waiting for {}", each.join(", "))
 }
 
 /// Cancels every long request running now, whoever's: what a shutdown
@@ -835,11 +867,16 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let running = long(&endpoint, "long", "t", tx);
         rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        // #1023: the log says what the shutdown waits on.
+        let w = waiting_for(&state);
+        assert!(w.starts_with("cancelling and waiting for "), "{w}");
+        assert!(w.contains("(token t,"), "{w}");
         assert_eq!(cancel_all(&state), 1);
         let e = running.join().unwrap().unwrap_err();
         assert_eq!(e.code, Code::Cancelled);
         // Nothing left running: the lock is free for the shutdown.
         assert_eq!(cancel_all(&state), 0);
+        assert_eq!(waiting_for(&state), "waiting for the lock");
         drop(state.core.lock());
     }
 
