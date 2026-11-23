@@ -55,6 +55,7 @@ pub fn all(src: &dyn Source, cat: &Catalogue, cx: &Context) -> Vec<Fault> {
     }
     out.extend(crate::links::judge(cat).into_iter().map(err));
     out.extend(crate::bom::judge(cat).into_iter().map(err));
+    out.extend(crate::documents::judge(src, cat));
     if let Some(c) = &config {
         out.extend(properties(src, cat, c).into_iter().map(err));
         out.extend(numbers(src, cat, c, cx));
