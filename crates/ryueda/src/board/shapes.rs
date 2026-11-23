@@ -75,6 +75,20 @@ pub struct CourtyardInfo {
     pub bottom: bool,
 }
 
+/// A keepout as placed: the board's own, or a part's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeepoutInfo {
+    /// `<board>:keepout/<id>`, or `<board>:<label>#keepout/<id>`.
+    pub reference: String,
+    /// The part whose footprint holds it (its occurrence): its own pads
+    /// and drills are exempt.
+    pub part: Option<String>,
+    /// Copper layers it covers, by index, sorted.
+    pub layers: Vec<usize>,
+    pub keeps: Vec<crate::footprint::Keep>,
+    pub shape: Shape,
+}
+
 /// A track as drawn.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TrackInfo {
@@ -140,6 +154,8 @@ pub struct BoardShapes {
     pub tracks: Vec<TrackInfo>,
     pub vias: Vec<ViaInfo>,
     pub courtyards: Vec<CourtyardInfo>,
+    /// The board's keepouts and its parts' (ryueda 7.C).
+    pub keepouts: Vec<KeepoutInfo>,
     /// The outline less its cutouts.
     pub outline: Shape,
     /// The outline's and cutouts' boundaries, zero width.
@@ -275,6 +291,7 @@ struct One {
     holes: Vec<HoleInfo>,
     pads: Vec<PadInfo>,
     courtyards: Vec<CourtyardInfo>,
+    keepouts: Vec<KeepoutInfo>,
     notices: Vec<Fault>,
 }
 
@@ -466,6 +483,18 @@ fn one(
             bottom: flipped,
         });
     }
+    for (kid, k) in &f.keepouts {
+        let (layers, shape) = super::keepout::placed_footprint_keepout(k, place, n);
+        if !shape.parts.is_empty() {
+            out.keepouts.push(KeepoutInfo {
+                reference: format!("{owner}#keepout/{kid}"),
+                part: Some(o.reference.clone()),
+                layers,
+                keeps: k.keeps.clone(),
+                shape,
+            });
+        }
+    }
     out
 }
 
@@ -561,6 +590,7 @@ pub fn build(p: &Project, b: &BoardFiles) -> Result<BoardShapes> {
         out.holes.extend(one.holes);
         out.pads.extend(one.pads);
         out.courtyards.extend(one.courtyards);
+        out.keepouts.extend(one.keepouts);
         notices.extend(one.notices);
     }
     // The routes; files with an error fault are left out (`check`
@@ -635,6 +665,21 @@ pub fn build(p: &Project, b: &BoardFiles) -> Result<BoardShapes> {
             plated: false,
             of: HoleOf::Hole(hid.clone()),
             span: (0, n - 1),
+        });
+    }
+    for (kid, k) in &b.keepouts {
+        let (Ok(ko), true) = (&k.item, fine(&k.faults)) else {
+            continue;
+        };
+        let Ok(c) = super::outline::contour(&ko.contour) else {
+            continue;
+        };
+        out.keepouts.push(KeepoutInfo {
+            reference: format!("{board}:keepout/{kid}"),
+            part: None,
+            layers: ko.indices(n),
+            keeps: ko.keeps.clone(),
+            shape: Shape::regions(Polarity::Positive, [Region::solid(super::outline::ccw(c))]),
         });
     }
     let (region, edges) = outline(file);
@@ -1003,6 +1048,22 @@ pub(crate) mod tests {
         assert!(hidden.len() < before.len(), "the designator hidden");
         let (_d3, again) = with("{}");
         assert_eq!(again, before, "an empty override changes nothing");
+    }
+
+    #[test]
+    fn a_boards_keepouts_are_in_its_shapes() {
+        let k = r#"{"contour":{"edges":[{"to":[2000000,0],"type":"line"},{"to":[2000000,2000000],"type":"line"},{"to":[0,2000000],"type":"line"},{"to":[0,0],"type":"line"}],"start":[0,0]},"format":1,"keeps":["vias"],"kind":"ryueda.keepout","layers":["top"]}"#;
+        let (_d, p, id) = placed_with(&[("boards/b/keepouts/k1.json".into(), k.into())]);
+        let s = build(&p, &p.boards[&id]).unwrap();
+        let ko = s
+            .keepouts
+            .iter()
+            .find(|x| x.reference == "b:keepout/k1")
+            .unwrap();
+        assert_eq!(ko.layers, vec![0]);
+        assert_eq!(ko.keeps, vec![crate::footprint::Keep::Vias]);
+        assert!(ko.part.is_none());
+        assert_eq!(ko.shape.bounds().unwrap().max.x, 2_000_000);
     }
 
     #[test]

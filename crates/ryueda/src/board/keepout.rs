@@ -5,6 +5,9 @@ use super::file::Contour;
 use crate::error::Code;
 use crate::fault::Fault;
 pub use crate::footprint::Keep;
+use ryu_board::geom::{Place, Point, Region};
+use ryu_board::model::Polarity;
+use ryu_board::shape::Shape;
 use serde::{Deserialize, Serialize};
 
 pub use super::file::{KEEPOUT_KIND, KEEPOUTS};
@@ -94,12 +97,87 @@ pub fn judge(k: &Keepout, n: usize) -> Vec<Fault> {
     out
 }
 
+/// A footprint's keepout where its part puts it: its polygon placed, and
+/// its footprint layers (`copper.top`, `copper.bottom`, `copper.inner`,
+/// `copper.all`) as the board's layer indices, top and bottom swapped for
+/// a part on the bottom.
+pub fn placed_footprint_keepout(
+    k: &crate::footprint::Keepout,
+    place: Place,
+    n: usize,
+) -> (Vec<usize>, Shape) {
+    let flipped = place.mirror;
+    let mut layers = Vec::new();
+    for l in &k.layers {
+        match l.as_str() {
+            "copper.top" => layers.push(if flipped { n - 1 } else { 0 }),
+            "copper.bottom" => layers.push(if flipped { 0 } else { n - 1 }),
+            "copper.inner" => layers.extend(1..n - 1),
+            "copper.all" => layers.extend(0..n),
+            _ => {}
+        }
+    }
+    layers.sort_unstable();
+    layers.dedup();
+    let pts: Vec<Point> = k.polygon.iter().map(|p| Point::new(p[0], p[1])).collect();
+    let shape = ryu_board::shape::polygon(&pts)
+        .ok()
+        .map(|c| {
+            if c.polygon_area2().unwrap_or(0) < 0 {
+                c.reversed()
+            } else {
+                c
+            }
+        })
+        .map(|c| {
+            Shape::regions(Polarity::Positive, [Region::solid(c)])
+                .placed(&place, Polarity::Positive)
+        })
+        .unwrap_or_default();
+    (layers, shape)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::board::file::{Contour, Op};
     use crate::doc;
     use serde_json::json;
+    #[test]
+    fn a_footprints_keepout_is_placed_and_its_layers_swap_on_the_bottom() {
+        let k = crate::footprint::Keepout {
+            polygon: vec![[0, 0], [10, 0], [10, 10], [0, 10]],
+            keeps: vec![Keep::Tracks],
+            layers: vec!["copper.top".into()],
+        };
+        let top = ryu_board::geom::Place {
+            at: ryu_board::geom::Point::new(100, 0),
+            ..Default::default()
+        };
+        let (l, s) = placed_footprint_keepout(&k, top, 4);
+        assert_eq!(l, vec![0]);
+        assert_eq!(s.bounds().unwrap().min.x, 100);
+        let bottom = ryu_board::geom::Place {
+            mirror: true,
+            ..top
+        };
+        let (l, s) = placed_footprint_keepout(&k, bottom, 4);
+        assert_eq!(
+            l,
+            vec![3],
+            "copper.top of a bottom part is the board's bottom"
+        );
+        assert_eq!(
+            s.bounds().unwrap().max.x,
+            100,
+            "mirrored about the part's y axis"
+        );
+        let all = crate::footprint::Keepout {
+            layers: vec!["copper.inner".into()],
+            ..k
+        };
+        assert_eq!(placed_footprint_keepout(&all, top, 4).0, vec![1, 2]);
+    }
 
     fn square() -> Contour {
         Contour {
