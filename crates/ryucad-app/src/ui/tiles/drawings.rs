@@ -358,6 +358,9 @@ fn chosen_ui(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
                 if ui.button("Show in model").clicked() {
                     ws.select(vec![entity.clone()], ryucad::live::SelectMode::Replace);
                     view.fit_entities(ws, std::slice::from_ref(entity));
+                    // #867: the viewport comes forward; Drawings opens in
+                    // its tab group, so the fit was out of sight.
+                    ws.wants_tile = Some("viewport");
                 }
             });
         }

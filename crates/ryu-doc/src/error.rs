@@ -167,6 +167,11 @@ pub enum Code {
     /// `..`, `~`, `:`, a `.lock` component and so on), so its releases
     /// can't be tagged `ryupdm/<folder>/<part>/<label>`.
     ReleaseFolderUnsafe,
+    /// A release's tag can't sit beside a tag already in the repository:
+    /// one is a leading path of the other (`ryupdm/cad/1` and
+    /// `ryupdm/cad/1/A`, a root project's part `cad` and a project in
+    /// folder `cad/`), which Git's ref store can't hold (#844).
+    ReleaseTagClash,
     /// `ryucad review` has no GitHub token, or the service refused the one
     /// it has.
     ReviewUnauthenticated,
@@ -1309,6 +1314,7 @@ impl Code {
         Code::NothingToRelease,
         Code::ReleasePending,
         Code::ReleaseFolderUnsafe,
+        Code::ReleaseTagClash,
         Code::ReviewUnauthenticated,
         Code::ReviewNoRemote,
         Code::ReviewUnreachable,

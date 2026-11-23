@@ -15,7 +15,7 @@ use common::must;
 use ryucad::doc::id::Id;
 use ryucad::session::Session;
 use ryucad::units::Unit;
-use ryukei::boolean::{BooleanOp, Tool, boolean};
+use ryukei::boolean::{BooleanOp, Tool, boolean, boolean_with};
 use ryukei::geom::{Rigid, Vector3};
 use ryukei::name::{OpKey, ToolKey};
 use ryukei::topo::Body;
@@ -40,16 +40,27 @@ fn best<T: Send>(f: impl Fn() -> T + Sync) -> (f64, T) {
     (fastest, last.expect("two runs"))
 }
 
+/// How much looser than recorded the timed bars are: ten times without
+/// `RYUCAD_BARS`.
+fn slack() -> f64 {
+    if std::env::var_os("RYUCAD_BARS").is_some() {
+        1.0
+    } else {
+        10.0
+    }
+}
+
 /// ryukei alone: the block minus 1,000 cylinders `h` long from `z`, in
-/// milliseconds.
-fn kernel(block: &Body, h: f64, z: f64) -> f64 {
+/// milliseconds, and the work units one more cut spends (the same on
+/// every machine, #929).
+fn kernel(block: &Body, h: f64, z: f64) -> (f64, u64) {
     let (rod, _) = ryukei::primitive::cylinder(OpKey(3), 0.3, h, &Rigid::IDENTITY).unwrap();
     let places: Vec<Rigid> = (0..25)
         .flat_map(|j| (0..40).map(move |i| (i, j)))
         .map(|(i, j)| Rigid::translation(Vector3::new(f64::from(i) + 0.5, f64::from(j) + 0.5, z)))
         .collect();
-    let (ms, (cut, _)) = best(|| {
-        let tools: Vec<Tool> = places
+    let tools = || -> Vec<Tool> {
+        places
             .iter()
             .enumerate()
             .map(|(i, p)| Tool {
@@ -57,11 +68,14 @@ fn kernel(block: &Body, h: f64, z: f64) -> f64 {
                 body: &rod,
                 place: *p,
             })
-            .collect();
-        boolean(OpKey(2), BooleanOp::Subtract, block, &tools).expect("ryukei's boolean")
-    });
+            .collect()
+    };
+    let (ms, (cut, _)) =
+        best(|| boolean(OpKey(2), BooleanOp::Subtract, block, &tools()).expect("ryukei's boolean"));
     assert_eq!(cut.counts().faces, 6 + 1000);
-    ms
+    let work = ryukei::work::Work::unlimited();
+    boolean_with(OpKey(2), BooleanOp::Subtract, block, &tools(), &work).expect("ryukei's boolean");
+    (ms, work.spent())
 }
 
 #[test]
@@ -70,8 +84,8 @@ fn a_1000_hole_pattern_rebuilds_within_twice_ryukeis_own_boolean() {
     let (block, _) = ryukei::primitive::block(OpKey(1), 40.0, 25.0, 0.5, &Rigid::IDENTITY).unwrap();
     // Out of both faces, as ryukei-bench has it; flush with the top, as a
     // hole drilled from a sketch on the top is.
-    let out = kernel(&block, 1.0, -0.25);
-    let flush = kernel(&block, 0.75, -0.25);
+    let (out, out_units) = kernel(&block, 1.0, -0.25);
+    let (flush, flush_units) = kernel(&block, 0.75, -0.25);
 
     // ryucad: the plate, a sketch on its top with one point, a hole
     // through all, and a 40 × 25 pattern of it.
@@ -126,7 +140,8 @@ fn a_1000_hole_pattern_rebuilds_within_twice_ryukeis_own_boolean() {
 
     println!(
         "1000 holes, one thread, {} {} with {} cores: ryucad {ryucad_ms:.0} ms; ryukei \
-         {flush:.0} ms flush, {out:.0} ms out of both faces",
+         {flush:.0} ms flush, {out:.0} ms out of both faces; ryukei units {flush_units} \
+         flush, {out_units} out",
         std::env::consts::OS,
         std::env::consts::ARCH,
         std::thread::available_parallelism().map_or(0, |n| n.get()),
@@ -136,9 +151,16 @@ fn a_1000_hole_pattern_rebuilds_within_twice_ryukeis_own_boolean() {
         "ryucad {ryucad_ms:.0} ms vs ryukei {flush:.0} ms on the same geometry"
     );
     // Flush tools cost the kernel about 9 times as much until issue #77
-    // (about 1.05 times since); this fails if the gap comes back.
+    // (about 1.05 times since); this fails if the gap comes back. Judged
+    // by the kernel's own units, the same on every runner (#929: a
+    // 4-core Windows runner timed 1924 ms against 885); the times only
+    // within slack.
     assert!(
-        flush < 2.0 * out,
+        flush_units < 2 * out_units,
+        "ryukei {flush_units} units flush vs {out_units} out of both faces"
+    );
+    assert!(
+        flush < 2.0 * slack() * out,
         "ryukei {flush:.0} ms flush vs {out:.0} ms out of both faces"
     );
 }

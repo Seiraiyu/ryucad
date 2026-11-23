@@ -460,27 +460,66 @@ impl Workspace {
     }
 
     /// Fetches bodies' meshes at the levels of detail the view wants,
-    /// in the order given (nearest first), each body and level once.
+    /// in the order given (nearest first), each body and level once: a
+    /// part's bodies at one level by the batch (`MESH_BATCH` to a
+    /// request), meshed side by side as first meshes are (#876: a
+    /// flattened board's 4,300 refinements went one request a body, on
+    /// about one core). A part's lone body, and an assembly's own key,
+    /// keep a request of their own.
     pub fn fetch_levels(&mut self, wanted: Vec<(BodyKey, ryucad::mesh::Quality)>) {
+        // By part and level, each in the order asked; the groups in the
+        // order of their first body, so the nearest still goes first.
+        // (part, level) and its bodies' labels and hashes.
+        type Group = ((String, ryucad::mesh::Quality), Vec<(String, String)>);
+        let mut groups: Vec<Group> = Vec::new();
         for (key, hash, level) in self.model.ask_levels(wanted) {
             self.model.fetched += 1;
             let assembly = self.model.parts.get(&key.0).is_some_and(|p| p.assembly);
-            let feature = match key.1.rsplit_once('/') {
+            let label = match key.1.rsplit_once('/') {
                 Some((path, _)) if assembly => path.to_owned(),
+                None if assembly => {
+                    self.fetch_level(&key.0, vec![(key.1.clone(), hash)], level);
+                    continue;
+                }
                 _ => key.1.clone(),
             };
-            let req = Request::MeshGet {
-                part: key.0.clone(),
-                feature: Some(feature),
-                features: Vec::new(),
-                quality: Some(level.as_str().to_owned()),
-                transfer: Some(Transfer::Compact),
-                rev: self.model_rev(),
-                flat: None,
-                before: None,
-            };
-            self.send(req, Route::Model(model::Asked::Level(hash, level)));
+            let at = (key.0, level);
+            match groups.iter_mut().find(|(g, _)| *g == at) {
+                Some((_, bodies)) => bodies.push((label, hash)),
+                None => groups.push((at, vec![(label, hash)])),
+            }
         }
+        for ((part, level), bodies) in groups {
+            for batch in bodies.chunks(MESH_BATCH) {
+                self.fetch_level(&part, batch.to_vec(), level);
+            }
+        }
+    }
+
+    /// One request for `bodies` (label and hash) of `part` at `level`.
+    fn fetch_level(
+        &mut self,
+        part: &str,
+        bodies: Vec<(String, String)>,
+        level: ryucad::mesh::Quality,
+    ) {
+        let (feature, features) = match bodies.as_slice() {
+            [(label, _)] => (Some(label.clone()), Vec::new()),
+            _ => (None, bodies.iter().map(|(l, _)| l.clone()).collect()),
+        };
+        let req = Request::MeshGet {
+            part: part.to_owned(),
+            feature,
+            features,
+            quality: Some(level.as_str().to_owned()),
+            transfer: Some(Transfer::Compact),
+            rev: self.model_rev(),
+            flat: None,
+            before: None,
+        };
+        self.model.level_requests += 1;
+        let hashes = bodies.into_iter().map(|(_, h)| h).collect();
+        self.send(req, Route::Model(model::Asked::Levels(hashes, level)));
     }
 
     /// The part `id`, if the window knows it.
@@ -583,8 +622,9 @@ pub(crate) enum Asked {
     Mesh(BodyKey, String),
     /// Several bodies of one assembly's occurrences, each at its hash.
     Meshes(Vec<(BodyKey, String)>),
-    /// A body's mesh at another level of detail.
-    Level(String, ryucad::mesh::Quality),
+    /// Bodies' meshes at another level of detail, by hash: one part's,
+    /// in one request (#876).
+    Levels(Vec<String>, ryucad::mesh::Quality),
     /// A sketch's drawing, asked for at this part revision.
     Sketch(BodyKey, String),
     /// A path's or helix's drawing, asked for at this part revision.
@@ -606,6 +646,17 @@ pub(crate) enum Asked {
     FlatLines(BodyKey, String),
     /// The flat view's body (`mesh.get` with `flat`), likewise.
     FlatMesh(BodyKey, String),
+}
+
+/// The part a failure says isn't in the revision a request named: the
+/// daemon's `no part X` (`not_found` with only the part and the commit
+/// read in its details), as a read at a revision without the part
+/// answers (#1021).
+pub(crate) fn absent_at(e: &Error) -> Option<&str> {
+    let d = e.details.as_object()?;
+    (e.code == Code::NotFound && d.len() == 2 && d.get("commit").is_some_and(Value::is_string))
+        .then(|| d.get("part")?.as_str())
+        .flatten()
 }
 
 impl Model {
@@ -718,6 +769,11 @@ impl Model {
                 let report = match r {
                     Ok(a) => a.result["parts"][0].clone(),
                     Err(e) if e.code == Code::RebuildFailed => e.details["parts"][0].clone(),
+                    // Not in the revision asked for (a part added since,
+                    // shown swapped, #1021): nothing there, not broken.
+                    Err(e) if rev.is_some() && absent_at(&e) == Some(id.as_str()) => {
+                        json!({"part": id, "features": []})
+                    }
                     Err(e) => json!({"part": id, "error": e}),
                 };
                 fx.then(Then::PartChanged(report));
@@ -861,7 +917,7 @@ impl Model {
                     self.generation += 1;
                 }
             }
-            (Asked::Level(hash, level), a) => {
+            (Asked::Levels(hashes, level), a) => {
                 let bodies = match a.map(|a| a.binary.map(|b| ryucad::mesh::decode(&b))) {
                     Ok(Some(Ok(bodies))) => bodies,
                     Ok(Some(Err(e))) | Err(e) => {
@@ -870,11 +926,17 @@ impl Model {
                     }
                     Ok(None) => Vec::new(),
                 };
-                let mut taken = false;
-                for b in bodies.into_iter().filter(|b| b.hash == hash) {
-                    taken |= self.take_level(b, level);
+                let mut taken = std::collections::BTreeSet::new();
+                for b in bodies {
+                    if hashes.contains(&b.hash) {
+                        let hash = b.hash.clone();
+                        if self.take_level(b, level) {
+                            taken.insert(hash);
+                        }
+                    }
                 }
-                if !taken {
+                // What never came may be asked again.
+                for hash in hashes.into_iter().filter(|h| !taken.contains(h)) {
                     self.levels_asked.remove(&(hash, level));
                 }
             }

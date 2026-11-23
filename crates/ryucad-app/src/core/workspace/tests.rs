@@ -466,3 +466,39 @@ fn a_part_list_asks_only_parts_that_moved() {
         .collect();
     assert_eq!(asked, ["q"]);
 }
+
+/// #1021: a part read at a revision that lacks it (an added part, shown
+/// swapped to HEAD) is a part with nothing in it there, not a broken one;
+/// a failure with more to say than that stays one.
+#[test]
+fn a_part_a_revision_lacks_is_empty_there_not_broken() {
+    let absent = Error::new(Code::NotFound, "no part de")
+        .with("part", "de")
+        .with("commit", "05d76f43");
+    assert_eq!(model::absent_at(&absent), Some("de"));
+    let feature = absent.clone().with("feature", "b");
+    assert_eq!(model::absent_at(&feature), None);
+    let working = Error::new(Code::NotFound, "no part de").with("part", "de");
+    assert_eq!(model::absent_at(&working), None);
+    let report = |rev: Option<&str>, e: &Error| {
+        let mut model = Model::default();
+        model.loading.insert("de".to_owned());
+        let mut fx = Effects::default();
+        let rev = rev.map(str::to_owned);
+        model.answer(
+            model::Asked::Rebuild("de".to_owned(), rev.clone()),
+            Err(e.clone()),
+            Some(rev),
+            &mut fx,
+        );
+        match fx.recorded() {
+            [Effect::Then(Then::PartChanged(r))] => r.clone(),
+            other => panic!("{other:?}"),
+        }
+    };
+    let r = report(Some("HEAD"), &absent);
+    assert!(r.get("error").is_none(), "{r}");
+    assert_eq!(r["features"], json!([]));
+    // In the working files, a part that isn't there is still a failure.
+    assert!(report(None, &working).get("error").is_some());
+}

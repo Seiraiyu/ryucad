@@ -56,6 +56,9 @@ fn encoded() -> Vec<u8> {
 
 fn model(bytes: &[u8]) -> Model {
     let mut m = Model::default();
+    // The part's report, so the window shows it: the picker takes only
+    // what is drawn (27.F).
+    m.apply_part(&json!({"part": "p", "revision": "r", "features": []}));
     for b in ryucad::mesh::decode(bytes).unwrap() {
         m.meshes
             .insert(("p".into(), b.feature.clone()), Arc::new(b));

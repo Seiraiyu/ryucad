@@ -47,7 +47,8 @@ fn the_shared_cache_is_set_and_its_token_stored() {
     use ryucad_app::ui::dialogs::{shared_text, token_text};
     let p = Project::new();
     let mut ws = open(&p);
-    let url = "https://cache.example.com";
+    // A server that refuses at once: no name to look up, no network (#971).
+    let url = "http://127.0.0.1:1";
     ws.set_config("cache.remote", json!(url));
     ws.read_cache();
     assert!(ws.wait_until(WAIT, |ws| {

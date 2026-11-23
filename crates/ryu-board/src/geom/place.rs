@@ -82,13 +82,28 @@ impl Place {
         }
     }
 
+    /// An edge placed. An arc a rounding placement turns over (its ends
+    /// and centre each rounded to the nanometre, so its sweep moves by
+    /// more than a quarter turn or its radius goes) is placed as its
+    /// chord: an arc a few nanometres across, such as a ring's inner
+    /// corner rounded by 1 nm, could otherwise sweep nearly a whole turn
+    /// and cross its own contour (#944). Exact placements (quarter turns,
+    /// unscaled) place every arc as an arc.
     pub fn edge(&self, e: &Edge) -> Edge {
         match e {
             Edge::Segment(s) => Edge::Segment(Segment {
                 a: self.point(s.a),
                 b: self.point(s.b),
             }),
-            Edge::Arc(a) => Edge::Arc(self.arc(a)),
+            Edge::Arc(a) => {
+                let placed = self.arc(a);
+                let exact = self.scale.is_none() && self.rot.quarter_turns().is_some();
+                if exact || !turned_over(a, &placed) {
+                    Edge::Arc(placed)
+                } else {
+                    Edge::line(placed.start, placed.end)
+                }
+            }
         }
     }
 
@@ -120,6 +135,16 @@ impl Place {
             },
         }
     }
+}
+
+/// Whether rounding turned an arc over when it was placed: its radius
+/// gone, or its sweep moved by more than a quarter turn (an arc of a few
+/// nanometres whose rounded ends passed each other round its centre).
+fn turned_over(a: &Arc, placed: &Arc) -> bool {
+    if a.is_degenerate() {
+        return false;
+    }
+    placed.is_degenerate() || (placed.sweep() - a.sweep()).abs() > core::f64::consts::FRAC_PI_2
 }
 
 #[cfg(test)]
@@ -185,5 +210,38 @@ mod tests {
         .unwrap();
         assert_eq!(place(0, true).contour(&sq).orientation(), Dir::Ccw);
         assert_eq!(place(37_000, true).contour(&sq).orientation(), Dir::Ccw);
+    }
+
+    /// #944: a 1 nm corner arc under every turn is placed as an arc that
+    /// keeps its sweep within a quarter turn, or as its chord; some turns
+    /// need the chord, and quarter turns never do.
+    #[test]
+    fn an_arc_rounding_turns_over_is_placed_as_its_chord() {
+        let c = Point::new(123_457, -98_765);
+        let a = Arc {
+            start: c.offset(1, 0),
+            end: c.offset(0, 1),
+            centre: c,
+            dir: Dir::Ccw,
+        };
+        let mut chords = 0;
+        for rot in (0..360_000).step_by(997) {
+            for mirror in [false, true] {
+                match place(rot, mirror).edge(&Edge::Arc(a)) {
+                    Edge::Arc(p) => assert!(
+                        (p.sweep() - a.sweep()).abs() <= core::f64::consts::FRAC_PI_2,
+                        "{rot} {mirror}: {p:?}"
+                    ),
+                    Edge::Segment(_) => chords += 1,
+                }
+            }
+        }
+        assert!(chords > 0);
+        for rot in [0, 90_000, 180_000, 270_000] {
+            assert_eq!(
+                place(rot, false).edge(&Edge::Arc(a)),
+                Edge::Arc(place(rot, false).arc(&a))
+            );
+        }
     }
 }

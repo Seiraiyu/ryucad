@@ -889,7 +889,15 @@ pub fn properties(ui: &mut egui::Ui, ws: &mut Workspace) {
         .and_then(|s| s["label"].as_str())
         .map(str::to_owned);
     let preview = ws.forms.insert_preview.clone();
-    let Some(form) = &mut ws.forms.form else {
+    // A feature of a part the window no longer shows isn't shown either
+    // (#1027, as the Part tile since #869); its form is kept for when the
+    // part is shown again.
+    let hidden = ws
+        .forms
+        .form
+        .as_ref()
+        .is_some_and(|f| ws.model.choice_is_hidden(&f.part));
+    let Some(form) = ws.forms.form.as_mut().filter(|_| !hidden) else {
         crate::ui::tiles::empty(
             ui,
             crate::ui::icon::Icon::SLIDERS_HORIZONTAL,

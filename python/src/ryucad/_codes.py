@@ -76,6 +76,7 @@ class Code(str, Enum):
     NOTHING_TO_RELEASE = "nothing_to_release"
     RELEASE_PENDING = "release_pending"
     RELEASE_FOLDER_UNSAFE = "release_folder_unsafe"
+    RELEASE_TAG_CLASH = "release_tag_clash"
     REVIEW_UNAUTHENTICATED = "review_unauthenticated"
     REVIEW_NO_REMOTE = "review_no_remote"
     REVIEW_UNREACHABLE = "review_unreachable"
@@ -488,6 +489,7 @@ EXIT: dict[Code, int] = {
     Code.NOTHING_TO_RELEASE: 1,
     Code.RELEASE_PENDING: 1,
     Code.RELEASE_FOLDER_UNSAFE: 1,
+    Code.RELEASE_TAG_CLASH: 1,
     Code.REVIEW_UNAUTHENTICATED: 1,
     Code.REVIEW_NO_REMOTE: 1,
     Code.REVIEW_UNREACHABLE: 4,

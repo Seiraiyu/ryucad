@@ -13,7 +13,7 @@ use crate::ui::icon::Icon;
 use crate::ui::modes;
 use crate::ui::style;
 use crate::ui::view::View;
-use eframe::egui::{self, RichText};
+use eframe::egui::{self, Color32, RichText};
 
 pub fn annotations(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
     filters(ui, ws);
@@ -87,7 +87,12 @@ fn one(
     let colour = style::color32(style::participant(&e.by));
     ui.horizontal_wrapped(|ui| {
         let tag = number.map_or_else(|| "·".to_owned(), |n| format!("#{n}"));
-        let r = ui.selectable_label(chosen, RichText::new(tag).strong().color(colour));
+        let r = ui.selectable_label(
+            chosen,
+            RichText::new(tag)
+                .strong()
+                .color(tag_colour(chosen, colour, ui.visuals())),
+        );
         // Named for a screen reader: who, its state and what (#749).
         let spoken = e.spoken(number);
         r.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, chosen, &spoken));
@@ -298,4 +303,72 @@ fn reference_row(
         }
         ui.add(egui::Label::new(RichText::new(text).monospace().small()).truncate());
     });
+}
+
+/// An annotation's tag's colour: its author's, or on the selection's fill
+/// once chosen the selection's own text colour, which every look makes
+/// readable there (#868: teal on studio dark's blue was 1.03:1).
+pub(crate) fn tag_colour(chosen: bool, participant: Color32, visuals: &egui::Visuals) -> Color32 {
+    if chosen {
+        visuals.selection.stroke.color
+    } else {
+        participant
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tag_colour;
+    use crate::ui::style::{Contrast, Look};
+    use crate::ui::tiles::tree::mark_colours;
+    use eframe::egui::Color32;
+
+    /// WCAG 2.1's contrast ratio of two colours.
+    fn contrast(a: Color32, b: Color32) -> f32 {
+        let lum = |c: Color32| {
+            let ch = |c: u8| {
+                let c = f32::from(c) / 255.0;
+                if c <= 0.04045 {
+                    c / 12.92
+                } else {
+                    ((c + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * ch(c.r()) + 0.7152 * ch(c.g()) + 0.0722 * ch(c.b())
+        };
+        let (la, lb) = (lum(a), lum(b));
+        (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+    }
+
+    /// #868: a chosen annotation's tag and a tree's find match are read
+    /// on the selection's fill, at least 4.5:1, in every look; the
+    /// participant colour on studio dark's fill wasn't (1.03:1).
+    #[test]
+    fn text_on_the_selection_fill_is_the_selections_own() {
+        let teal = Color32::from_rgb(71, 161, 156);
+        for look in [Look::Drafting, Look::Graphite, Look::Studio] {
+            for level in [Contrast::Normal, Contrast::High] {
+                for dark in [false, true] {
+                    let v = look.style_with(dark, level).visuals;
+                    let bg = v.selection.bg_fill;
+                    let tag = tag_colour(true, teal, &v);
+                    assert!(
+                        contrast(tag, bg) >= 4.5,
+                        "{look:?} {level:?} dark={dark}: tag"
+                    );
+                    assert_eq!(tag_colour(false, teal, &v), teal);
+                    let (text, fill) = mark_colours(true, teal, &v);
+                    assert_eq!(fill, bg);
+                    assert!(
+                        contrast(text, fill) >= 4.5,
+                        "{look:?} {level:?} dark={dark}: find match"
+                    );
+                    assert_eq!(mark_colours(false, teal, &v), (teal, Color32::TRANSPARENT));
+                }
+            }
+        }
+        // What the issue measured: teal on studio dark's fill.
+        let v = Look::Studio.style_with(true, Contrast::Normal).visuals;
+        assert!(contrast(teal, v.selection.bg_fill) < 4.5);
+    }
 }
