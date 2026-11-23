@@ -6,11 +6,14 @@
 //! their names.
 
 pub(crate) mod fit;
+pub(crate) mod partial;
 pub(crate) mod recognise;
 pub(crate) mod remake;
 
 #[cfg(test)]
 mod tests;
+
+pub use partial::{BlendUnit, KeptUnit, PartialDelete};
 
 use crate::Error;
 use crate::blend::BlendKind;

@@ -37,7 +37,8 @@ pub(crate) mod vertices;
 mod tests;
 
 pub use blends::{
-    Blends, Corner, DEFAULT_TOLERANCE, DeleteBlends, RecogniseOptions, Recognised, Recognition,
+    BlendUnit, Blends, Corner, DEFAULT_TOLERANCE, DeleteBlends, KeptUnit, PartialDelete,
+    RecogniseOptions, Recognised, Recognition,
     delete_blends, delete_blends_with, recognise_blends, recognise_blends_with, resize_blends,
     resize_blends_with,
 };
