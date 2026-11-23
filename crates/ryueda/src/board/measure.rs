@@ -12,13 +12,16 @@ use ryu_copper::measure::{self, Body, BodyOptions, Verdict};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
+/// A body and, for copper, its piece (to find its island).
+type Piece = (Body, Option<(Key, u32)>);
+
+/// Copper pieces by layer.
+type ByLayer = BTreeMap<usize, Vec<Piece>>;
+
 /// What a reference stands for: copper pieces by layer (with each piece's
 /// island and net), or a shape on no layer (a hole, a courtyard).
 enum Target {
-    Copper(
-        BTreeMap<usize, Vec<(Body, Option<(Key, u32)>)>>,
-        Vec<String>,
-    ),
+    Copper(ByLayer, Vec<String>),
     Plane(Body),
 }
 
@@ -92,7 +95,7 @@ fn target(c: &Connectivity, s: &BoardShapes, r: &str) -> Result<Target> {
 }
 
 fn copper(c: &Connectivity, keys: &[Key], mut nets: Vec<String>) -> Target {
-    let mut by: BTreeMap<usize, Vec<(Body, Option<(Key, u32)>)>> = BTreeMap::new();
+    let mut by: ByLayer = BTreeMap::new();
     for k in keys {
         let layer = c.built.layout.items[k].layer;
         for (i, b) in c.copper.piece_bodies(k) {
@@ -106,11 +109,7 @@ fn copper(c: &Connectivity, keys: &[Key], mut nets: Vec<String>) -> Target {
 
 /// The closest pair of bodies of two lists: its distance and whether the
 /// two touch, and whether they lie on one island.
-fn closest(
-    c: &Connectivity,
-    a: &[(Body, Option<(Key, u32)>)],
-    b: &[(Body, Option<(Key, u32)>)],
-) -> Option<Value> {
+fn closest(c: &Connectivity, a: &[Piece], b: &[Piece]) -> Option<Value> {
     let mut best: Option<(ryu_copper::measure::Distance, Verdict, bool)> = None;
     for (x, xk) in a {
         for (y, yk) in b {

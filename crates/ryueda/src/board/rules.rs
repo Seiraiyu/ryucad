@@ -889,8 +889,10 @@ mod tests {
         assert_eq!(unused[0].code, Code::WaiverUnused);
         assert!(!unused[0].is_error());
         assert_eq!(unused[0].refs, ["b:waiver/0123456789abcdef"]);
-        let mut file = RulesFile::default();
-        file.waivers = w;
+        let file = RulesFile {
+            waivers: w,
+            ..RulesFile::default()
+        };
         let faults = judge(&file, &JLC_2L, &classes());
         assert!(
             faults
