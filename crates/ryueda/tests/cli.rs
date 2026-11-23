@@ -849,6 +849,16 @@ fn every_protocol_method_has_a_command() {
         ("board.rules.explain", &["board", "rules", "explain"]),
         ("board.waive", &["board", "waive"]),
         ("board.measure", &["board", "measure"]),
+        ("board.group.list", &["board", "group", "list"]),
+        ("board.keepout.add", &["board", "keepout", "add"]),
+        ("board.text.add", &["board", "text", "add"]),
+        ("board.drawing.add", &["board", "drawing", "add"]),
+        ("board.drawing.edit", &["board", "drawing", "edit"]),
+        ("board.drawing.delete", &["board", "drawing", "delete"]),
+        ("board.keepout.edit", &["board", "keepout", "edit"]),
+        ("board.keepout.delete", &["board", "keepout", "delete"]),
+        ("board.group.move", &["board", "group", "move"]),
+        ("board.group.flip", &["board", "group", "flip"]),
         ("board.export", &["board", "export"]),
         ("block.create", &["block", "create"]),
         ("block.edit", &["block", "edit"]),
@@ -6091,4 +6101,287 @@ fn board_measure_from_the_cli() {
     let part = p.ok(&["board", "measure", id, "U1", "J1"]);
     assert_eq!(part["closest"]["layer"], Value::Null, "{part}");
     p.fails(&["board", "measure", id, "R9/1", "R1/1"], "not_found", 1);
+}
+
+/// A part's placement as `board show` prints it.
+fn placement_of(p: &Pair, board: &str, refdes: &str) -> Value {
+    let s = p.ok(&["board", "show", board]);
+    s["occurrences"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["refdes"] == refdes)
+        .unwrap_or_else(|| panic!("{refdes} in {s}"))["placement"]
+        .clone()
+}
+
+/// Placement by constraint from the CLI (ryueda 7.C): a part put near a
+/// pin by the legaliser, the constraint kept and judged; a part moved off
+/// it is a finding; re-placing keeps the constraint and the group; the
+/// designator moved alone; no room is a typed refusal.
+#[test]
+fn parts_placed_by_constraint_from_the_cli() {
+    let p = Pair::breakout();
+    p.ok(&[
+        "board", "create", "Main", "--design", "board", "--rect", "26,20", "--id", "main",
+    ]);
+    p.ok(&["board", "place", "main", "R1", "--at", "10,10"]);
+    let v = p.ok(&[
+        "board", "place", "main", "R2", "--near", "R1/2", "--within", "1mm", "--group", "pullups",
+    ]);
+    let at = v["placed"][0]["at"].clone();
+    assert!(
+        v["placed"][0]["legalised"]["tried"].as_u64().unwrap() >= 1,
+        "{v}"
+    );
+    assert!(
+        v["placed"][0].get("side").is_none(),
+        "a top part says no side"
+    );
+    let added: Vec<&str> = v["drc"]["added"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["code"].as_str().unwrap())
+        .collect();
+    assert!(!added.contains(&"placement_constraint_unmet"), "{v}");
+    assert!(!added.contains(&"drc_courtyard_overlap"), "{v}");
+    let r2 = placement_of(&p, "main", "R2");
+    assert_eq!(r2["constraints"][0]["near"], "R1/2", "{r2}");
+    assert_eq!(r2["group"], "pullups", "{r2}");
+    // Moved 5 mm away by hand: the promise is broken, and said so.
+    let x = at[0].as_i64().unwrap() + 5_000_000;
+    let ops = json!([{"ref": "R2", "at": [x, at[1]]}]).to_string();
+    let m = p.ok(&["board", "place", "main", "--ops", &ops]);
+    let unmet = m["drc"]["added"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["code"] == "placement_constraint_unmet")
+        .unwrap_or_else(|| panic!("{m}"))
+        .clone();
+    assert!(unmet["details"]["distance_nm"].as_i64().unwrap() > 1_000_000);
+    let r2 = placement_of(&p, "main", "R2");
+    assert_eq!(r2["group"], "pullups", "re-placing keeps the group: {r2}");
+    assert_eq!(
+        r2["constraints"][0]["near"], "R1/2",
+        "and the constraint: {r2}"
+    );
+    // The designator alone: the part stays.
+    p.ok(&["board", "place", "main", "R2", "--ref-at", "0,1.5"]);
+    let r2b = placement_of(&p, "main", "R2");
+    assert_eq!(r2b["at"], r2["at"]);
+    assert_eq!(r2b["fields"]["reference"]["at"], json!([0, 1_500_000]));
+    let clear = p.ok(&["board", "place", "main", "R2", "--unconstrain", "--ungroup"]);
+    assert!(
+        clear["drc"]["removed"]
+            .as_array()
+            .unwrap()
+            .contains(&unmet["id"]),
+        "{clear}"
+    );
+    // No room: within 0.01 mm of a pin whose own courtyard is in the way.
+    p.fails(
+        &[
+            "board", "place", "main", "C1", "--near", "R1/1", "--within", "0.01mm",
+        ],
+        "placement_no_room",
+        1,
+    );
+    p.fails(&["board", "place", "main", "C1"], "invalid_param", 1);
+    // A bottom part keeps its side when only its designator moves; a move
+    // without --side puts it on top, as stage 5 did.
+    p.ok(&[
+        "board", "place", "main", "R1", "--at", "10,10", "--side", "bottom",
+    ]);
+    p.ok(&["board", "place", "main", "R1", "--ref-at", "0,1"]);
+    assert_eq!(placement_of(&p, "main", "R1")["side"], "bottom");
+    p.ok(&["board", "place", "main", "R1", "--at", "10,10"]);
+    assert!(placement_of(&p, "main", "R1").get("side").is_none());
+}
+
+/// Groups from the CLI (ryueda 7.C): listed, moved, turned and flipped
+/// rigidly, all or nothing; an unknown group refused.
+#[test]
+fn groups_move_rigidly_from_the_cli() {
+    let p = Pair::breakout();
+    p.ok(&[
+        "board", "create", "Main", "--design", "board", "--rect", "30,20", "--id", "main",
+    ]);
+    p.ok(&[
+        "board", "place", "main", "R1", "--at", "10,10", "--group", "g",
+    ]);
+    p.ok(&[
+        "board", "place", "main", "R2", "--at", "14,10", "--group", "g",
+    ]);
+    p.ok(&["board", "place", "main", "C1", "--at", "20,10"]);
+    let l = p.ok(&["board", "group", "list", "main"]);
+    assert_eq!(
+        l["groups"],
+        json!([{"group": "g", "members": ["r1", "r2"]}]),
+        "{l}"
+    );
+    let m = p.ok(&["board", "group", "move", "main", "g", "--by", "1,2"]);
+    assert_eq!(m["moved"].as_array().unwrap().len(), 2, "{m}");
+    let at = |r: &str| placement_of(&p, "main", r);
+    assert_eq!(at("R1")["at"], json!([11_000_000, 12_000_000]));
+    assert_eq!(
+        at("C1")["at"],
+        json!([20_000_000, 10_000_000]),
+        "not a member"
+    );
+    p.ok(&[
+        "board", "group", "move", "main", "g", "--rotate", "90", "--about", "13,12",
+    ]);
+    assert_eq!(at("R1")["at"], json!([13_000_000, 10_000_000]));
+    assert_eq!(at("R1")["rotation_mdeg"], 90_000);
+    p.ok(&["board", "group", "flip", "main", "g"]);
+    assert_eq!(at("R1")["side"], "bottom");
+    p.fails(
+        &["board", "group", "move", "main", "nope", "--by", "1,0"],
+        "not_found",
+        1,
+    );
+    p.fails(&["board", "group", "move", "main", "g"], "invalid_param", 1);
+}
+
+/// Keepouts from the CLI (ryueda 7.C): added by rectangle, a via inside
+/// it a finding, the keepout edited off it, refused when it doesn't
+/// close, deleted.
+#[test]
+fn keepouts_from_the_cli() {
+    let p = Pair::breakout();
+    for args in breakout_board::script() {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        p.ok(&args);
+    }
+    let id = breakout_board::BOARD;
+    // The round's ground via g_u2 sits at (4.85, 2.0).
+    let k = p.ok(&[
+        "board", "keepout", "add", id, "--rect", "4,1,6,3", "--keep", "vias", "--id", "k1",
+    ]);
+    assert_eq!(
+        k["keepouts"][0]["reference"],
+        format!("{id}:keepout/k1"),
+        "{k}"
+    );
+    let added = k["drc"]["added"].as_array().unwrap();
+    assert!(
+        added.iter().any(|f| f["code"] == "drc_keepout"
+            && f["refs"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(format!("{id}:via/g_u2")))),
+        "{k}"
+    );
+    let e = p.ok(&[
+        "board",
+        "keepout",
+        "edit",
+        id,
+        "k1",
+        "--rect",
+        "0.5,9,1.5,10",
+    ]);
+    assert!(!e["drc"]["removed"].as_array().unwrap().is_empty(), "{e}");
+    let bad = json!({"start": [0, 0], "edges": [{"type": "line", "to": [1, 1]}, {"type": "line", "to": [1, 0]}]}).to_string();
+    p.fails(
+        &["board", "keepout", "edit", id, "k1", "--contour", &bad],
+        "board_contour_invalid",
+        1,
+    );
+    p.fails(
+        &[
+            "board", "keepout", "add", id, "--rect", "0,0,1,1", "--keep", "vias", "--layer", "in1",
+        ],
+        "board_layer_not_found",
+        1,
+    );
+    p.ok(&["board", "keepout", "delete", id, "k1"]);
+    p.fails(&["board", "keepout", "delete", id, "k1"], "not_found", 1);
+}
+
+/// Text and drawings from the CLI (ryueda 7.C): text on the top and the
+/// bottom silk, in the silk Gerbers; a line on fab; copper refused;
+/// edited and deleted.
+#[test]
+fn text_and_drawings_from_the_cli() {
+    let p = Pair::breakout();
+    for args in breakout_board::script() {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        p.ok(&args);
+    }
+    let id = breakout_board::BOARD;
+    let gto = |dir: &str| -> Vec<u8> {
+        let e = std::fs::read_dir(p.direct.join("board").join(dir))
+            .unwrap()
+            .flatten()
+            .find(|e| e.file_name().to_string_lossy().ends_with(".gto"))
+            .unwrap();
+        std::fs::read(e.path()).unwrap()
+    };
+    p.ok(&["board", "export", id, "--out", "fab0"]);
+    let t = p.ok(&[
+        "board", "text", "add", id, "--layer", "silk.top", "--at", "8,10", "--text", "REV A",
+        "--id", "rev",
+    ]);
+    assert_eq!(
+        t["drawings"][0]["reference"],
+        format!("{id}:drawing/rev"),
+        "{t}"
+    );
+    p.ok(&[
+        "board",
+        "text",
+        "add",
+        id,
+        "--layer",
+        "silk.bottom",
+        "--at",
+        "8,1",
+        "--text",
+        "BACK",
+        "--size",
+        "0.8mm",
+    ]);
+    let line = json!([{"layer": "fab.top", "type": "line", "start": ["1mm", "1mm"], "end": ["3mm", "1mm"], "width_nm": 100_000}]);
+    p.ok(&["board", "drawing", "add", id, "--ops", &line.to_string()]);
+    p.fails(
+        &[
+            "board",
+            "text",
+            "add",
+            id,
+            "--layer",
+            "copper.top",
+            "--at",
+            "1,1",
+            "--text",
+            "X",
+        ],
+        "invalid_document",
+        1,
+    );
+    p.ok(&[
+        "board",
+        "drawing",
+        "edit",
+        id,
+        "rev",
+        "--ops",
+        &json!({"text": "REV B"}).to_string(),
+    ]);
+    p.ok(&["board", "export", id, "--out", "fabd"]);
+    assert_ne!(gto("fab0"), gto("fabd"), "the text is in the top silk");
+    for top in [&p.direct, &p.daemon] {
+        let gto = std::fs::read_dir(top.join("board/fabd"))
+            .unwrap()
+            .flatten()
+            .find(|e| e.file_name().to_string_lossy().ends_with(".gto"))
+            .unwrap();
+        let bytes = std::fs::read(gto.path()).unwrap();
+        assert!(!bytes.is_empty());
+    }
+    p.ok(&["board", "drawing", "delete", id, "rev"]);
+    p.fails(&["board", "drawing", "delete", id, "rev"], "not_found", 1);
 }

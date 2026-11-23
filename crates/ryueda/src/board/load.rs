@@ -27,6 +27,10 @@ pub struct BoardFiles {
     pub holes: BTreeMap<Id, Loaded<Hole>>,
     /// `rules.json`, when the board has one (design 924).
     pub rules: Option<Loaded<super::rules::RulesFile>>,
+    /// By ID (ryueda 7.C).
+    pub keepouts: BTreeMap<Id, Loaded<super::keepout::Keepout>>,
+    /// By ID (ryueda 7.C).
+    pub drawings: BTreeMap<Id, Loaded<super::drawing::Graphic>>,
 }
 
 fn unknown(path: &str) -> Fault {
@@ -86,6 +90,8 @@ fn load_one(
     let mut vias = BTreeMap::new();
     let mut holes = BTreeMap::new();
     let mut rules = None;
+    let mut keepouts = BTreeMap::new();
+    let mut drawings = BTreeMap::new();
     let mut any = false;
     for (name, kind) in src.list(dir)? {
         let path = join(dir, &name);
@@ -167,6 +173,32 @@ fn load_one(
                     hole_faults,
                 )?;
             }
+            (DRAWINGS, Kind::Dir) => {
+                any |= routes(
+                    src,
+                    &path,
+                    DRAWINGS,
+                    DRAWING_KIND,
+                    "drawing",
+                    &mut h,
+                    faults,
+                    &mut drawings,
+                    super::drawing::judge,
+                )?;
+            }
+            (KEEPOUTS, Kind::Dir) => {
+                any |= routes(
+                    src,
+                    &path,
+                    KEEPOUTS,
+                    KEEPOUT_KIND,
+                    "keepout",
+                    &mut h,
+                    faults,
+                    &mut keepouts,
+                    |_| Vec::new(),
+                )?;
+            }
             (RULES_FILE, Kind::File) => {
                 any = true;
                 let bytes = read(src, &path)?;
@@ -199,6 +231,16 @@ fn load_one(
     // Routes judged against the board's stackup.
     if let Some(Loaded { item: Ok(b), .. }) = &board {
         let n = super::stackup::copper_count(b);
+        for (kid, k) in keepouts.iter_mut() {
+            if let Ok(ko) = &k.item {
+                let path = route_path(&id, KEEPOUTS, kid);
+                k.faults.extend(
+                    super::keepout::judge(ko, n)
+                        .into_iter()
+                        .map(|f| f.with("path", &path)),
+                );
+            }
+        }
         for (tid, t) in tracks.iter_mut() {
             if let Ok(track) = &t.item
                 && track.layer.index(n).is_none()
@@ -246,6 +288,8 @@ fn load_one(
         vias,
         holes,
         rules,
+        keepouts,
+        drawings,
     }))
 }
 
@@ -278,7 +322,11 @@ fn routes<T: serde::de::DeserializeOwned>(
         piece(h, join(folder, &file).as_bytes());
         piece(h, &bytes);
         // Holes have no format 2.
-        let newest = if kind == HOLE_KIND { FORMAT } else { NEWEST };
+        let newest = if [HOLE_KIND, KEEPOUT_KIND, DRAWING_KIND].contains(&kind) {
+            FORMAT
+        } else {
+            NEWEST
+        };
         let loaded = match doc::read::<T>(&bytes, &at, kind, newest) {
             Ok(x) => Loaded {
                 faults: check(&x).into_iter().map(|f| f.with("path", &at)).collect(),
@@ -370,13 +418,57 @@ fn hole_faults(h: &Hole) -> Vec<Fault> {
 
 fn placement_faults(p: &Placement) -> Vec<Fault> {
     let lim = ryu_board::geom::COORD_LIMIT;
+    let mut out = Vec::new();
     if p.at[0].abs() > lim || p.at[1].abs() > lim {
-        vec![
+        out.push(
             Fault::error(Code::BoardOutOfRange, "a placement past ±2^40 nm").with("pointer", "/at"),
-        ]
-    } else {
-        Vec::new()
+        );
     }
+    for (i, c) in p.constraints.iter().enumerate() {
+        let w = match c {
+            Constraint::Near { within_nm, .. } | Constraint::Edge { within_nm, .. } => *within_nm,
+            Constraint::Side { .. } => 0,
+        };
+        if !(0..=lim).contains(&w) {
+            out.push(invalid(
+                "a constraint's within_nm is 0 to 2^40 nm",
+                &format!("/constraints/{i}/within_nm"),
+            ));
+        }
+    }
+    if let Some(g) = &p.group
+        && (g.is_empty()
+            || g.chars().count() > 64
+            || g.contains('/')
+            || g.chars().any(char::is_control))
+    {
+        out.push(invalid(
+            "a group is 1 to 64 characters, without / or control characters",
+            "/group",
+        ));
+    }
+    for (name, f) in [
+        ("reference", &p.fields.reference),
+        ("value", &p.fields.value),
+    ] {
+        if let Some(f) = f
+            && f.size_nm.is_some_and(|s| s[0] <= 0 || s[1] <= 0)
+        {
+            out.push(invalid(
+                "a field's size is positive",
+                &format!("/fields/{name}/size_nm"),
+            ));
+        }
+        if let Some(f) = f
+            && f.at.is_some_and(|a| a[0].abs() > lim || a[1].abs() > lim)
+        {
+            out.push(
+                Fault::error(Code::BoardOutOfRange, "a field's place past ±2^40 nm")
+                    .with("pointer", format!("/fields/{name}/at")),
+            );
+        }
+    }
+    out
 }
 
 impl BoardFiles {
@@ -408,6 +500,12 @@ impl BoardFiles {
         }
         if let Some(r) = &self.rules {
             one(r.item.as_ref().err(), &r.faults);
+        }
+        for k in self.keepouts.values() {
+            one(k.item.as_ref().err(), &k.faults);
+        }
+        for d in self.drawings.values() {
+            one(d.item.as_ref().err(), &d.faults);
         }
         out
     }
@@ -468,6 +566,34 @@ mod tests {
         assert_ne!(a[&id].revision, b[&id].revision);
         let again = load(&files(&[("boards/b/board.json", BOARD)])).unwrap().0;
         assert_eq!(a[&id].revision, again[&id].revision);
+    }
+
+    #[test]
+    fn bad_constraints_and_groups_are_faults() {
+        for (body, pointer) in [
+            (
+                r#""constraints":[{"near":"U1","within_nm":-1}]"#,
+                "/constraints/0/within_nm",
+            ),
+            (r#""group":"a/b""#, "/group"),
+            (r#""group":"""#, "/group"),
+            (
+                r#""fields":{"reference":{"size_nm":[0,1]}}"#,
+                "/fields/reference/size_nm",
+            ),
+        ] {
+            let placed = format!(r#"{{"at":[1,2],"format":2,"kind":"ryueda.placement",{body}}}"#);
+            let (boards, _) = load(&files(&[
+                ("boards/b/board.json", BOARD),
+                ("boards/b/placements/r1.json", &placed),
+            ]))
+            .unwrap();
+            let f = boards[&Id::parse("b", "board").unwrap()].faults();
+            assert!(
+                f.iter().any(|x| x.error.details["pointer"] == pointer),
+                "{body}: {f:?}"
+            );
+        }
     }
 
     #[test]

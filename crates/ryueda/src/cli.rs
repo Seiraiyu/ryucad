@@ -1666,13 +1666,13 @@ enum BoardCmd {
         /// An occurrence reference (s1/u1) or a designator.
         #[arg(value_name = "REF", required_unless_present = "ops")]
         r#ref: Option<String>,
-        /// X,Y (lengths; bare numbers in the project's unit).
-        #[arg(
-            long,
-            value_name = "X,Y",
-            required_unless_present = "ops",
-            allow_hyphen_values = true
-        )]
+        /// X,Y (lengths; bare numbers in the project's unit). Re-placing a
+        /// part keeps its constraints, group and designator place unless the
+        /// request changes them; --at puts it on the top unless --side says
+        /// bottom; without --at or a constraint a placed part stays where it
+        /// is, on its side. Parts placed by one request don't see each
+        /// other's new places: place them in turn.
+        #[arg(long, value_name = "X,Y", allow_hyphen_values = true)]
         at: Option<String>,
         /// Degrees counterclockwise.
         #[arg(long, allow_hyphen_values = true)]
@@ -1682,9 +1682,47 @@ enum BoardCmd {
         /// counterclockwise as seen from the top.
         #[arg(long)]
         side: Option<String>,
-        /// JSON: [{ref, at: [x, y], rotation?, side?}]; integers are nanometres (a
-        /// rotation millidegrees), strings lengths (a rotation degrees): "90", not 90.
-        #[arg(long, value_name = "OPS", conflicts_with_all = ["ref", "at", "rotation", "side"])]
+        /// Place near a pad or part (U1/7, U1): the legaliser finds the
+        /// nearest free point of the placement grid when --at is absent,
+        /// and the constraint is kept and checked on every write.
+        #[arg(long, value_name = "REF")]
+        near: Option<String>,
+        /// Place against a side of the board: left, right, top, bottom, any.
+        #[arg(long, value_name = "SIDE")]
+        edge: Option<String>,
+        /// The distance --near or --edge allows (a length).
+        #[arg(long, value_name = "LEN")]
+        within: Option<String>,
+        /// Keep the part on its side: a constraint.
+        #[arg(long)]
+        hold_side: bool,
+        /// Remove the part's constraints.
+        #[arg(long, conflicts_with_all = ["near", "edge", "hold_side"])]
+        unconstrain: bool,
+        /// Put the part in a group (a free name; `board group` moves it).
+        #[arg(long)]
+        group: Option<String>,
+        /// Take the part out of its group.
+        #[arg(long, conflicts_with = "group")]
+        ungroup: bool,
+        /// The designator's place relative to the part: DX,DY.
+        #[arg(long, value_name = "DX,DY", allow_hyphen_values = true)]
+        ref_at: Option<String>,
+        /// The designator's rotation relative to the part, degrees.
+        #[arg(long, allow_hyphen_values = true)]
+        ref_rotation: Option<String>,
+        /// Hide the designator.
+        #[arg(long)]
+        ref_hide: bool,
+        /// Show a hidden designator.
+        #[arg(long, conflicts_with = "ref_hide")]
+        ref_show: bool,
+        /// JSON: [{ref, at?: [x, y], rotation?, side?, near?, edge?, within?,
+        /// constraints?: [{near, within} | {edge, within} | {side}], group?,
+        /// fields?: {reference?: {at?, rotation?, hidden?, size?}, value?: …}}];
+        /// integers are nanometres (a rotation millidegrees), strings lengths
+        /// (a rotation degrees): "90", not 90.
+        #[arg(long, value_name = "OPS", conflicts_with_all = ["ref", "at", "rotation", "side", "near", "edge", "within", "hold_side", "unconstrain", "group", "ungroup", "ref_at", "ref_rotation", "ref_hide", "ref_show"])]
         ops: Option<String>,
         #[command(flatten)]
         expect: Expect,
@@ -1695,8 +1733,9 @@ enum BoardCmd {
         #[arg(long)]
         out: PathBuf,
         /// Layers bottom first: copper.top, mask.top, paste.top, silk.top, fab.top,
-        /// courtyard.top, their .bottom, drill, outline; and copper.in1 … on a
-        /// board with inner layers.
+        /// courtyard.top, their .bottom, keepout, drill, outline; copper.in1 … on a
+        /// board with inner layers; and any layer a drawing is on (drawings,
+        /// comments, eco.1, eco.2, user.N).
         #[arg(long = "layer")]
         layers: Vec<String>,
         /// top (the default) or bottom, seen from below.
@@ -1756,6 +1795,20 @@ enum BoardCmd {
     /// The board's rules: defaults and per net class over its preset's floor.
     #[command(subcommand)]
     Rules(RulesCmd),
+    /// Groups: parts moved together, rigidly, all or nothing.
+    #[command(subcommand)]
+    Group(GroupCmd),
+    /// Keepouts: areas on copper layers keeping tracks, vias, pads, pours,
+    /// parts or holes out.
+    #[command(subcommand)]
+    Keepout(KeepoutCmd),
+    /// Text on silk, fab, mask or a documentation layer.
+    #[command(subcommand)]
+    Text(TextCmd),
+    /// Drawings on silk, fab, mask or a documentation layer: lines,
+    /// rectangles, arcs, circles, polygons, Béziers, text.
+    #[command(subcommand)]
+    Drawing(DrawingCmd),
     /// The exact distance between two items (R1/1, track/t1, via/v1,
     /// hole/h1, R1/1#hole, R1 by its courtyard, net:NAME) on each copper
     /// layer they share, with the clearance the rules ask of them.
@@ -1920,6 +1973,165 @@ enum HoleCmd {
         board: String,
         #[arg(required = true)]
         holes: Vec<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+}
+
+#[derive(Subcommand)]
+enum TextCmd {
+    /// Text centred on --at on --layer (silk.top, silk.bottom, fab.*, mask.*,
+    /// drawings, comments, eco.1, eco.2, user.N); on a bottom layer it reads
+    /// from below. Copper layers are refused: copper is tracks and pours.
+    Add {
+        board: String,
+        #[arg(long)]
+        layer: String,
+        #[arg(long, value_name = "X,Y", allow_hyphen_values = true)]
+        at: String,
+        #[arg(long)]
+        text: String,
+        /// Character height and width (1mm by default).
+        #[arg(long)]
+        size: Option<String>,
+        /// Stroke width (a seventh of the size, at least 0.1mm, by default).
+        #[arg(long)]
+        thickness: Option<String>,
+        /// Degrees counterclockwise.
+        #[arg(long, allow_hyphen_values = true)]
+        rotation: Option<String>,
+        #[arg(long)]
+        id: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+}
+
+#[derive(Subcommand)]
+enum DrawingCmd {
+    /// Drawings from --ops, all or nothing.
+    Add {
+        board: String,
+        /// JSON: [{layer, type: line|rect|arc|circle|polygon|bezier|text, …,
+        /// id?}] as a footprint's graphics; integers are nanometres, strings
+        /// lengths; a text's rotation in degrees as "rotation".
+        #[arg(long, value_name = "OPS")]
+        ops: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Change a drawing's keys: --ops is a JSON object of them.
+    Edit {
+        board: String,
+        drawing: String,
+        #[arg(long, value_name = "OPS")]
+        ops: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Delete drawings by ID.
+    Delete {
+        board: String,
+        #[arg(required = true)]
+        drawings: Vec<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+}
+
+#[derive(Subcommand)]
+enum KeepoutCmd {
+    /// A keepout by --rect X0,Y0,X1,Y1 or --contour JSON, keeping --keep
+    /// kinds (copper, tracks, vias, pads, pours, placements, holes; repeat)
+    /// out of --layer layers (top, in1 …, bottom, all; repeat; all by
+    /// default). Placements are kept off the side whose outer layer it
+    /// names. --ops for several, all or nothing.
+    Add {
+        board: String,
+        /// JSON: {start: [x, y], edges: [{type: line, to} | {type: arc, mid, to}]}.
+        #[arg(long, value_name = "JSON", conflicts_with = "rect")]
+        contour: Option<String>,
+        #[arg(long, value_name = "X0,Y0,X1,Y1", allow_hyphen_values = true)]
+        rect: Option<String>,
+        #[arg(long = "layer")]
+        layers: Vec<String>,
+        #[arg(long = "keep")]
+        keeps: Vec<String>,
+        #[arg(long)]
+        id: Option<String>,
+        /// JSON: [{contour | rect: [x0, y0, x1, y1], layer?: [..], keep: [..], id?}].
+        #[arg(long, value_name = "OPS", conflicts_with_all = ["contour", "rect", "layers", "keeps", "id"])]
+        ops: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Replace a keepout's contour (--rect or --contour), layers or kinds.
+    Edit {
+        board: String,
+        keepout: String,
+        #[arg(long, value_name = "JSON", conflicts_with = "rect")]
+        contour: Option<String>,
+        #[arg(long, value_name = "X0,Y0,X1,Y1", allow_hyphen_values = true)]
+        rect: Option<String>,
+        #[arg(long = "layer")]
+        layers: Vec<String>,
+        #[arg(long = "keep")]
+        keeps: Vec<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Delete keepouts by ID.
+    Delete {
+        board: String,
+        #[arg(required = true)]
+        keepouts: Vec<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+}
+
+/// `X0,Y0,X1,Y1` as four values.
+fn quad_arg(flag: &str, text: &str) -> Result<Vec<String>> {
+    let parts: Vec<String> = text.split(',').map(|x| x.trim().to_owned()).collect();
+    if parts.len() != 4 || parts.iter().any(String::is_empty) {
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!("{flag} is four values, X0,Y0,X1,Y1"),
+        )
+        .with("flag", flag));
+    }
+    Ok(parts)
+}
+
+#[derive(Subcommand)]
+enum GroupCmd {
+    /// Each group and its members.
+    List { board: String },
+    /// Move every member --by DX,DY, or turn them --rotate A degrees about
+    /// --about X,Y (the members' places' box centre by default). Tracks
+    /// don't follow: the DRC delta says what moved under them.
+    Move {
+        board: String,
+        group: String,
+        #[arg(long, value_name = "DX,DY", allow_hyphen_values = true)]
+        by: Option<String>,
+        #[arg(long, allow_hyphen_values = true, conflicts_with = "by")]
+        rotate: Option<String>,
+        #[arg(
+            long,
+            value_name = "X,Y",
+            allow_hyphen_values = true,
+            requires = "rotate"
+        )]
+        about: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Turn every member over to the other side, mirrored about the
+    /// members' box's vertical centre line.
+    Flip {
+        board: String,
+        group: String,
         #[command(flatten)]
         expect: Expect,
     },
@@ -3961,6 +4173,17 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             at,
             rotation,
             side,
+            near,
+            edge,
+            within,
+            hold_side,
+            unconstrain,
+            group,
+            ungroup,
+            ref_at,
+            ref_rotation,
+            ref_hide,
+            ref_show,
             ops,
             expect,
         }) => Request::BoardPlace {
@@ -3969,6 +4192,20 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             at: at.as_deref().map(|a| pair_arg("--at", a)).transpose()?,
             rotation: rotation.clone(),
             side: side.clone(),
+            near: near.clone(),
+            edge: edge.clone(),
+            within: within.clone(),
+            hold_side: *hold_side,
+            unconstrain: *unconstrain,
+            group: group.clone(),
+            ungroup: *ungroup,
+            ref_at: ref_at
+                .as_deref()
+                .map(|a| pair_arg("--ref-at", a))
+                .transpose()?,
+            ref_rotation: ref_rotation.clone(),
+            ref_hide: *ref_hide,
+            ref_show: *ref_show,
             ops: ops.as_deref().map(|o| json_arg("--ops", o)).transpose()?,
             expected_revision: expect.expect.clone(),
         },
@@ -4097,6 +4334,126 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             a: a.clone(),
             b: b.clone(),
             layer: layer.clone(),
+        },
+        Command::Board(BoardCmd::Text(TextCmd::Add {
+            board,
+            layer,
+            at,
+            text,
+            size,
+            thickness,
+            rotation,
+            id,
+            expect,
+        })) => Request::BoardTextAdd {
+            board: board.clone(),
+            layer: layer.clone(),
+            at: pair_arg("--at", at)?,
+            text: text.clone(),
+            size: size.clone(),
+            thickness: thickness.clone(),
+            rotation: rotation.clone(),
+            id: id.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Board(BoardCmd::Drawing(DrawingCmd::Add { board, ops, expect })) => {
+            Request::BoardDrawingAdd {
+                board: board.clone(),
+                ops: json_arg("--ops", ops)?,
+                expected_revision: expect.expect.clone(),
+            }
+        }
+        Command::Board(BoardCmd::Drawing(DrawingCmd::Edit {
+            board,
+            drawing,
+            ops,
+            expect,
+        })) => Request::BoardDrawingEdit {
+            board: board.clone(),
+            drawing: drawing.clone(),
+            ops: json_arg("--ops", ops)?,
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Board(BoardCmd::Drawing(DrawingCmd::Delete {
+            board,
+            drawings,
+            expect,
+        })) => Request::BoardDrawingDelete {
+            board: board.clone(),
+            drawings: drawings.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Board(BoardCmd::Keepout(KeepoutCmd::Add {
+            board,
+            contour,
+            rect,
+            layers,
+            keeps,
+            id,
+            ops,
+            expect,
+        })) => Request::BoardKeepoutAdd {
+            board: board.clone(),
+            contour: contour.as_deref().map(|c| json_arg("--contour", c)).transpose()?,
+            rect: rect.as_deref().map(|r| quad_arg("--rect", r)).transpose()?,
+            layer: layers.clone(),
+            keep: keeps.clone(),
+            id: id.clone(),
+            ops: ops.as_deref().map(|o| json_arg("--ops", o)).transpose()?,
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Board(BoardCmd::Keepout(KeepoutCmd::Edit {
+            board,
+            keepout,
+            contour,
+            rect,
+            layers,
+            keeps,
+            expect,
+        })) => Request::BoardKeepoutEdit {
+            board: board.clone(),
+            keepout: keepout.clone(),
+            contour: contour.as_deref().map(|c| json_arg("--contour", c)).transpose()?,
+            rect: rect.as_deref().map(|r| quad_arg("--rect", r)).transpose()?,
+            layer: layers.clone(),
+            keep: keeps.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Board(BoardCmd::Keepout(KeepoutCmd::Delete {
+            board,
+            keepouts,
+            expect,
+        })) => Request::BoardKeepoutDelete {
+            board: board.clone(),
+            keepouts: keepouts.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Board(BoardCmd::Group(GroupCmd::List { board })) => Request::BoardGroupList {
+            board: board.clone(),
+        },
+        Command::Board(BoardCmd::Group(GroupCmd::Move {
+            board,
+            group,
+            by,
+            rotate,
+            about,
+            expect,
+        })) => Request::BoardGroupMove {
+            board: board.clone(),
+            group: group.clone(),
+            by: by.as_deref().map(|a| pair_arg("--by", a)).transpose()?,
+            rotate: rotate.clone(),
+            about: about.as_deref().map(|a| pair_arg("--about", a)).transpose()?,
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Board(BoardCmd::Group(GroupCmd::Flip {
+            board,
+            group,
+            expect,
+        })) => Request::BoardGroupFlip {
+            board: board.clone(),
+            group: group.clone(),
+            expected_revision: expect.expect.clone(),
         },
         Command::Board(BoardCmd::Waive {
             board,

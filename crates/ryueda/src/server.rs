@@ -1282,18 +1282,34 @@ fn dispatch(
             at,
             rotation,
             side,
+            near,
+            edge,
+            within,
+            hold_side,
+            unconstrain,
+            group,
+            ungroup,
+            ref_at,
+            ref_rotation,
+            ref_hide,
+            ref_show,
             ops,
             expected_revision,
-        } => crate::board::cmd::place(
-            session,
-            &board,
-            match (&r#ref, &at) {
-                (Some(r), Some(a)) => Some((r.as_str(), a, rotation.as_deref(), side.as_deref())),
-                _ => None,
-            },
-            ops.as_ref(),
-            expected_revision.as_deref(),
-        ),
+        } => {
+            let one = json!({
+                "ref": r#ref, "at": at, "rotation": rotation, "side": side,
+                "near": near, "edge": edge, "within": within, "hold_side": hold_side,
+                "unconstrain": unconstrain, "group": group, "ungroup": ungroup,
+                "ref_at": ref_at, "ref_rotation": ref_rotation,
+                "ref_hide": ref_hide, "ref_show": ref_show,
+            });
+            let asks = if ops.is_none() && r#ref.is_none() {
+                Vec::new()
+            } else {
+                crate::board::route::asks(ops, one)?
+            };
+            crate::board::cmd::place(session, &board, asks, expected_revision.as_deref())
+        }
         Request::BoardUnplace {
             board,
             r#ref,
@@ -1428,6 +1444,143 @@ fn dispatch(
         Request::BoardMeasure { board, a, b, layer } => {
             crate::board::cmd::measure(session, &board, &a, &b, layer.as_deref())
         }
+        Request::BoardTextAdd {
+            board,
+            layer,
+            at,
+            text,
+            size,
+            thickness,
+            rotation,
+            id,
+            expected_revision,
+        } => {
+            let unit = session.project().manifest.default_unit;
+            let s = crate::coord::nm(&json!(size.unwrap_or_else(|| "1mm".into())), unit)?;
+            let t = match thickness {
+                Some(t) => crate::coord::nm(&json!(t), unit)?,
+                None => (s / 7).max(100_000),
+            };
+            let op = json!({
+                "layer": layer, "type": "text", "text": text, "at": at,
+                "rotation": rotation.unwrap_or_else(|| "0".into()),
+                "size_nm": [s, s], "thickness_nm": t, "id": id,
+            });
+            crate::board::drawcmd::add(session, &board, vec![op], expected_revision.as_deref())
+        }
+        Request::BoardDrawingAdd {
+            board,
+            ops,
+            expected_revision,
+        } => crate::board::drawcmd::add(
+            session,
+            &board,
+            crate::board::route::asks(Some(ops), Value::Null)?,
+            expected_revision.as_deref(),
+        ),
+        Request::BoardDrawingEdit {
+            board,
+            drawing,
+            ops,
+            expected_revision,
+        } => crate::board::drawcmd::edit(
+            session,
+            &board,
+            &drawing,
+            &ops,
+            expected_revision.as_deref(),
+        ),
+        Request::BoardDrawingDelete {
+            board,
+            drawings,
+            expected_revision,
+        } => {
+            crate::board::drawcmd::delete(session, &board, &drawings, expected_revision.as_deref())
+        }
+        Request::BoardKeepoutAdd {
+            board,
+            contour,
+            rect,
+            layer,
+            keep,
+            id,
+            ops,
+            expected_revision,
+        } => {
+            let one =
+                json!({"contour": contour, "rect": rect, "layer": layer, "keep": keep, "id": id});
+            crate::board::keepcmd::add(
+                session,
+                &board,
+                crate::board::route::asks(ops, one)?,
+                expected_revision.as_deref(),
+            )
+        }
+        Request::BoardKeepoutEdit {
+            board,
+            keepout,
+            contour,
+            rect,
+            layer,
+            keep,
+            expected_revision,
+        } => {
+            let a = json!({"contour": contour, "rect": rect, "layer": layer, "keep": keep});
+            crate::board::keepcmd::edit(session, &board, &keepout, &a, expected_revision.as_deref())
+        }
+        Request::BoardKeepoutDelete {
+            board,
+            keepouts,
+            expected_revision,
+        } => {
+            crate::board::keepcmd::delete(session, &board, &keepouts, expected_revision.as_deref())
+        }
+        Request::BoardGroupList { board } => crate::board::group::list(session.project(), &board),
+        Request::BoardGroupMove {
+            board,
+            group,
+            by,
+            rotate,
+            about,
+            expected_revision,
+        } => {
+            let unit = session.project().manifest.default_unit;
+            let m = match (by, rotate) {
+                (Some(d), None) => {
+                    crate::board::group::Move::By(crate::coord::point(&json!(d), unit)?)
+                }
+                (None, Some(a)) => {
+                    crate::board::group::Move::Rotate(crate::coord::mdeg(&json!(a))?)
+                }
+                _ => {
+                    return Err(crate::error::Error::new(
+                        crate::error::Code::InvalidParam,
+                        "give --by DX,DY or --rotate A",
+                    )
+                    .with("param", "by"));
+                }
+            };
+            crate::board::group::apply(
+                session,
+                &board,
+                &group,
+                m,
+                about.map(|a| json!(a)).as_ref(),
+                expected_revision.as_deref(),
+            )
+        }
+        Request::BoardGroupFlip {
+            board,
+            group,
+            expected_revision,
+        } => crate::board::group::apply(
+            session,
+            &board,
+            &group,
+            crate::board::group::Move::Flip,
+            None,
+            expected_revision.as_deref(),
+        ),
         Request::BoardWaive {
             board,
             finding,

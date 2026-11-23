@@ -419,3 +419,278 @@ fn rules_on_disk_round_trip() {
         assert_eq!(ryueda::canonical::to_string(&v), text, "seed {seed}");
     }
 }
+
+/// A generated part's pad reference, as the board names it.
+fn pad_ref(c: &drc::BoardCheck, occurrence: &str, number: &str) -> String {
+    c.shapes
+        .pads
+        .iter()
+        .find(|p| p.occurrence == occurrence && p.number.as_deref() == Some(number))
+        .unwrap_or_else(|| panic!("{occurrence}/{number}"))
+        .reference
+        .clone()
+}
+
+/// Constraints and keepouts give exactly their findings (ryueda 7.C):
+/// each part near its neighbour's pad at the gap between them holds, a
+/// nanometre under fails once a pair; the leftmost parts hold to the left
+/// edge at its distance and fail a nanometre under; a keepout over a
+/// track or a part gives findings of that alone; drawings give none.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release only: seeded boards checked")]
+fn constraints_and_keepouts_give_exactly_their_findings() {
+    use board_gen::{MARGIN, MM, PAD, UM};
+    use serde_json::json;
+    for seed in 0..16u64 {
+        let spec = board_gen::seeded(seed);
+        let base = check_all(&spec);
+        assert!(base.findings.is_empty(), "seed {seed}");
+        let same_row = |n: usize| n / spec.cols == (n + 1) / spec.cols;
+        // Within a row, part n's pad 2 and part n + 1's pad 1 face each
+        // other: their centres a pitch less twice the pads' offset apart,
+        // their copper a pad's width (0.56 mm) less.
+        let gap = spec.pitch.0 - 2 * PAD - 560 * UM;
+        let pairs: Vec<usize> = (0..spec.count() - 1).filter(|&n| same_row(n)).collect();
+        let near = |d: i64| {
+            Spec {
+            constraints: pairs
+                .iter()
+                .map(|&n| {
+                    (
+                        n,
+                        json!({"near": pad_ref(&base, &spec.occurrence(n + 1), "1"), "within_nm": d}),
+                    )
+                })
+                .collect(),
+            ..spec.clone()
+        }
+        };
+        let at = check_all(&near(gap));
+        assert!(
+            at.findings.is_empty(),
+            "seed {seed}: {:?}",
+            &at.findings[..at.findings.len().min(3)]
+        );
+        let under = check_all(&near(gap - 1));
+        assert!(
+            under
+                .findings
+                .iter()
+                .all(|f| f.code == Code::PlacementConstraintUnmet),
+            "seed {seed}"
+        );
+        assert_eq!(under.findings.len(), pairs.len(), "seed {seed}");
+        // The leftmost parts' courtyards (2 mm wide) lie MARGIN - 1 mm from
+        // the left edge.
+        let left: Vec<usize> = (0..spec.count()).filter(|&n| spec.leftmost(n)).collect();
+        let edge = |d: i64| Spec {
+            constraints: left
+                .iter()
+                .map(|&n| (n, json!({"edge": "left", "within_nm": d})))
+                .collect(),
+            ..spec.clone()
+        };
+        assert!(
+            check_all(&edge(MARGIN - MM)).findings.is_empty(),
+            "seed {seed}"
+        );
+        assert_eq!(
+            check_all(&edge(MARGIN - MM - 1)).findings.len(),
+            left.len(),
+            "seed {seed}"
+        );
+        // A keepout keeping tracks over the middle of a connection's gap.
+        let n = pairs[0];
+        let base_tracks: Vec<&ryueda::board::shapes::TrackInfo> = base
+            .shapes
+            .tracks
+            .iter()
+            .filter(|t| t.id.as_str().starts_with(&format!("t{n}_")))
+            .collect();
+        let b = base_tracks[0].shape.bounds().unwrap();
+        let (cx, cy) = ((b.min.x + b.max.x) / 2, (b.min.y + b.max.y) / 2);
+        let square = |x: i64, y: i64, h: i64| {
+            json!({"start": [x - h, y - h], "edges": [
+                {"type": "line", "to": [x + h, y - h]}, {"type": "line", "to": [x + h, y + h]},
+                {"type": "line", "to": [x - h, y + h]}, {"type": "line", "to": [x - h, y - h]}]})
+        };
+        let kept = check_all(&Spec {
+            keepouts: vec![
+                json!({"contour": square(cx, cy, 50 * UM), "layers": ["top"], "keeps": ["tracks"]}),
+            ],
+            ..spec.clone()
+        });
+        assert!(!kept.findings.is_empty(), "seed {seed}");
+        assert!(
+            kept.findings.iter().all(|f| f.code == Code::DrcKeepout
+                && f.refs.iter().any(|r| r.contains(&format!(":track/t{n}_")))),
+            "seed {seed}: {:?}",
+            kept.findings
+        );
+        // A keepout keeping placements over one part's centre.
+        let m = (spec.cols + 1).min(spec.count() - 1);
+        let pm = base
+            .shapes
+            .pads
+            .iter()
+            .filter(|p| p.occurrence == spec.occurrence(m))
+            .collect::<Vec<_>>();
+        let (mx, my) = ((pm[0].at.x + pm[1].at.x) / 2, (pm[0].at.y + pm[1].at.y) / 2);
+        let part = check_all(&Spec {
+            keepouts: vec![
+                json!({"contour": square(mx, my, 100 * UM), "layers": ["all"], "keeps": ["placements"]}),
+            ],
+            ..spec.clone()
+        });
+        assert_eq!(part.findings.len(), 1, "seed {seed}: {:?}", part.findings);
+        assert_eq!(part.findings[0].code, Code::DrcKeepout);
+        // Drawings add nothing.
+        let drawn = check_all(&Spec {
+            drawings: vec![
+                json!({"layer": "silk.top", "type": "line", "start": [0, 0], "end": [MM, MM], "width_nm": 150_000}),
+                json!({"layer": "comments", "type": "text", "text": "seed", "at": [MM, MM], "size_nm": [MM, MM], "thickness_nm": 150_000}),
+            ],
+            ..spec.clone()
+        });
+        assert!(
+            drawn.findings.is_empty(),
+            "seed {seed}: {:?}",
+            drawn.findings
+        );
+    }
+}
+
+/// The legaliser on generated boards (ryueda 7.C): a part asked to sit
+/// near its neighbour's pad finds a place where, moved there, it adds only
+/// opens; asked to touch a pad inside another courtyard, it says no room.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release only: seeded boards checked")]
+fn the_legaliser_finds_room_or_says_why() {
+    use board_gen::{MM, PAD, UM};
+    use ryueda::board::file::{Constraint, PlacementSide};
+    for seed in 0..8u64 {
+        let spec = board_gen::seeded(seed);
+        let d = tempfile::tempdir().unwrap();
+        board_gen::write(d.path(), &spec);
+        let p = ryueda::project::Project::load(d.path()).unwrap();
+        let id = ryueda::id::Id::parse("main", "board").unwrap();
+        let c = drc::check(&p, &p.boards[&id]).unwrap();
+        let design = ryueda::id::Id::parse("d", "design").unwrap();
+        let (_, occs) = ryueda::board::occ::occurrences(&p, &design).unwrap();
+        let m = spec.cols / 2;
+        let o = occs
+            .iter()
+            .find(|o| o.reference == spec.occurrence(m))
+            .unwrap();
+        let target = pad_ref(&c, &spec.occurrence(m + 1), "1");
+        let gap = spec.pitch.0 - 2 * PAD - 560 * UM;
+        let ask = |within_nm: i64| {
+            let cs = [Constraint::Near {
+                near: target.clone(),
+                within_nm,
+            }];
+            ryueda::board::place::legalise(
+                "main",
+                &c.shapes,
+                &c.rules,
+                &c.preset,
+                &ryueda::board::place::Ask {
+                    occ: o,
+                    rotation_mdeg: 0,
+                    side: PlacementSide::Top,
+                    constraints: &cs,
+                    now: None,
+                },
+            )
+        };
+        let found = ask(gap + MM).unwrap();
+        // Moved there: nothing but opens.
+        let path = d.path().join(format!(
+            "boards/main/placements/{}.json",
+            spec.occurrence(m).replace('/', ".")
+        ));
+        let text = format!(
+            r#"{{"at":[{},{}],"format":1,"kind":"ryueda.placement","rotation_mdeg":0}}"#,
+            found["at"][0], found["at"][1]
+        );
+        std::fs::write(&path, text).unwrap();
+        let p = ryueda::project::Project::load(d.path()).unwrap();
+        let moved = drc::check(&p, &p.boards[&id]).unwrap();
+        assert!(
+            moved.findings.iter().all(|f| f.code == Code::NetOpen),
+            "seed {seed}: {:?}",
+            moved.findings
+        );
+        assert_eq!(
+            ask(1).unwrap_err().code,
+            Code::PlacementNoRoom,
+            "seed {seed}"
+        );
+    }
+}
+
+/// Placements with constraints, keepouts and drawings written by a seeded
+/// board read back at the format they need and write the same bytes
+/// (ryueda 7.C).
+#[test]
+fn placements_keepouts_and_drawings_round_trip() {
+    use board_gen::{MM, UM};
+    use serde_json::json;
+    for seed in [0u64, 4, 9] {
+        let spec = Spec {
+            constraints: vec![
+                (0, json!({"near": "main:R2/1", "within_nm": 2 * MM})),
+                (0, json!({"side": "top"})),
+                (1, json!({"edge": "any", "within_nm": 5 * MM})),
+            ],
+            keepouts: vec![json!({"contour": {"start": [0, 0], "edges": [
+                {"type": "line", "to": [MM, 0]}, {"type": "arc", "mid": [MM + 500 * UM, 500 * UM], "to": [MM, MM]},
+                {"type": "line", "to": [0, MM]}, {"type": "line", "to": [0, 0]}]},
+                "layers": ["top", "bottom"], "keeps": ["holes", "vias"]})],
+            drawings: vec![
+                json!({"layer": "fab.bottom", "type": "circle", "center": [MM, MM], "radius_nm": 300 * UM, "width_nm": 100 * UM}),
+            ],
+            ..board_gen::seeded(seed)
+        };
+        let d = tempfile::tempdir().unwrap();
+        board_gen::write(d.path(), &spec);
+        let mut seen = 0;
+        for sub in ["placements", "keepouts", "drawings"] {
+            for e in std::fs::read_dir(d.path().join("boards/main").join(sub))
+                .unwrap()
+                .flatten()
+            {
+                let text = std::fs::read_to_string(e.path()).unwrap();
+                let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+                let kind = v["kind"].as_str().unwrap().to_owned();
+                let mut bare = v.clone();
+                bare.as_object_mut().unwrap().remove("kind");
+                bare.as_object_mut().unwrap().remove("format");
+                assert_eq!(
+                    v["format"],
+                    ryueda::conn::format_of(&kind, &bare),
+                    "{}",
+                    e.path().display()
+                );
+                assert_eq!(ryueda::canonical::to_string(&v), text);
+                seen += 1;
+            }
+        }
+        assert!(seen >= 3);
+        let p = ryueda::project::Project::load(d.path()).unwrap();
+        let id = ryueda::id::Id::parse("main", "board").unwrap();
+        let b = &p.boards[&id];
+        assert!(
+            b.faults().iter().all(|f| !f.is_error()),
+            "seed {seed}: {:?}",
+            b.faults()
+        );
+        assert_eq!(b.keepouts.len(), 1);
+        assert_eq!(b.drawings.len(), 1);
+        let first = b
+            .placements
+            .values()
+            .find_map(|l| l.item.as_ref().ok().filter(|pl| !pl.constraints.is_empty()));
+        assert!(first.is_some());
+    }
+}

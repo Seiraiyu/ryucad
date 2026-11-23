@@ -403,6 +403,10 @@ class Code(str, Enum):
     FINDING_NOT_FOUND = "finding_not_found"
     FINDING_NOT_WAIVABLE = "finding_not_waivable"
     PRESET_IN_USE = "preset_in_use"
+    PLACEMENT_CONSTRAINT_UNMET = "placement_constraint_unmet"
+    PLACEMENT_NO_ROOM = "placement_no_room"
+    DRC_KEEPOUT = "drc_keepout"
+    BOARD_CONTOUR_INVALID = "board_contour_invalid"
     DRC_FAILED = "drc_failed"
     ITEM_NOT_FOUND = "item_not_found"
     ITEM_CLASS_UNKNOWN = "item_class_unknown"
@@ -816,6 +820,10 @@ EXIT: dict[Code, int] = {
     Code.FINDING_NOT_FOUND: 1,
     Code.FINDING_NOT_WAIVABLE: 1,
     Code.PRESET_IN_USE: 1,
+    Code.PLACEMENT_CONSTRAINT_UNMET: 1,
+    Code.PLACEMENT_NO_ROOM: 1,
+    Code.DRC_KEEPOUT: 1,
+    Code.BOARD_CONTOUR_INVALID: 1,
     Code.DRC_FAILED: 1,
     Code.ITEM_NOT_FOUND: 1,
     Code.ITEM_CLASS_UNKNOWN: 1,

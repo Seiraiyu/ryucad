@@ -324,7 +324,7 @@ pub struct Keepout {
 }
 
 /// What a keepout keeps out.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Keep {
     Copper,
@@ -332,6 +332,11 @@ pub enum Keep {
     Tracks,
     Pads,
     Pours,
+    /// Parts (their courtyards) on a side the keepout's outer layer names
+    /// (ryueda 7.C).
+    Placements,
+    /// Drills whose span reaches the keepout's layer (ryueda 7.C).
+    Holes,
 }
 
 /// Where the reference designator and the value are written: their
@@ -458,7 +463,7 @@ pub fn simple(points: &[Point]) -> bool {
 }
 
 /// Why a shape can't be drawn, if it can't.
-fn undrawable(s: &Shape) -> Option<&'static str> {
+pub(crate) fn undrawable(s: &Shape) -> Option<&'static str> {
     if s.sizes().iter().any(|v| *v < 0) {
         return Some("a width or size is negative");
     }

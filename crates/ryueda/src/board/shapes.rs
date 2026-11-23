@@ -9,7 +9,7 @@ use super::occ::{self, Occ};
 use super::{graphic, opening, pad, preset, text};
 use crate::error::{Code, Error, Result};
 use crate::fault::Fault;
-use crate::footprint::{Footprint, Shape as Drawn};
+use crate::footprint::{Field, Footprint, Shape as Drawn};
 use crate::project::Project;
 use rayon::prelude::*;
 use ryu_board::geom::{Mdeg, Place, Point, Region};
@@ -73,6 +73,20 @@ pub struct CourtyardInfo {
     pub open: bool,
     /// The part is on the bottom.
     pub bottom: bool,
+}
+
+/// A keepout as placed: the board's own, or a part's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeepoutInfo {
+    /// `<board>:keepout/<id>`, or `<board>:<label>#keepout/<id>`.
+    pub reference: String,
+    /// The part whose footprint holds it (its occurrence): its own pads
+    /// and drills are exempt.
+    pub part: Option<String>,
+    /// Copper layers it covers, by index, sorted.
+    pub layers: Vec<usize>,
+    pub keeps: Vec<crate::footprint::Keep>,
+    pub shape: Shape,
 }
 
 /// A track as drawn.
@@ -140,6 +154,8 @@ pub struct BoardShapes {
     pub tracks: Vec<TrackInfo>,
     pub vias: Vec<ViaInfo>,
     pub courtyards: Vec<CourtyardInfo>,
+    /// The board's keepouts and its parts' (ryueda 7.C).
+    pub keepouts: Vec<KeepoutInfo>,
     /// The outline less its cutouts.
     pub outline: Shape,
     /// The outline's and cutouts' boundaries, zero width.
@@ -235,6 +251,39 @@ fn pad_names(f: &Footprint) -> BTreeMap<String, String> {
         .collect()
 }
 
+/// A footprint's field with a placement's overrides, key by key. A field
+/// the footprint lacks comes from the override alone (silk.top, 1 mm,
+/// 0.15 mm thick) when it says where.
+fn field_with(f: Option<&Field>, over: Option<&super::file::FieldPlace>) -> Option<Field> {
+    let mut out = match (f, over) {
+        (Some(f), _) => f.clone(),
+        (None, Some(o)) if o.at.is_some() => Field {
+            layer: "silk.top".into(),
+            at: [0, 0],
+            rotation_mdeg: 0,
+            size_nm: [1_000_000, 1_000_000],
+            thickness_nm: 150_000,
+            hidden: false,
+        },
+        _ => return None,
+    };
+    if let Some(o) = over {
+        if let Some(a) = o.at {
+            out.at = a;
+        }
+        if let Some(r) = o.rotation_mdeg {
+            out.rotation_mdeg = r;
+        }
+        if let Some(h) = o.hidden {
+            out.hidden = h;
+        }
+        if let Some(s) = o.size_nm {
+            out.size_nm = s;
+        }
+    }
+    Some(out)
+}
+
 /// What one placement adds.
 #[derive(Default)]
 struct One {
@@ -242,6 +291,7 @@ struct One {
     holes: Vec<HoleInfo>,
     pads: Vec<PadInfo>,
     courtyards: Vec<CourtyardInfo>,
+    keepouts: Vec<KeepoutInfo>,
     notices: Vec<Fault>,
 }
 
@@ -260,6 +310,7 @@ fn one(
     place: Place,
     preset: &preset::Preset,
     n: usize,
+    fields: &super::file::PartFields,
 ) -> One {
     let mut out = One::default();
     if f.graphics.values().any(|g| g.layer == "edge") {
@@ -395,11 +446,21 @@ fn one(
         note_missing(&mut out.notices, o, &s);
         put(&mut out, &sided(&g.layer, flipped), s);
     }
-    for (field, string) in [
-        (&f.fields.reference, refdes.as_str()),
-        (&f.fields.value, value.as_str()),
+    for (field, over, string) in [
+        (
+            f.fields.reference.as_ref(),
+            fields.reference.as_ref(),
+            refdes.as_str(),
+        ),
+        (
+            f.fields.value.as_ref(),
+            fields.value.as_ref(),
+            value.as_str(),
+        ),
     ] {
-        let Some(fl) = field else { continue };
+        let Some(fl) = field_with(field, over) else {
+            continue;
+        };
         if fl.hidden || string.is_empty() {
             continue;
         }
@@ -422,7 +483,34 @@ fn one(
             bottom: flipped,
         });
     }
+    for (kid, k) in &f.keepouts {
+        let (layers, shape) = super::keepout::placed_footprint_keepout(k, place, n);
+        if !shape.parts.is_empty() {
+            out.keepouts.push(KeepoutInfo {
+                reference: format!("{owner}#keepout/{kid}"),
+                part: Some(o.reference.clone()),
+                layers,
+                keeps: k.keeps.clone(),
+                shape,
+            });
+        }
+    }
     out
+}
+
+/// What one part would draw at `place`: its pads and its courtyard (the
+/// legaliser's candidates).
+pub(crate) fn part(
+    board: &str,
+    o: &Occ,
+    f: &Footprint,
+    place: Place,
+    preset: &preset::Preset,
+    n: usize,
+    fields: &super::file::PartFields,
+) -> (Vec<PadInfo>, Option<CourtyardInfo>) {
+    let one = one(board, o, f, place, preset, n, fields);
+    (one.pads, one.courtyards.into_iter().next())
 }
 
 fn note_missing(notices: &mut Vec<Fault>, o: &Occ, s: &Shape) {
@@ -454,7 +542,7 @@ pub fn build(p: &Project, b: &BoardFiles) -> Result<BoardShapes> {
     let (_, occs) = occ::occurrences(p, &file.design)?;
     let board = b.id.to_string();
     let n = super::stackup::copper_count(file);
-    let placed: Vec<(&Occ, Place)> = occs
+    let placed: Vec<(&Occ, Place, &super::file::PartFields)> = occs
         .iter()
         .filter_map(|o| {
             let pl = b.placements.get(&o.reference)?.item.as_ref().ok()?;
@@ -466,27 +554,30 @@ pub fn build(p: &Project, b: &BoardFiles) -> Result<BoardShapes> {
                     mirror: pl.side == super::file::PlacementSide::Bottom,
                     scale: None,
                 },
+                &pl.fields,
             ))
         })
         .collect();
     let mut notices = Vec::new();
     let parts: Vec<One> = placed
         .par_iter()
-        .map(|(o, place)| match (&o.footprint, &o.footprint_error) {
-            (Some(f), _) => one(&board, o, f, *place, &preset, n),
-            (None, e) => One {
-                notices: vec![unsupported(
-                    o,
-                    &format!(
-                        "can't be read ({})",
-                        e.as_ref()
-                            .map(|e| e.message.as_str())
-                            .unwrap_or("none chosen")
-                    ),
-                )],
-                ..One::default()
+        .map(
+            |(o, place, fields)| match (&o.footprint, &o.footprint_error) {
+                (Some(f), _) => one(&board, o, f, *place, &preset, n, fields),
+                (None, e) => One {
+                    notices: vec![unsupported(
+                        o,
+                        &format!(
+                            "can't be read ({})",
+                            e.as_ref()
+                                .map(|e| e.message.as_str())
+                                .unwrap_or("none chosen")
+                        ),
+                    )],
+                    ..One::default()
+                },
             },
-        })
+        )
         .collect();
     let mut out = BoardShapes {
         copper_layers: n,
@@ -499,6 +590,7 @@ pub fn build(p: &Project, b: &BoardFiles) -> Result<BoardShapes> {
         out.holes.extend(one.holes);
         out.pads.extend(one.pads);
         out.courtyards.extend(one.courtyards);
+        out.keepouts.extend(one.keepouts);
         notices.extend(one.notices);
     }
     // The routes; files with an error fault are left out (`check`
@@ -574,6 +666,45 @@ pub fn build(p: &Project, b: &BoardFiles) -> Result<BoardShapes> {
             of: HoleOf::Hole(hid.clone()),
             span: (0, n - 1),
         });
+    }
+    for (kid, k) in &b.keepouts {
+        let (Ok(ko), true) = (&k.item, fine(&k.faults)) else {
+            continue;
+        };
+        let Ok(c) = super::outline::contour(&ko.contour) else {
+            continue;
+        };
+        out.keepouts.push(KeepoutInfo {
+            reference: format!("{board}:keepout/{kid}"),
+            part: None,
+            layers: ko.indices(n),
+            keeps: ko.keeps.clone(),
+            shape: Shape::regions(Polarity::Positive, [Region::solid(super::outline::ccw(c))]),
+        });
+    }
+    for (did, d) in &b.drawings {
+        let (Ok(g), true) = (&d.item, fine(&d.faults)) else {
+            continue;
+        };
+        let Some((shape, missing)) = super::drawing::shape(g) else {
+            continue;
+        };
+        if !missing.is_empty() {
+            notices.push(
+                Fault::warning(
+                    Code::BoardTextMissingGlyph,
+                    format!(
+                        "drawing {did}'s text has characters the stroke font lacks: {}",
+                        missing.iter().collect::<String>()
+                    ),
+                )
+                .with("drawing", did.as_str()),
+            );
+        }
+        out.layers
+            .entry(g.layer.clone())
+            .or_default()
+            .push((format!("{board}:drawing/{did}"), shape));
     }
     let (region, edges) = outline(file);
     out.outline = region;
@@ -658,6 +789,7 @@ pub(crate) mod tests {
                 at: [5_000_000 * (i as i64 + 1), 10_000_000],
                 rotation_mdeg: 90_000 * i as i64,
                 side: super::super::file::PlacementSide::Top,
+                ..super::super::file::Placement::default()
             };
             files.insert(
                 format!(
@@ -898,6 +1030,76 @@ pub(crate) mod tests {
         let b = s.outline.bounds().unwrap();
         assert_eq!((b.max.x, b.max.y), (50_000_000, 50_000_000));
         assert!(s.pads.iter().any(|p| p.net.is_some()));
+    }
+
+    #[test]
+    fn a_placements_field_places_override_the_footprints() {
+        let (_d, p0, id) = placed();
+        let design = crate::netlist::one_design(&p0, None).unwrap();
+        let (_, occs) = occ::occurrences(&p0, &design).unwrap();
+        let o = occs.iter().find(|o| o.footprint.is_some()).unwrap();
+        let owner = format!("b:{}", o.label());
+        let silk = |s: &BoardShapes| -> Vec<Shape> {
+            s.layers
+                .get("silk.top")
+                .into_iter()
+                .flatten()
+                .filter(|(w, _)| *w == owner)
+                .map(|(_, sh)| sh.clone())
+                .collect()
+        };
+        let before = silk(&build(&p0, &p0.boards[&id]).unwrap());
+        assert!(
+            !before.is_empty(),
+            "the fixture's part draws its designator"
+        );
+        let path = format!(
+            "boards/b/placements/{}.json",
+            super::super::file::placement_name(&o.reference)
+        );
+        let with = |fields: &str| {
+            let text = format!(
+                r#"{{"at":[5000000,10000000],"fields":{{"reference":{fields}}},"format":2,"kind":"ryueda.placement","rotation_mdeg":0}}"#
+            );
+            let (d, p, _) = placed_with(&[(path.clone(), text)]);
+            let s = build(&p, &p.boards[&id]).unwrap();
+            (d, silk(&s))
+        };
+        let (_d1, moved) = with(r#"{"at":[0,5000000]}"#);
+        assert_eq!(moved.len(), before.len());
+        assert_ne!(moved, before, "the designator moved");
+        let (_d2, hidden) = with(r#"{"hidden":true}"#);
+        assert!(hidden.len() < before.len(), "the designator hidden");
+        let (_d3, again) = with("{}");
+        assert_eq!(again, before, "an empty override changes nothing");
+    }
+
+    #[test]
+    fn a_boards_keepouts_are_in_its_shapes() {
+        let k = r#"{"contour":{"edges":[{"to":[2000000,0],"type":"line"},{"to":[2000000,2000000],"type":"line"},{"to":[0,2000000],"type":"line"},{"to":[0,0],"type":"line"}],"start":[0,0]},"format":1,"keeps":["vias"],"kind":"ryueda.keepout","layers":["top"]}"#;
+        let (_d, p, id) = placed_with(&[("boards/b/keepouts/k1.json".into(), k.into())]);
+        let s = build(&p, &p.boards[&id]).unwrap();
+        let ko = s
+            .keepouts
+            .iter()
+            .find(|x| x.reference == "b:keepout/k1")
+            .unwrap();
+        assert_eq!(ko.layers, vec![0]);
+        assert_eq!(ko.keeps, vec![crate::footprint::Keep::Vias]);
+        assert!(ko.part.is_none());
+        assert_eq!(ko.shape.bounds().unwrap().max.x, 2_000_000);
+    }
+
+    #[test]
+    fn a_boards_drawings_join_their_layers() {
+        let d = r#"{"end":[3000000,1000000],"format":1,"kind":"ryueda.board-drawing","layer":"silk.top","start":[1000000,1000000],"type":"line","width_nm":150000}"#;
+        let (_d, p, id) = placed_with(&[("boards/b/drawings/d1.json".into(), d.into())]);
+        let s = build(&p, &p.boards[&id]).unwrap();
+        assert!(
+            s.layers["silk.top"]
+                .iter()
+                .any(|(o, _)| o == "b:drawing/d1")
+        );
     }
 
     #[test]

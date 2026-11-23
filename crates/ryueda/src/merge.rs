@@ -80,6 +80,17 @@ fn rules_atom(at: &str) -> bool {
     )
 }
 
+/// A placement's constraint list is one promise; each field's place one
+/// value.
+fn placement_atom(at: &str) -> bool {
+    matches!(segs(at).as_slice(), ["constraints"] | ["fields", _])
+}
+
+/// A keepout's contour is one value.
+fn keepout_atom(at: &str) -> bool {
+    matches!(segs(at).as_slice(), ["contour"])
+}
+
 fn libcomp_atom(at: &str) -> bool {
     matches!(
         segs(at).as_slice(),
@@ -104,6 +115,8 @@ fn atoms(kind: &str) -> fn(&str) -> bool {
         crate::libcomp::KIND => libcomp_atom,
         crate::board::BOARD_KIND => board_atom,
         crate::board::RULES_KIND => rules_atom,
+        crate::board::PLACEMENT_KIND => placement_atom,
+        crate::board::file::KEEPOUT_KIND => keepout_atom,
         crate::project::LOCK_KIND => ryupdm::git::lock_atom,
         _ => no_atom,
     }
@@ -114,6 +127,7 @@ fn sets(kind: &str) -> &'static [&'static str] {
     match kind {
         conn::COMPONENT_KIND | conn::NET_KIND | conn::RAIL_KIND => &["tags"],
         crate::style::KIND => &["locks"],
+        crate::board::file::KEEPOUT_KIND => &["keeps", "layers"],
         _ => &[],
     }
 }
@@ -368,7 +382,9 @@ pub fn newest(kind: &str) -> Option<u64> {
         | crate::board::PLACEMENT_KIND
         | crate::board::TRACK_KIND
         | crate::board::VIA_KIND => crate::board::file::NEWEST,
-        crate::board::HOLE_KIND => crate::board::FORMAT,
+        crate::board::HOLE_KIND
+        | crate::board::file::KEEPOUT_KIND
+        | crate::board::file::DRAWING_KIND => crate::board::FORMAT,
         crate::board::preset::KIND => crate::board::preset::FORMAT,
         crate::board::RULES_KIND => crate::board::rules::FORMAT,
         _ => return None,
