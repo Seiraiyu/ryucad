@@ -14,8 +14,10 @@ use std::path::Path;
 
 pub const UM: i64 = 1_000;
 pub const MM: i64 = 1_000_000;
-const PAD: i64 = 480 * UM;
-const MARGIN: i64 = 3 * MM;
+/// A part's pads' offset from its centre.
+pub const PAD: i64 = 480 * UM;
+/// The outline's margin round the parts' centres.
+pub const MARGIN: i64 = 3 * MM;
 const VIA_OFFSET: i64 = 1_200 * UM;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -67,6 +69,12 @@ pub struct Spec {
     pub bottom_every: usize,
     /// The board's `rules.json`, when it has one (ryueda 7.B).
     pub rules: Option<Value>,
+    /// Keepout files' bodies, written as `keepouts/k<i>.json` (ryueda 7.C).
+    pub keepouts: Vec<Value>,
+    /// Constraints added to part `n`'s placement (ryueda 7.C).
+    pub constraints: Vec<(usize, Value)>,
+    /// Drawing files' bodies, written as `drawings/d<i>.json` (ryueda 7.C).
+    pub drawings: Vec<Value>,
 }
 
 impl Spec {
@@ -85,6 +93,24 @@ impl Spec {
             layers: 2,
             bottom_every: 0,
             rules: None,
+            keepouts: Vec::new(),
+            constraints: Vec::new(),
+            drawings: Vec::new(),
+        }
+    }
+
+    /// Part `n`'s occurrence (`c<k>/r<i>`).
+    pub fn occurrence(&self, n: usize) -> String {
+        format!("c{}/r{}", n / self.parts, n % self.parts)
+    }
+
+    /// Whether part `n` sits at the left of its row.
+    pub fn leftmost(&self, n: usize) -> bool {
+        let (row, col) = (n / self.cols, n % self.cols);
+        if row % 2 == 0 {
+            col == 0
+        } else {
+            col == self.cols - 1
         }
     }
 
@@ -119,11 +145,21 @@ impl Spec {
     /// further half turn so its pads stay where the top part's were.
     fn placement(&self, n: usize) -> Value {
         let (at, rot) = self.place(n);
-        if self.bottom(n) || self.fault == Some(Fault::Flip(n)) {
+        let mut v = if self.bottom(n) || self.fault == Some(Fault::Flip(n)) {
             json!({"at": [at.0, at.1], "rotation_mdeg": (rot + 180_000) % 360_000, "side": "bottom"})
         } else {
             json!({"at": [at.0, at.1], "rotation_mdeg": rot})
+        };
+        let mine: Vec<&Value> = self
+            .constraints
+            .iter()
+            .filter(|(k, _)| *k == n)
+            .map(|(_, c)| c)
+            .collect();
+        if !mine.is_empty() {
+            v["constraints"] = json!(mine);
         }
+        v
     }
 
     /// Part `n`'s pad (1 or 2) centre.
@@ -211,6 +247,22 @@ pub fn write(dir: &Path, s: &Spec) {
         board["stackup"] = serde_json::to_value(st).unwrap();
     }
     put(dir, "boards/main/board.json", "ryueda.board", board);
+    for (i, k) in s.keepouts.iter().enumerate() {
+        put(
+            dir,
+            &format!("boards/main/keepouts/k{i}.json"),
+            "ryueda.keepout",
+            k.clone(),
+        );
+    }
+    for (i, d) in s.drawings.iter().enumerate() {
+        put(
+            dir,
+            &format!("boards/main/drawings/d{i}.json"),
+            "ryueda.board-drawing",
+            d.clone(),
+        );
+    }
     if let Some(r) = &s.rules {
         put(
             dir,
@@ -357,6 +409,9 @@ pub fn seeded(seed: u64) -> Spec {
         layers: 2,
         bottom_every: 0,
         rules: None,
+        keepouts: Vec::new(),
+        constraints: Vec::new(),
+        drawings: Vec::new(),
     }
 }
 
