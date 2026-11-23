@@ -845,7 +845,13 @@ mod tests {
             let _ = m.charge(5);
             Ok(m.stop_cause())
         });
-        assert_eq!(r, Ok(Some(Error::BudgetExceeded { spent: 5, budget: 3 })));
+        assert_eq!(
+            r,
+            Ok(Some(Error::BudgetExceeded {
+                spent: 5,
+                budget: 3
+            }))
+        );
         assert_eq!(w.spent(), 5);
         let flag = AtomicBool::new(true);
         let w = Work::unlimited().with_cancel(&flag);

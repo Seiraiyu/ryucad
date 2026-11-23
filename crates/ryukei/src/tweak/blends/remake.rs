@@ -691,12 +691,7 @@ fn rename(input: &Body, out: &mut Body, x: EntityId, name: Name) {
 /// `Modified` for each name both have that a step touched or that was
 /// given back; `Deleted` for each `input` name `out` lacks; `Created`
 /// for each `out` name `input` lacks.
-pub(crate) fn net(
-    input: &Body,
-    out: &Body,
-    steps: &[&Journal],
-    back: &BTreeSet<Name>,
-) -> Journal {
+pub(crate) fn net(input: &Body, out: &Body, steps: &[&Journal], back: &BTreeSet<Name>) -> Journal {
     let names = |b: &Body| -> BTreeSet<Name> {
         b.faces()
             .map(|f| b.faces[f].name)

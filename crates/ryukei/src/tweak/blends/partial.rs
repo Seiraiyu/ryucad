@@ -70,7 +70,10 @@ pub(crate) fn touched(near: &BTreeSet<Name>, steps: &[Journal]) -> bool {
 fn neighbours(body: &Body, faces: &[Name]) -> BTreeSet<Name> {
     use crate::tweak::retrim::region::{face_vertices, vertex_faces};
     let mut out = BTreeSet::new();
-    for f in body.faces().filter(|&f| faces.contains(&body.faces[f].name)) {
+    for f in body
+        .faces()
+        .filter(|&f| faces.contains(&body.faces[f].name))
+    {
         for v in face_vertices(body, f) {
             for g in vertex_faces(body, v) {
                 out.insert(body.faces[g].name);
@@ -431,8 +434,8 @@ mod tests {
             ..Default::default()
         };
         let w = Work::unlimited();
-        let rec = crate::tweak::recognise_blends_with(&b, &RecogniseOptions::default(), &w)
-            .unwrap();
+        let rec =
+            crate::tweak::recognise_blends_with(&b, &RecogniseOptions::default(), &w).unwrap();
         let first = units(&rec, &(0..2).collect())[0].clone();
         let one = crate::tweak::delete_faces_with(
             OpKey(0x23c2),

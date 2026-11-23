@@ -518,3 +518,26 @@ fn a_small_rounded_corners_two_fillets_deleted_never_panics() {
 fn face_of(r: FaceRole) -> Name {
     Name::derive(OpKey(0x22c0), Role::Face(r), &[])
 }
+
+/// Plan 23.C: the public partial delete. Nothing picked: the body back
+/// and an empty report. A bad size refuses before anything is built.
+#[test]
+fn a_partial_delete_of_nothing_is_the_body() {
+    use ryukei::tweak::{DeleteBlends, delete_blends_partial};
+    let (b, _) = primitive::block(OpKey(0x23c3), 1.0, 1.0, 1.0, &Rigid::IDENTITY).unwrap();
+    let spec = DeleteBlends {
+        max_size: Some(0.1),
+        ..Default::default()
+    };
+    let (o, j, r) = delete_blends_partial(OpKey(0x23c4), &b, &spec).unwrap();
+    assert_eq!(o.dump(), b.dump());
+    assert!(j.events().is_empty() && r.deleted.is_empty() && r.kept.is_empty());
+    let bad = DeleteBlends {
+        max_size: Some(-1.0),
+        ..Default::default()
+    };
+    assert_eq!(
+        delete_blends_partial(OpKey(0x23c4), &b, &bad).map(|_| ()),
+        Err(Error::InvalidTweak(TweakError::BadDistance))
+    );
+}
