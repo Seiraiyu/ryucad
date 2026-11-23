@@ -314,12 +314,15 @@ impl Budget {
     }
 
     /// The parts among `candidates` (parts whose rebuilds may go) to let
-    /// go, least recently used first, so what is held (`total`) comes
-    /// within the budget; and notes whether even all of them don't.
+    /// go, least recently used first, once what is held (`total`) is over
+    /// the budget: down to a sixteenth under it, so the request that asked
+    /// has room for its own working memory under the ceiling (#854); and
+    /// notes whether even all of them don't bring it within the budget.
     pub fn evict(&mut self, candidates: impl Iterator<Item = Id>, mut total: u64) -> Vec<Id> {
         if !self.on() || total <= self.max {
             return Vec::new();
         }
+        let low = self.max - self.max / 16;
         let mut order: Vec<(u64, Id)> = candidates
             .filter(|id| !self.pinned.contains(id))
             .map(|id| (self.used.get(&id).copied().unwrap_or(0), id))
@@ -327,7 +330,7 @@ impl Budget {
         order.sort();
         let mut out = Vec::new();
         for (_, id) in order {
-            if total <= self.max {
+            if total <= low {
                 break;
             }
             let h = self.held.get(&id).copied().unwrap_or_default();
@@ -435,6 +438,29 @@ mod tests {
         b.unpin();
         assert_eq!(b.evict(left.iter().cloned(), 200), [id("b")]);
         assert!(b.too_small);
+    }
+
+    /// #854: once over the budget, eviction goes down to a sixteenth
+    /// under it, so the request that asked has room for its own working
+    /// memory under the ceiling; under the budget, nothing goes.
+    #[test]
+    fn eviction_leaves_headroom() {
+        let mut b = Budget {
+            max: 1600,
+            ..Budget::default()
+        };
+        let parts: Vec<Id> = (0..20).map(|i| id(&format!("p{i:02}"))).collect();
+        for p in &parts {
+            b.held.insert(p.clone(), Held { all: 100, shown: 0 });
+            b.touch(p);
+        }
+        assert!(b.evict(parts.iter().cloned(), 1600).is_empty());
+        let total = b.total(parts.iter(), parts.iter(), 0);
+        assert_eq!(total, 2000);
+        let out = b.evict(parts.iter().cloned(), total);
+        // 2000 down to at most 1600 - 100 = 1500: five go, not four.
+        assert_eq!(out, parts[..5]);
+        assert!(!b.too_small);
     }
 
     #[test]

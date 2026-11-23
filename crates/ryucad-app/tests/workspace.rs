@@ -67,6 +67,36 @@ fn the_window_loads_the_model_and_its_meshes() {
     assert_eq!(ws.model.mesh_requests, 1);
 }
 
+/// #876: a part's bodies refined to another level go by the batch, one
+/// request for both of this part's, meshed side by side, not one a body.
+#[test]
+fn level_refinements_go_by_the_batch() {
+    use ryucad::mesh::Quality;
+    let p = Project::new().with_part();
+    let mut ws = open(&p);
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && meshed(ws)));
+    let level = if ws.model.base == Quality::Fine {
+        Quality::Coarse
+    } else {
+        Quality::Fine
+    };
+    let keys: Vec<_> = ["base", "boss"]
+        .map(|f| ("p".to_owned(), f.to_owned()))
+        .into();
+    ws.fetch_levels(keys.iter().map(|k| (k.clone(), level)).collect());
+    assert_eq!(ws.model.level_requests, 1);
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.idle()
+            && keys.iter().all(|k| {
+                let hash = ws.model.meshes[k].hash.clone();
+                ws.model.levels.contains_key(&(hash, level))
+            })
+    }));
+    // Each body and level once.
+    ws.fetch_levels(keys.iter().map(|k| (k.clone(), level)).collect());
+    assert_eq!(ws.model.level_requests, 1);
+}
+
 #[test]
 fn an_edit_refetches_one_body() {
     let p = Project::new().with_part();
@@ -747,8 +777,15 @@ fn a_burst_costs_each_reader_about_one_request_per_publish() {
 /// Runs `n` sphere writes through one `ryucad session --stdio`, spread over
 /// `parts`, while `ws` is polled as a window's frames poll it; then waits
 /// for the last publish and the reads after it. Returns the burst's
-/// seconds and the daemon's timings by method.
-fn burst(p: &Project, ws: &mut Workspace, parts: &[&str], n: usize) -> (f64, serde_json::Value) {
+/// seconds, the daemon's timings by method, and the burst's pauses: the
+/// gaps between one write's answer and the next of `DOCTOR_QUIET` or more
+/// (a slow runner's stalls, #1030).
+fn burst(
+    p: &Project,
+    ws: &mut Workspace,
+    parts: &[&str],
+    n: usize,
+) -> (f64, serde_json::Value, usize) {
     let root = p.root.clone();
     let parts: Vec<String> = parts.iter().map(|s| s.to_string()).collect();
     let t = Instant::now();
@@ -763,6 +800,7 @@ fn burst(p: &Project, ws: &mut Workspace, parts: &[&str], n: usize) -> (f64, ser
             .unwrap();
         let mut stdin = child.stdin.take().unwrap();
         let mut out = std::io::BufReader::new(child.stdout.take().unwrap());
+        let mut answered = Vec::with_capacity(n);
         for i in 0..n {
             let line = serde_json::json!({"jsonrpc": "2.0", "id": i, "method": "feature.add",
                 "params": {"part": parts[i % parts.len()], "id": format!("b{i:02}"),
@@ -772,16 +810,23 @@ fn burst(p: &Project, ws: &mut Workspace, parts: &[&str], n: usize) -> (f64, ser
             let mut a = String::new();
             out.read_line(&mut a).unwrap();
             assert!(a.contains("\"result\""), "{a}");
+            answered.push(Instant::now());
         }
         drop(stdin);
         assert!(child.wait().unwrap().success());
+        answered
     });
     while !script.is_finished() {
         ws.pump();
         ws.tick(Instant::now());
         std::thread::sleep(Duration::from_millis(16));
     }
-    script.join().unwrap();
+    let answered = script.join().unwrap();
+    let quiet_for = ryucad_app::core::workspace::session::DOCTOR_QUIET;
+    let pauses = answered
+        .windows(2)
+        .filter(|w| w[1] - w[0] >= quiet_for)
+        .count();
     let secs = t.elapsed().as_secs_f64();
     let quiet = Instant::now();
     while quiet.elapsed() < Duration::from_millis(1500) {
@@ -792,7 +837,7 @@ fn burst(p: &Project, ws: &mut Workspace, parts: &[&str], n: usize) -> (f64, ser
     assert!(ws.wait_until(WAIT, |w| w.idle() && !w.doctor_pending()));
     assert!(ws.wait_until(WAIT, |w| w.idle()));
     let t = methods(p);
-    (secs, t)
+    (secs, t, pauses)
 }
 
 /// A burst over several parts the window holds costs one rebuild per
@@ -806,7 +851,7 @@ fn a_burst_over_parts_is_read_in_one_rebuild_per_poll() {
     let mut ws = open(&p);
     ws.diagnose();
     assert!(ws.wait_until(WAIT, |w| w.idle() && w.model.listed.len() == 3));
-    let (_, t) = burst(&p, &mut ws, &["p", "q", "r"], 60);
+    let (_, t, _) = burst(&p, &mut ws, &["p", "q", "r"], 60);
     let n = |m: &str| t[m]["count"].as_u64().unwrap_or(0);
     let publishes = t["daemon.publish"]["publishes"].as_u64().unwrap_or(0);
     assert!(publishes >= 1, "{t}");
@@ -828,12 +873,15 @@ fn a_burst_asks_the_doctor_once_it_goes_quiet() {
     ws.diagnose();
     assert!(ws.wait_until(WAIT, |w| w.idle() && w.session.doctor.is_some()));
     let before = methods(&p)["doctor"]["count"].as_u64().unwrap_or(0);
-    let (secs, t) = burst(&p, &mut ws, &["p"], 60);
+    let (secs, t, pauses) = burst(&p, &mut ws, &["p"], 60);
     let doctors = t["doctor"]["count"].as_u64().unwrap_or(0) - before;
     let publishes = t["daemon.publish"]["publishes"].as_u64().unwrap_or(0);
-    // One at the end; a second only if the burst paused long enough.
+    // One at the end; a second only if the burst paused long enough, and
+    // one more for each pause the burst made itself (a slow runner's
+    // stalls of DOCTOR_QUIET or more, #1030).
+    let most = 2 + pauses as u64;
     assert!(
-        (1..=2).contains(&doctors),
-        "{doctors} doctors in {secs:.1} s, {publishes} publishes: {t}"
+        (1..=most).contains(&doctors),
+        "{doctors} doctors in {secs:.1} s, {publishes} publishes, {pauses} pauses: {t}"
     );
 }

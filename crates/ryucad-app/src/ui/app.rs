@@ -102,11 +102,43 @@ pub fn scale_of(v: &serde_json::Value) -> f32 {
         .clamp(ryucad::config::MIN_SCALE, ryucad::config::MAX_SCALE) as f32
 }
 
-/// Gives the window `scale` (`ui.scale`) as egui's zoom factor. egui's
-/// own Ctrl+= and Ctrl+- are off: View > Zoom in and Zoom out write the
-/// preference, so the size lasts and every window takes it.
+/// The desktop's text scale the window itself must apply (#1026), as
+/// `f32` bits: 1 unless [`set_desktop_text_scale`] said otherwise.
+static DESKTOP_TEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3f80_0000);
+
+/// The desktop's text scale, which the window multiplies `ui.scale` by:
+/// on native Wayland GNOME's Large Text (`text-scaling-factor`) reaches no
+/// app through the compositor's scale, as it does through XWayland's DPI
+/// (#1026). `main` sets it for the real window only.
+pub fn set_desktop_text_scale(f: f32) {
+    let f = if f.is_finite() {
+        f.clamp(0.5, 3.0)
+    } else {
+        1.0
+    };
+    DESKTOP_TEXT.store(f.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+fn desktop_text_scale() -> f32 {
+    f32::from_bits(DESKTOP_TEXT.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// GNOME's text scaling factor, as `gsettings get
+/// org.gnome.desktop.interface text-scaling-factor` prints it (`1.5`).
+pub fn parse_text_scale(out: &str) -> Option<f32> {
+    out.trim()
+        .parse::<f32>()
+        .ok()
+        .filter(|f| f.is_finite() && *f > 0.0)
+}
+
+/// Gives the window `scale` (`ui.scale`) as egui's zoom factor, times the
+/// desktop's text scale where the window applies it itself (#1026).
+/// egui's own Ctrl+= and Ctrl+- are off: View > Zoom in and Zoom out write
+/// the preference, so the size lasts and every window takes it.
 pub fn apply_scale(ctx: &egui::Context, scale: f32) {
     ctx.options_mut(|o| o.zoom_with_keyboard = false);
+    let scale = scale * desktop_text_scale();
     if (ctx.zoom_factor() - scale).abs() > 1e-4 {
         ctx.set_zoom_factor(scale);
     }
@@ -888,6 +920,7 @@ impl eframe::App for App {
     /// The tiles as they were left.
     fn on_exit(&mut self) {
         crate::ui::platform::trace("the window is closing");
+        crate::ui::exits::closing();
         if let Screen::Opened(o) = &mut self.screen {
             o.save_layout_before_closing();
             o.thumbnail_before_closing();
@@ -974,6 +1007,15 @@ impl eframe::App for App {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// #1026: GNOME's Large Text, as gsettings prints it.
+    #[test]
+    fn the_desktops_text_scale_is_read() {
+        assert_eq!(parse_text_scale("1.5\n"), Some(1.5));
+        assert_eq!(parse_text_scale("1.0"), Some(1.0));
+        assert_eq!(parse_text_scale("No such key"), None);
+        assert_eq!(parse_text_scale("-1"), None);
+    }
 
     #[test]
     fn windows_are_numbered_per_user() {

@@ -23,15 +23,17 @@ trap 'rm -rf "$work"' EXIT
 failures=0
 status=0
 
-# release DIR: a fake release with v0.0.9 and v0.1.0 (latest).
+# release DIR [BINARY]: a fake release with v0.0.9 and v0.1.0 (latest),
+# its ryucad BINARY (default: the one given).
 release() {
+    rbin=${2:-$binary}
     for v in 0.0.9 0.1.0; do
         d="$1/download/v$v"
         mkdir -p "$d"
         for t in x86_64-unknown-linux-musl aarch64-unknown-linux-musl aarch64-apple-darwin; do
             s="$work/stage/ryucad-$v-$t"
             mkdir -p "$s/share"
-            cp "$binary" "$s/ryucad"
+            cp "$rbin" "$s/ryucad"
             printf '#!/bin/sh\necho "{\\"ryucad\\":\\"%s\\"}"\n' "$v" >"$s/ryucad-app"
             chmod 755 "$s/ryucad-app"
             cp "$root/packaging/linux/ryucad.desktop" "$root/packaging/linux/ryucad.xml" \
@@ -53,6 +55,19 @@ bad="$work/bad"
 release "$bad"
 # A tampered download: the archives no longer match their checksums.
 for f in "$bad"/download/v0.1.0/*.tar.gz; do printf x >>"$f"; done
+# A daemon that outlives `daemon stop --all` (#1023): a ryucad that says
+# so, as the real one does, and is the real one otherwise.
+cat >"$work/stuck-ryucad" <<STUCK
+#!/bin/sh
+if [ "\$*" = "daemon stop --all" ]; then
+    echo '{"ok":true,"result":{"stopped":1,"still_running":[{"address":"a","log":"l"}]},"warnings":[]}'
+    exit 0
+fi
+exec "$binary" "\$@"
+STUCK
+chmod 755 "$work/stuck-ryucad"
+stuck="$work/stuck"
+release "$stuck" "$work/stuck-ryucad"
 
 # run NAME BASE [VAR=VALUE...]: run the installer in a fresh HOME (kept
 # across runs of the same NAME), capturing output and status.
@@ -102,6 +117,7 @@ if command -v git >/dev/null 2>&1; then
 fi
 run fresh "$good"
 check "reinstall succeeds" '[ "$status" -eq 0 ]'
+check "a clean stop says nothing of daemons" '! grep -q "daemon didn" "$work/out"'
 check "reinstall adds no second PATH line" '[ "$(markers "$work/home-fresh/.profile")" = 1 ]'
 check "a reinstall says the profile has the line already" 'grep -q "/.ryucad/bin is in your shell profile but not this shell'"'"'s PATH" "$work/out" && ! grep -q "added .* to PATH" "$work/out"'
 
@@ -147,6 +163,10 @@ fi
 run noapp "$good" RYUCAD_NO_APP=1
 check "RYUCAD_NO_APP installs the command only" '[ "$status" -eq 0 ] && [ -x "$work/home-noapp/.ryucad/bin/ryucad" ] && [ ! -e "$work/home-noapp/.ryucad/bin/ryucad-app" ]'
 check "RYUCAD_NO_APP registers nothing" '[ ! -e "$work/home-noapp/.local/share/applications" ] && [ ! -e "$work/home-noapp/Applications" ]'
+
+# A daemon still running after the stop is said, and the install goes on.
+run stuck "$stuck"
+check "a daemon that didn't stop is said" '[ "$status" -eq 0 ] && grep -q "warning: a ryucad daemon didn.t stop" "$work/out"'
 
 # Pinned versions.
 run pinned "$good" RYUCAD_VERSION=0.0.9

@@ -305,7 +305,8 @@ const KEYS: &[Key] = &[
         rule: Rule::Int(10, 5000),
         default: || json!(ryu_session::publish::QUIET_MS),
         about: "how long a watched daemon waits with no request before telling subscribers \
-                what requests changed",
+                what a burst of requests changed; a change this long after the last is told \
+                at once",
     },
     Key {
         name: "daemon.publish_max_ms",

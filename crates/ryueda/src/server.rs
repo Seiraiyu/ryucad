@@ -660,8 +660,14 @@ fn doctor_repair(session: &mut Session, ids: &[String]) -> Result<Value> {
     for r in &plan {
         for c in &r.changes {
             if c.path == crate::doctor::GIT_INSTALL {
-                crate::drivers::install(&root, true)?;
-                changes.push(json!({"change": "git_install"}));
+                let g = crate::drivers::install(&root, true)?;
+                let mut change = json!({"change": "git_install"});
+                // #920: a binary inside a checkout of the clone installs nothing.
+                if let Some(why) = g.get("skipped") {
+                    change["skipped"] = why.clone();
+                    change["warning"] = g["warning"].clone();
+                }
+                changes.push(change);
                 continue;
             }
             let at = path_of(&root, &c.path);

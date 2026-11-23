@@ -766,28 +766,66 @@ mod tests {
 
     #[test]
     fn a_watch_names_renames_and_folders_replaced() {
+        // #925: on a Windows runner this hung until nextest's 300 s,
+        // silently. The body runs on a thread naming each step it
+        // reaches, so a hang fails in a minute naming the call it hung in.
+        let (tx, rx) = std::sync::mpsc::channel::<&'static str>();
+        let body = std::thread::spawn(move || watch_names_renames_and_folders_replaced(&tx));
+        let mut last = "start";
+        loop {
+            match rx.recv_timeout(Duration::from_secs(60)) {
+                Ok("done") => break,
+                Ok(step) => last = step,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    panic!("#925: stuck after {last}")
+                }
+            }
+        }
+        body.join().unwrap();
+    }
+
+    fn watch_names_renames_and_folders_replaced(step: &std::sync::mpsc::Sender<&'static str>) {
+        let say = |s| step.send(s).ok();
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("p");
         fs::create_dir_all(root.join("parts/a")).unwrap();
         fs::write(root.join("parts/a/x.json"), "1").unwrap();
+        say("the watch starting");
         let mut w =
             Watch::start(&root, &dir.path().join("marks"), |p| p.starts_with("parts")).unwrap();
+        say("the first changes");
         w.changes();
+        say("the rename");
         fs::rename(root.join("parts/a/x.json"), root.join("parts/a/y.json")).unwrap();
+        say("the rename's changes");
         let got = paths(w.changes());
         assert!(
             got.contains("parts/a/x.json") && got.contains("parts/a/y.json"),
             "{got:?}"
         );
         // What a checkout does to a folder: gone, and back with other files.
+        say("the folder's removal");
         fs::remove_dir_all(root.join("parts")).unwrap();
+        say("the folder made again");
         fs::create_dir_all(root.join("parts/b")).unwrap();
         fs::write(root.join("parts/b/z.json"), "2").unwrap();
+        say("the replaced folder's changes");
         let got = paths(w.changes());
         assert!(got.contains("parts"), "{got:?}");
         // Outside what it keeps: nothing.
+        say("a write outside");
         fs::write(root.join("notes.txt"), "3").unwrap();
+        say("the outside write's changes");
         assert!(paths(w.changes()).is_empty());
+        // The watch goes before its folder: a recursive
+        // ReadDirectoryChangesW watch on a folder being removed is the
+        // likeliest hang.
+        say("the watch dropped");
+        drop(w);
+        say("the folder removed");
+        drop(dir);
+        say("done");
     }
 
     /// #755: a full check lists every folder, and a watch that heard its
