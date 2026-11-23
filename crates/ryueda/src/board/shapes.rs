@@ -469,6 +469,21 @@ fn one(
     out
 }
 
+/// What one part would draw at `place`: its pads and its courtyard (the
+/// legaliser's candidates).
+pub(crate) fn part(
+    board: &str,
+    o: &Occ,
+    f: &Footprint,
+    place: Place,
+    preset: &preset::Preset,
+    n: usize,
+    fields: &super::file::PartFields,
+) -> (Vec<PadInfo>, Option<CourtyardInfo>) {
+    let one = one(board, o, f, place, preset, n, fields);
+    (one.pads, one.courtyards.into_iter().next())
+}
+
 fn note_missing(notices: &mut Vec<Fault>, o: &Occ, s: &Shape) {
     if !s.missing.is_empty() {
         notices.push(

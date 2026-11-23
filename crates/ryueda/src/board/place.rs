@@ -6,10 +6,15 @@ use super::drc::{Finding, finding};
 use super::file::{Constraint, EdgeSide, Placement, PlacementSide};
 use super::load::BoardFiles;
 use super::occ::Occ;
+use super::preset::Preset;
+use super::rules::Rules;
 use super::shapes::BoardShapes;
+use super::shapes::PadInfo;
 use crate::error::Code;
+use crate::error::{Error, Result};
 use crate::fault::Severity;
 use ryu_board::geom::Rect;
+use ryu_board::geom::{Mdeg, Place, Point};
 use ryu_board::shape::Shape;
 use ryu_copper::measure::{self, Body, BodyOptions, Verdict};
 use serde_json::{Value, json};
@@ -194,10 +199,495 @@ pub fn constraints(board: &str, b: &BoardFiles, occs: &[Occ], s: &BoardShapes) -
     out
 }
 
+/// The most candidates the legaliser tries.
+pub const MAX_CANDIDATES: usize = 250_000;
+
+/// What the legaliser is asked to place.
+pub struct Ask<'a> {
+    pub occ: &'a Occ<'a>,
+    pub rotation_mdeg: i64,
+    pub side: PlacementSide,
+    pub constraints: &'a [Constraint],
+    /// Where the part is now, if it is placed.
+    pub now: Option<[i64; 2]>,
+}
+
+fn apart(a: Rect, b: Rect, d: i64) -> bool {
+    a.max.x.saturating_add(d) < b.min.x
+        || b.max.x.saturating_add(d) < a.min.x
+        || a.max.y.saturating_add(d) < b.min.y
+        || b.max.y.saturating_add(d) < a.min.y
+}
+
+/// Another item a candidate must clear.
+struct Other {
+    reference: String,
+    net: Option<String>,
+    /// Copper layers it is on, by index.
+    on: Vec<bool>,
+    body: Body,
+    bounds: Rect,
+}
+
+fn others(board: &str, s: &BoardShapes, occurrence: &str, opts: &BodyOptions) -> Vec<Other> {
+    let n = s.n();
+    let mut out = Vec::new();
+    let mut push = |reference: String, net: Option<String>, on: Vec<bool>, shape: &Shape| {
+        if let Some(bounds) = shape.bounds() {
+            out.push(Other {
+                reference,
+                net,
+                on,
+                body: Body::of_shape(shape, opts),
+                bounds,
+            });
+        }
+    };
+    for p in s.pads.iter().filter(|p| p.occurrence != occurrence) {
+        push(
+            p.reference.clone(),
+            p.net.clone(),
+            (0..n).map(|l| p.on(l, n)).collect(),
+            &p.copper,
+        );
+    }
+    for t in &s.tracks {
+        let l = t.layer.index(n).unwrap_or(0);
+        push(
+            format!("{board}:track/{}", t.id),
+            Some(t.net.clone()),
+            (0..n).map(|i| i == l).collect(),
+            &t.shape,
+        );
+    }
+    for v in &s.vias {
+        push(
+            format!("{board}:via/{}", v.id),
+            Some(v.net.clone()),
+            (0..n).map(|i| (v.from..=v.to).contains(&i)).collect(),
+            &v.shape,
+        );
+    }
+    out
+}
+
+/// What stops a candidate, if anything: the board's edge, another
+/// courtyard, or another net's copper.
+#[allow(clippy::too_many_arguments)]
+fn blocked(
+    s: &BoardShapes,
+    rules: &Rules,
+    owner: &str,
+    side: PlacementSide,
+    pads: &[PadInfo],
+    body: &Shape,
+    others: &[Other],
+    opts: &BodyOptions,
+) -> Option<String> {
+    let n = s.n();
+    let b = Body::of_shape(body, opts);
+    let outline = Body::of_shape(&s.outline, opts);
+    let edges = Body::of_shape(&s.edges, opts);
+    let inside = b
+        .solids
+        .iter()
+        .all(|x| measure::contains(&outline, x.probe()).is_yes());
+    let ec = rules.edge_clearance(None).value;
+    let near_edge = if ec > 0 {
+        measure::closer(&b, &edges, ec)
+    } else {
+        measure::touches(&b, &edges)
+    };
+    if !inside || near_edge != Verdict::No {
+        return Some("the board's edge".into());
+    }
+    let gap = rules.courtyard_clearance().value;
+    let bottom = side == PlacementSide::Bottom;
+    for c in s
+        .courtyards
+        .iter()
+        .filter(|c| c.owner != owner && c.bottom == bottom)
+    {
+        let theirs = Body::of_shape(&c.shape, opts);
+        let v = if gap == 0 {
+            measure::touches(&b, &theirs)
+        } else {
+            measure::closer(&b, &theirs, gap)
+        };
+        if v != Verdict::No {
+            return Some(c.owner.clone());
+        }
+    }
+    for p in pads {
+        let Some(pb) = p.copper.bounds() else {
+            continue;
+        };
+        let mine = Body::of_shape(&p.copper, opts);
+        let a: Vec<&str> = p.net.iter().map(String::as_str).collect();
+        for o in others {
+            if o.net.is_some() && o.net == p.net {
+                continue;
+            }
+            if !(0..n).any(|l| p.on(l, n) && o.on[l]) {
+                continue;
+            }
+            let theirs: Vec<&str> = o.net.iter().map(String::as_str).collect();
+            let need = rules.pair_clearance(&a, &theirs).value;
+            if apart(pb, o.bounds, need) {
+                continue;
+            }
+            if measure::closer(&mine, &o.body, need) != Verdict::No {
+                return Some(o.reference.clone());
+            }
+        }
+    }
+    None
+}
+
+/// Whether one constraint holds for a candidate's copper and body.
+fn holds(
+    c: &Constraint,
+    copper: &Body,
+    body: &Shape,
+    side: PlacementSide,
+    s: &BoardShapes,
+    target: Option<&Body>,
+    opts: &BodyOptions,
+) -> bool {
+    match c {
+        Constraint::Side { side: want } => *want == side,
+        Constraint::Near { within_nm, .. } => {
+            target.is_some_and(|t| measure::within(copper, t, *within_nm) == Verdict::Yes)
+        }
+        Constraint::Edge {
+            edge: EdgeSide::Any,
+            within_nm,
+        } => {
+            measure::within(
+                &Body::of_shape(body, opts),
+                &Body::of_shape(&s.edges, opts),
+                *within_nm,
+            ) == Verdict::Yes
+        }
+        Constraint::Edge { edge, within_nm } => match (s.outline.bounds(), body.bounds()) {
+            (Some(o), Some(b)) => from_side(o, b, *edge) <= *within_nm,
+            _ => false,
+        },
+    }
+}
+
+fn centre(r: Rect) -> Point {
+    Point::new(
+        r.min.x + (r.max.x - r.min.x) / 2,
+        r.min.y + (r.max.y - r.min.y) / 2,
+    )
+}
+
+/// The point of `side` of the box `o` nearest `p`.
+fn on_side(o: Rect, p: Point, side: EdgeSide) -> Point {
+    let cx = p.x.clamp(o.min.x, o.max.x);
+    let cy = p.y.clamp(o.min.y, o.max.y);
+    match side {
+        EdgeSide::Left => Point::new(o.min.x, cy),
+        EdgeSide::Right => Point::new(o.max.x, cy),
+        EdgeSide::Bottom => Point::new(cx, o.min.y),
+        EdgeSide::Top => Point::new(cx, o.max.y),
+        EdgeSide::Any => [
+            EdgeSide::Left,
+            EdgeSide::Right,
+            EdgeSide::Bottom,
+            EdgeSide::Top,
+        ]
+        .into_iter()
+        .map(|e| on_side(o, p, e))
+        .min_by_key(|q| {
+            let (dx, dy) = (i128::from(q.x - p.x), i128::from(q.y - p.y));
+            (dx * dx + dy * dy, q.x, q.y)
+        })
+        .expect("four sides"),
+    }
+}
+
+/// `board place`'s legaliser: the first point of the placement grid,
+/// nearest the constraints' target first, where every constraint holds
+/// and the part is clear. Answers `{at, searched_nm, tried}`.
+pub fn legalise(
+    board: &str,
+    s: &BoardShapes,
+    rules: &Rules,
+    preset: &Preset,
+    ask: &Ask,
+) -> Result<Value> {
+    let o = ask.occ;
+    let f = o.footprint.ok_or_else(|| {
+        Error::new(
+            Code::InvalidParam,
+            format!("{} has no footprint to place", o.reference),
+        )
+    })?;
+    if let Some(Constraint::Side { side }) = ask
+        .constraints
+        .iter()
+        .find(|c| matches!(c, Constraint::Side { side } if *side != ask.side))
+    {
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!(
+                "the part must stay on the {}, but --side is {}",
+                side.name(),
+                ask.side.name()
+            ),
+        )
+        .with("param", "side"));
+    }
+    let opts = BodyOptions::default();
+    let n = s.n();
+    let fields = super::file::PartFields::default();
+    let place_at = |p: Point| Place {
+        at: p,
+        rot: Mdeg::new(ask.rotation_mdeg),
+        mirror: ask.side == PlacementSide::Bottom,
+        scale: None,
+    };
+    // The part's copper radius about its origin.
+    let (pads0, _) =
+        super::shapes::part(board, o, f, place_at(Point::new(0, 0)), preset, n, &fields);
+    let r_part = union(pads0.iter().map(|p| &p.copper))
+        .bounds()
+        .map_or(0, |b| {
+            [b.min.x, b.max.x, b.min.y, b.max.y]
+                .into_iter()
+                .map(i64::abs)
+                .max()
+                .unwrap_or(0)
+        });
+    // Each near constraint's target body, and the search's target and reach.
+    let mut targets: Vec<Option<Body>> = Vec::new();
+    let mut aim: Option<(Point, i64)> = None;
+    for c in ask.constraints {
+        match c {
+            Constraint::Near { near, within_nm } => {
+                let (_, t) = target(s, board, near).ok_or_else(|| {
+                    Error::new(
+                        Code::NotFound,
+                        format!("board {board} has no pad or part {near}"),
+                    )
+                    .with("ref", near)
+                })?;
+                let tb = t.bounds().expect("a target has copper");
+                if aim.is_none() {
+                    let half = ((tb.max.x - tb.min.x) + (tb.max.y - tb.min.y)) / 2;
+                    aim = Some((centre(tb), within_nm + r_part + half));
+                }
+                targets.push(Some(Body::of_shape(&t, &opts)));
+            }
+            Constraint::Edge { edge, within_nm } => {
+                targets.push(None);
+                if aim.is_none() {
+                    let ob = s.outline.bounds().ok_or_else(|| {
+                        Error::new(Code::InvalidParam, "the board has no outline")
+                    })?;
+                    let from = ask.now.map_or(centre(ob), |a| Point::new(a[0], a[1]));
+                    aim = Some((on_side(ob, from, *edge), within_nm + 2 * r_part));
+                }
+            }
+            Constraint::Side { .. } => targets.push(None),
+        }
+    }
+    let Some((t, reach)) = aim else {
+        return Err(Error::new(
+            Code::InvalidParam,
+            "the legaliser needs --near or --edge",
+        ));
+    };
+    let g = rules.placement_grid().value.max(1);
+    let snap = |v: i64| v.div_euclid(g) * g + if v.rem_euclid(g) * 2 >= g { g } else { 0 };
+    let (tx, ty) = (snap(t.x), snap(t.y));
+    let most = ((MAX_CANDIDATES as f64).sqrt() as i64 - 1) / 2;
+    let k = (reach / g + 1).min(most);
+    let mut cands: Vec<Point> = Vec::with_capacity(((2 * k + 1) * (2 * k + 1)) as usize);
+    for i in -k..=k {
+        for j in -k..=k {
+            cands.push(Point::new(tx + i * g, ty + j * g));
+        }
+    }
+    cands.sort_by_key(|p| {
+        let (dx, dy) = (i128::from(p.x - t.x), i128::from(p.y - t.y));
+        (dx * dx + dy * dy, p.x, p.y)
+    });
+    let owner = format!("{board}:{}", o.label());
+    let others = others(board, s, &o.reference, &opts);
+    let mut first_block: Option<String> = None;
+    for (tried, p) in cands.iter().enumerate() {
+        let (pads, court) = super::shapes::part(board, o, f, place_at(*p), preset, n, &fields);
+        let copper = union(pads.iter().map(|x| &x.copper));
+        let body = court.map(|c| c.shape).unwrap_or_else(|| copper.clone());
+        let cb = Body::of_shape(&copper, &opts);
+        let ok = ask
+            .constraints
+            .iter()
+            .zip(&targets)
+            .all(|(c, tb)| holds(c, &cb, &body, ask.side, s, tb.as_ref(), &opts));
+        if !ok {
+            continue;
+        }
+        match blocked(s, rules, &owner, ask.side, &pads, &body, &others, &opts) {
+            None => return Ok(json!({"at": [p.x, p.y], "searched_nm": k * g, "tried": tried + 1})),
+            Some(b) => {
+                first_block.get_or_insert(b);
+            }
+        }
+    }
+    let by = first_block.unwrap_or_else(|| "constraint".into());
+    Err(Error::new(
+        Code::PlacementNoRoom,
+        format!("no point of the {g} nm grid within {} nm of the target holds {}'s constraints and is clear; the nearest that held was blocked by {by}", k * g, o.label()),
+    )
+    .with("blocked_by", by)
+    .with("searched_nm", k * g))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::board::preset::JLC_2L;
+    use crate::board::rules::Rules;
     use crate::board::testing::{MM, UM, board};
+
+    fn r(fp: &crate::footprint::Footprint) -> Occ<'_> {
+        Occ {
+            reference: "r9".into(),
+            refdes: Some("R9".into()),
+            value: None,
+            footprint_ref: Some("lib/x/footprint/r".into()),
+            footprint: Some(fp),
+            footprint_error: None,
+            nets: [
+                ("1".to_owned(), "a".to_owned()),
+                ("2".to_owned(), "b".to_owned()),
+            ]
+            .into_iter()
+            .collect(),
+            dnp: false,
+        }
+    }
+
+    fn rules() -> Rules {
+        Rules::from_parts(std::sync::Arc::new(JLC_2L), None, Default::default())
+    }
+
+    #[test]
+    fn the_legaliser_takes_the_nearest_grid_point_that_holds_and_is_clear() {
+        let fp = crate::footprint::tests::r0402();
+        let o = r(&fp);
+        let mut s = board(20 * MM, 10 * MM);
+        s.smd("u1", "7", (10 * MM, 5 * MM), (MM, MM), Some("a"))
+            .courtyard("u1", (10 * MM, 5 * MM), (2 * MM, 2 * MM), false);
+        let c = [Constraint::Near {
+            near: "u1/7".into(),
+            within_nm: MM,
+        }];
+        let ask = Ask {
+            occ: &o,
+            rotation_mdeg: 0,
+            side: PlacementSide::Top,
+            constraints: &c,
+            now: None,
+        };
+        let v = legalise("b", &s, &rules(), &JLC_2L, &ask).unwrap();
+        let at = v["at"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_i64().unwrap())
+            .collect::<Vec<_>>();
+        // On the 0.1 mm grid, clear of u1's courtyard (to x ≥ 11 mm, its
+        // own reaching 0.93 mm), within 1 mm of the pad: nothing nearer.
+        assert_eq!(at[0] % (100 * UM), 0);
+        assert_eq!(at[1] % (100 * UM), 0);
+        let placed = |x: i64, y: i64| {
+            let place = ryu_board::geom::Place {
+                at: ryu_board::geom::Point::new(x, y),
+                ..Default::default()
+            };
+            super::super::shapes::part("b", &o, &fp, place, &JLC_2L, 2, &Default::default())
+        };
+        let (pads, court) = placed(at[0], at[1]);
+        let opts = BodyOptions::default();
+        let copper = Body::of_shape(&union(pads.iter().map(|p| &p.copper)), &opts);
+        let pad = Body::of_shape(&s.pads[0].copper, &opts);
+        assert_eq!(measure::within(&copper, &pad, MM), Verdict::Yes);
+        let theirs = Body::of_shape(&s.courtyards[0].shape, &opts);
+        assert_eq!(
+            measure::touches(&Body::of_shape(&court.unwrap().shape, &opts), &theirs),
+            Verdict::No
+        );
+        // Asked again, the same answer: the order is total.
+        assert_eq!(legalise("b", &s, &rules(), &JLC_2L, &ask).unwrap(), v);
+    }
+
+    #[test]
+    fn no_room_names_what_blocked_the_nearest() {
+        let fp = crate::footprint::tests::r0402();
+        let o = r(&fp);
+        let mut s = board(20 * MM, 10 * MM);
+        // The target's courtyard is wide: nothing fits within 0.1 mm of its pad.
+        s.smd("u1", "7", (10 * MM, 5 * MM), (MM, MM), Some("a"))
+            .courtyard("u1", (10 * MM, 5 * MM), (6 * MM, 6 * MM), false);
+        let c = [Constraint::Near {
+            near: "u1/7".into(),
+            within_nm: 100 * UM,
+        }];
+        let ask = Ask {
+            occ: &o,
+            rotation_mdeg: 0,
+            side: PlacementSide::Top,
+            constraints: &c,
+            now: None,
+        };
+        let e = legalise("b", &s, &rules(), &JLC_2L, &ask).unwrap_err();
+        assert_eq!(e.code, Code::PlacementNoRoom);
+        assert_eq!(e.details["blocked_by"], "b:u1");
+        // A side constraint against --side is refused at once.
+        let c = [Constraint::Side {
+            side: PlacementSide::Bottom,
+        }];
+        let ask = Ask {
+            occ: &o,
+            rotation_mdeg: 0,
+            side: PlacementSide::Top,
+            constraints: &c,
+            now: None,
+        };
+        assert_eq!(
+            legalise("b", &s, &rules(), &JLC_2L, &ask).unwrap_err().code,
+            Code::InvalidParam
+        );
+    }
+
+    #[test]
+    fn an_edge_constraint_lands_against_its_side_inside_the_edge_clearance() {
+        let fp = crate::footprint::tests::r0402();
+        let o = r(&fp);
+        let s = board(20 * MM, 10 * MM);
+        let c = [Constraint::Edge {
+            edge: EdgeSide::Left,
+            within_nm: MM,
+        }];
+        let ask = Ask {
+            occ: &o,
+            rotation_mdeg: 0,
+            side: PlacementSide::Top,
+            constraints: &c,
+            now: Some([10 * MM, 5 * MM]),
+        };
+        let v = legalise("b", &s, &rules(), &JLC_2L, &ask).unwrap();
+        let x = v["at"][0].as_i64().unwrap();
+        // The courtyard's left side (x - 0.93 mm) at least the 0.2 mm edge
+        // clearance in and at most 1 mm: the nearest grid point is 1.2 mm.
+        assert_eq!(x, 1_200_000, "{v}");
+        assert_eq!(v["at"][1], 5 * MM, "level with where it was");
+    }
 
     fn near(t: &str, w: i64) -> Constraint {
         Constraint::Near {
