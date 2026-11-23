@@ -541,3 +541,30 @@ fn a_partial_delete_of_nothing_is_the_body() {
         Err(Error::InvalidTweak(TweakError::BadDistance))
     );
 }
+
+/// ryukei 23.C's twin: a slab and a disc floating above it, joined by
+/// two concave fillets whose supports never meet, and a small fillet
+/// round the slab's bottom -x edge, all recognised blends; the disc reads
+/// as a larger fillet on the two bridges.
+#[test]
+fn the_partial_deletes_twin_holds_its_bridges_and_a_fillet() {
+    use ryukei_testkit::partial_deletes::{BRIDGE, DISC, FILLET, body};
+    let b = body();
+    assert_eq!(check(&b), []);
+    assert_eq!(check_intersections(&b), []);
+    let r = ryukei::tweak::recognise_blends(&b, &Default::default()).unwrap();
+    let mut sizes: Vec<f64> = r
+        .blends
+        .iter()
+        .map(|x| match x.kind {
+            BlendKind::Fillet { radius } => radius,
+            _ => 0.0,
+        })
+        .collect();
+    sizes.sort_by(f64::total_cmp);
+    let want = [FILLET, BRIDGE, BRIDGE, DISC];
+    assert_eq!(sizes.len(), want.len(), "{sizes:?}");
+    for (s, w) in sizes.iter().zip(want) {
+        assert!((s - w).abs() < 1e-9, "{sizes:?}");
+    }
+}
