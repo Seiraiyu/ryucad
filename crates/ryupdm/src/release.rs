@@ -346,6 +346,18 @@ pub fn sync(repo: &gix::Repository, releases: &Releases, product: &str) -> Resul
             .with("created", &created)
             .with("moved", &moved)
         };
+        if let Some(other) = crate::history::tag_clash(&releases.all_tags, &name) {
+            return Err(Error::new(
+                Code::ReleaseTagClash,
+                format!(
+                    "{name} can't be tagged: Git already holds {other}, and one tag can't be a folder of another (#844); tags written before it are kept"
+                ),
+            )
+            .with("tag", &name)
+            .with("clashes", other)
+            .with("created", &created)
+            .with("moved", &moved));
+        }
         let id = gix::ObjectId::from_hex(o.commit.as_bytes()).map_err(|e| failed(e.to_string()))?;
         let full = gix::refs::FullName::try_from(format!("refs/tags/{name}"))
             .map_err(|e| failed(e.to_string()))?;
@@ -486,6 +498,39 @@ mod tests {
                 .code,
             Code::InvalidParam
         );
+    }
+
+    /// #844: a root project's part `cad` released as `1` tags
+    /// `ryupdm/cad/1`; a project in folder `cad/` with part `1` released as
+    /// `A` would tag `ryupdm/cad/1/A`, which Git can't hold beside it. Here
+    /// the other project's tag is `ryupdm/a`, a leading path of part `a`'s
+    /// `ryupdm/a/A`: the sync is refused, typed, and the tag stays.
+    #[test]
+    fn a_tag_that_clashes_with_another_projects_is_refused() {
+        let d = tempfile::tempdir().unwrap();
+        toy(d.path());
+        let src = crate::testing::folder(d.path());
+        let content = <Toy as Product>::content(&src, &id("a")).unwrap();
+        put(
+            d.path(),
+            "releases/a/A.json",
+            std::str::from_utf8(&record("a", "A", &content)).unwrap(),
+        );
+        let at = commit(d.path(), "A");
+        git(d.path(), &["tag", "ryupdm/a", &at]);
+        let (repo, _, releases, _) = read(d.path());
+        let err = sync(&repo, &releases, "toy").unwrap_err();
+        assert_eq!(err.code, Code::ReleaseTagClash, "{}", err.message);
+        assert_eq!(err.details["tag"], "ryupdm/a/A");
+        assert_eq!(err.details["clashes"], "ryupdm/a");
+        assert_eq!(git(d.path(), &["rev-parse", "ryupdm/a"]).trim(), at.trim());
+        // And the other way round: a tag below the release's own name.
+        git(d.path(), &["tag", "-d", "ryupdm/a"]);
+        git(d.path(), &["tag", "ryupdm/a/A/x", &at]);
+        let (repo, _, releases, _) = read(d.path());
+        let err = sync(&repo, &releases, "toy").unwrap_err();
+        assert_eq!(err.code, Code::ReleaseTagClash, "{}", err.message);
+        assert_eq!(err.details["clashes"], "ryupdm/a/A/x");
     }
 
     #[test]

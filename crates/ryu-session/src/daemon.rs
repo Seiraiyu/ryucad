@@ -98,6 +98,8 @@ impl<P: Serve> State<P> {
 struct Running {
     /// Its agent's name: what a cancel without a hello names it by.
     agent: Option<String>,
+    /// Its method, for the log of a shutdown waiting on it (#1023).
+    method: String,
     cancel: Arc<AtomicBool>,
     /// Set once it begins writing: a cancel no longer stops it.
     writing: Arc<AtomicBool>,
@@ -152,11 +154,16 @@ pub fn run<P: Serve>(root: &Path, idle: Duration) -> Result<()> {
 fn watcher<P: Serve>(watcher: &Arc<State<P>>) {
     let mut settled = Instant::now();
     loop {
-        let tick = {
+        let (tick, wake) = {
             let c = watcher.core.lock();
-            c.live.coalesce.tick(Duration::from_millis(c.live.poll_ms))
+            let coalesce = &c.live.coalesce;
+            (
+                coalesce.tick(Duration::from_millis(c.live.poll_ms)),
+                coalesce.wake(),
+            )
         };
-        std::thread::sleep(tick.min(watcher.idle));
+        // A lone change wakes it at once (#960).
+        wake.sleep(tick.min(watcher.idle));
         if !watcher.root.join(P::MANIFEST).is_file() {
             stop(watcher, "the project is gone");
         }
@@ -544,9 +551,15 @@ fn serve<P: Serve>(
             // has begun writing finishes), then wait for it and go: a long
             // request a client left behind (an app killed mid-render) kept
             // the daemon past `daemon stop`'s wait (#391).
+            // What it waits on is logged first: a daemon that never
+            // gets the lock says why it hasn't gone (#1023).
+            log(&format!(
+                "stopping: asked to shut down; {}",
+                waiting_for(state)
+            ));
             cancel_all(state);
             let _busy = state.core.lock();
-            stop(state, "asked to shut down");
+            stop(state, "asked to shut down, nothing left running");
         }
     }
 }
@@ -585,6 +598,7 @@ fn start<P: Serve>(
             key.clone(),
             Running {
                 agent,
+                method: method.to_owned(),
                 cancel,
                 writing: w,
             },
@@ -661,6 +675,29 @@ fn cancel<P: Serve>(state: &State<P>, me: Option<&str>, token: &str, name: Optio
         v["writing"] = json!(true);
     }
     v
+}
+
+/// What a shutdown waits on before it goes: the long requests running
+/// now, by method, token and participant, and whether each has begun
+/// writing (which a cancel no longer stops); else only the lock.
+fn waiting_for<P: Serve>(state: &State<P>) -> String {
+    let running = lock(&state.running);
+    if running.is_empty() {
+        return "waiting for the lock".to_owned();
+    }
+    let each: Vec<String> = running
+        .iter()
+        .map(|((who, token), r)| {
+            let by = r.agent.as_deref().unwrap_or(who);
+            let writing = if r.writing.load(Ordering::SeqCst) {
+                ", writing"
+            } else {
+                ""
+            };
+            format!("{} (token {token}, {by}{writing})", r.method)
+        })
+        .collect();
+    format!("cancelling and waiting for {}", each.join(", "))
 }
 
 /// Cancels every long request running now, whoever's: what a shutdown
@@ -830,11 +867,16 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let running = long(&endpoint, "long", "t", tx);
         rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        // #1023: the log says what the shutdown waits on.
+        let w = waiting_for(&state);
+        assert!(w.starts_with("cancelling and waiting for "), "{w}");
+        assert!(w.contains("(token t,"), "{w}");
         assert_eq!(cancel_all(&state), 1);
         let e = running.join().unwrap().unwrap_err();
         assert_eq!(e.code, Code::Cancelled);
         // Nothing left running: the lock is free for the shutdown.
         assert_eq!(cancel_all(&state), 0);
+        assert_eq!(waiting_for(&state), "waiting for the lock");
         drop(state.core.lock());
     }
 
@@ -1082,13 +1124,63 @@ mod tests {
         assert_eq!(answered, ["0", "1", "2", "3"]);
     }
 
-    /// A burst of changes is published at most once per `max`, and the
-    /// last once the daemon is quiet; nothing is left pending (#849).
+    /// A lone change is published at the watcher's next look, not after
+    /// the quiet window (#960): with `quiet` and `max` both an hour, only
+    /// the leading edge can publish it.
+    #[test]
+    fn a_lone_change_is_published_at_once() {
+        let dir = tempfile::tempdir().unwrap().keep();
+        std::fs::write(dir.join(Test::MANIFEST), "{}").unwrap();
+        let endpoint = Endpoint {
+            address: test_address(&dir, "l"),
+            log: dir.join("l.log"),
+            product: std::marker::PhantomData,
+        };
+        let listener = bind(&endpoint).unwrap();
+        let state = State::<Test>::new(&dir, endpoint.clone(), Duration::from_secs(3600));
+        let serve = Arc::clone(&state);
+        std::thread::spawn(move || accept(&listener, &serve));
+        {
+            let mut c = state.core.lock();
+            c.live.poll_ms = 50;
+            c.live.coalesce = crate::publish::Coalesce::new(3_600_000, 3_600_000);
+        }
+        let w = Arc::clone(&state);
+        std::thread::spawn(move || watcher(&w));
+        let mut sub = agent(&endpoint);
+        sub.call(&Basic {
+            method: "subscribe",
+            params: json!({}),
+        })
+        .unwrap()
+        .unwrap();
+        let published =
+            |s: &State<Test>| s.core.lock().live.timings.get("daemon.publish").publishes;
+        agent(&endpoint)
+            .call(&Basic {
+                method: "mark",
+                params: json!({}),
+            })
+            .unwrap()
+            .unwrap();
+        let t = Instant::now();
+        while published(&state) == 0 {
+            assert!(t.elapsed() < Duration::from_secs(60), "held for quiet");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(published(&state), 1);
+        assert!(state.core.lock().live.coalesce.pending().is_none());
+    }
+
+    /// A burst of changes is published at most once per `max` after its
+    /// first, lone, change, and the last once the daemon is quiet; nothing
+    /// is left pending (#849, #960).
     ///
     /// Each half sets only the rule it tests, so a slow runner's stalls
     /// can't change the count (#950): with `quiet` an hour no stall in the
-    /// burst is quiet enough to publish, and every publish then needs a
-    /// change at least `max` old, so `n` publishes take at least `n × max`.
+    /// burst is quiet enough to publish or to make a change lone, and every
+    /// publish after the first then needs a change at least `max` old, so
+    /// `n` publishes take at least `(n - 1) × max`.
     #[test]
     fn a_burst_is_published_coalesced() {
         // The watcher outlives the test and stops the process when its
@@ -1141,7 +1233,7 @@ mod tests {
         let elapsed = t.elapsed();
         let bound = u64::try_from(elapsed.as_nanos() / max.as_nanos()).unwrap();
         assert!(
-            (1..=bound).contains(&during),
+            (1..=bound + 1).contains(&during),
             "{during} publishes of {marks} changes in {elapsed:?}"
         );
         // The last: with `max` an hour, only quiet publishes, once.

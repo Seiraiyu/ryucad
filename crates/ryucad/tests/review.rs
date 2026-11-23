@@ -78,13 +78,10 @@ fn refusals_keep_their_codes() {
 
 #[test]
 fn an_unreachable_service() {
-    // A port nothing listens on: bind, note it, close.
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
-    let c = Client::new(&format!("http://127.0.0.1:{port}"), "tok");
+    // Port 1, which nothing listens on and no test binds: a port bound,
+    // noted and closed could be another test's fake server by the time
+    // the client connects, which answered 404 (v0.9.2-pre.1's run).
+    let c = Client::new("http://127.0.0.1:1", "tok");
     let e = c.get("/repos/a/b/pulls/1").unwrap_err();
     assert_eq!(e.code, Code::ReviewUnreachable);
     assert_eq!(e.code.exit_code(), 4);

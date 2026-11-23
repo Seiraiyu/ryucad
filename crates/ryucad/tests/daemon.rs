@@ -1281,7 +1281,8 @@ fn stdio(f: &Fixture, calls: &[Value]) -> Vec<Value> {
 
 /// A script's burst of writes is told to a watcher in a few
 /// `model.changed`, at most one per `daemon.publish_max_ms` of the burst
-/// plus one, the last naming every feature; each write still has its own
+/// plus two (the first, published at once, #960, and the last), the last
+/// naming every feature; each write still has its own
 /// `activity.appended` (#849).
 #[test]
 fn a_burst_of_writes_is_told_in_a_few_notifications() {
@@ -1313,8 +1314,12 @@ fn a_burst_of_writes_is_told_in_a_few_notifications() {
     assert_eq!(of("activity.appended").len(), 40);
     let changed = of("model.changed");
     assert!(!changed.is_empty());
+    // `secs` whole seconds of burst: one publish per publish_max_ms (1 s)
+    // of it, rounded up (+1 for the part second), the last once quiet
+    // (+1), and since #962 the burst's first change, lone and published at
+    // once rather than held for the quiet window (+1, #960).
     assert!(
-        changed.len() <= secs as usize + 2,
+        changed.len() <= secs as usize + 3,
         "{} in {secs:.1} s",
         changed.len()
     );
