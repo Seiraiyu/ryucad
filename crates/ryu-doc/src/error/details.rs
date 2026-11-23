@@ -116,6 +116,11 @@ pub const COMMON: &[Key] = &[
         Kind::Str,
         "In a batch, the method of the op that failed.",
     ),
+    key(
+        "faults",
+        Arr,
+        "The faults found; a write refused for the faults it would leave has them under the first one's code.",
+    ),
 ];
 
 use Kind::{Any, Arr, Bool, Num, Obj, Str};
@@ -239,6 +244,9 @@ details! {
         key("size", Any, "The size at fault."),
         key("missing", Any, "What is missing."),
         key("entry", Any, "The entry at fault."),
+        key("listed", Arr, "The values the standard lists."),
+        key("todo", Arr, "What is left to fix before it can be saved."),
+        key("constraint", Str, "The sketch constraint at fault."),
     ],
     NotFound => [
         key("part", Str, "The part asked for."),
@@ -298,6 +306,11 @@ details! {
         key("removed_by", Str, "The feature that took it away."),
         key("insert", Str, "The insert asked for."),
         key("id", Str, "The ID asked for."),
+        key("file", Str, "The file it was looked for in."),
+        key("size", Any, "The size asked for."),
+        key("import", Str, "The mapping asked for."),
+        key("imports", Arr, "The mappings there are."),
+        key("move", Num, "The index of the schematic move that named it."),
         key("unresolved", Any, "What didn't resolve."),
         key("errors", Any, "Why each place looked failed."),
         key("hole", Str, "The hole asked for."),
@@ -324,6 +337,8 @@ details! {
         key("param", Str, "The parameter that holds it."),
         key("names", Any, "The names it could take."),
         key("axis", Any, "The axis given."),
+        key("connector", Str, "The connector, as text."),
+        key("rev", Str, "The revision of the part it is in."),
     ],
     DuplicateId => [
         key("id", Str, "The ID already taken."),
@@ -349,7 +364,6 @@ details! {
         key("tag", Str, "The tag at fault."),
         key("created", Any, "What was created."),
         key("moved", Any, "What was moved."),
-        key("faults", Arr, "The faults found, as text."),
         key("layer", Str, "The layer at fault."),
         alias("file", "path"),
     ],

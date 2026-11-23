@@ -5,6 +5,7 @@ common
   path str The file or folder at fault.
   op num In a batch, the index of the op that failed.
   method str In a batch, the method of the op that failed.
+  faults arr The faults found; a write refused for the faults it would leave has them under the first one's code.
 
 invalid_document exit 1 "Invalid document"
   entity str The entity at fault.
@@ -109,6 +110,9 @@ invalid_param exit 1 "Invalid param"
   size any The size at fault.
   missing any What is missing.
   entry any The entry at fault.
+  listed arr The values the standard lists.
+  todo arr What is left to fix before it can be saved.
+  constraint str The sketch constraint at fault.
 
 duplicate_id exit 1 "Duplicate ID"
   id str The ID already taken.
@@ -184,6 +188,11 @@ not_found exit 1 "Not found"
   removed_by str The feature that took it away.
   insert str The insert asked for.
   id str The ID asked for.
+  file str The file it was looked for in.
+  size any The size asked for.
+  import str The mapping asked for.
+  imports arr The mappings there are.
+  move num The index of the schematic move that named it.
   unresolved any What didn't resolve.
   errors any Why each place looked failed.
   hole str The hole asked for.
@@ -210,7 +219,6 @@ internal exit 4 "Internal error"
   tag str The tag at fault.
   created any What was created.
   moved any What was moved.
-  faults arr The faults found, as text.
   layer str The layer at fault.
   file str An older spelling of `path`, carried beside it.
 
@@ -243,6 +251,8 @@ reference_wrong_kind exit 1 "Reference wrong kind"
   param str The parameter that holds it.
   names any The names it could take.
   axis any The axis given.
+  connector str The connector, as text.
+  rev str The revision of the part it is in.
 
 dependency_failed exit 1 "Dependency failed"
   feature str The feature that couldn't be built.
