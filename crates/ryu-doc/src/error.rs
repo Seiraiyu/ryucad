@@ -1172,6 +1172,17 @@ pub enum Code {
     FindingNotWaivable,
     /// `preset delete` names a preset a board uses.
     PresetInUse,
+    /// ryueda DRC finding (an error): a placement's constraint (near a
+    /// pad or part, on an edge, on a side) isn't met.
+    PlacementConstraintUnmet,
+    /// `board place` with a constraint and no `--at` found no place on the
+    /// grid within the constraint's reach (`details.blocked_by`).
+    PlacementNoRoom,
+    /// ryueda DRC finding (an error): an item of a kind a keepout keeps
+    /// out meets it on one of its layers.
+    DrcKeepout,
+    /// A keepout's contour doesn't close, crosses itself, or has no area.
+    BoardContourInvalid,
     /// `board export` refused: the board has DRC errors (its report in
     /// `details.report`); fix them, or export with `--allow-errors`,
     /// which the manifest records.
@@ -1635,6 +1646,10 @@ impl Code {
         Code::FindingNotFound,
         Code::FindingNotWaivable,
         Code::PresetInUse,
+        Code::PlacementConstraintUnmet,
+        Code::PlacementNoRoom,
+        Code::DrcKeepout,
+        Code::BoardContourInvalid,
         Code::DrcFailed,
         Code::ItemNotFound,
         Code::ItemClassUnknown,
@@ -1831,6 +1846,20 @@ mod tests {
             (Code::FindingNotFound, "finding_not_found"),
             (Code::FindingNotWaivable, "finding_not_waivable"),
             (Code::PresetInUse, "preset_in_use"),
+        ] {
+            assert_eq!(json!(c), json!(s));
+            assert_eq!(c.exit_code(), 1);
+            assert!(Code::ALL.contains(&c), "{c:?} in ALL");
+        }
+    }
+
+    #[test]
+    fn placement_and_keepout_codes() {
+        for (c, s) in [
+            (Code::PlacementConstraintUnmet, "placement_constraint_unmet"),
+            (Code::PlacementNoRoom, "placement_no_room"),
+            (Code::DrcKeepout, "drc_keepout"),
+            (Code::BoardContourInvalid, "board_contour_invalid"),
         ] {
             assert_eq!(json!(c), json!(s));
             assert_eq!(c.exit_code(), 1);
