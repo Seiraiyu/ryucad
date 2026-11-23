@@ -682,6 +682,30 @@ pub fn build(p: &Project, b: &BoardFiles) -> Result<BoardShapes> {
             shape: Shape::regions(Polarity::Positive, [Region::solid(super::outline::ccw(c))]),
         });
     }
+    for (did, d) in &b.drawings {
+        let (Ok(g), true) = (&d.item, fine(&d.faults)) else {
+            continue;
+        };
+        let Some((shape, missing)) = super::drawing::shape(g) else {
+            continue;
+        };
+        if !missing.is_empty() {
+            notices.push(
+                Fault::warning(
+                    Code::BoardTextMissingGlyph,
+                    format!(
+                        "drawing {did}'s text has characters the stroke font lacks: {}",
+                        missing.iter().collect::<String>()
+                    ),
+                )
+                .with("drawing", did.as_str()),
+            );
+        }
+        out.layers
+            .entry(g.layer.clone())
+            .or_default()
+            .push((format!("{board}:drawing/{did}"), shape));
+    }
     let (region, edges) = outline(file);
     out.outline = region;
     out.edges = edges;
@@ -1064,6 +1088,18 @@ pub(crate) mod tests {
         assert_eq!(ko.keeps, vec![crate::footprint::Keep::Vias]);
         assert!(ko.part.is_none());
         assert_eq!(ko.shape.bounds().unwrap().max.x, 2_000_000);
+    }
+
+    #[test]
+    fn a_boards_drawings_join_their_layers() {
+        let d = r#"{"end":[3000000,1000000],"format":1,"kind":"ryueda.board-drawing","layer":"silk.top","start":[1000000,1000000],"type":"line","width_nm":150000}"#;
+        let (_d, p, id) = placed_with(&[("boards/b/drawings/d1.json".into(), d.into())]);
+        let s = build(&p, &p.boards[&id]).unwrap();
+        assert!(
+            s.layers["silk.top"]
+                .iter()
+                .any(|(o, _)| o == "b:drawing/d1")
+        );
     }
 
     #[test]

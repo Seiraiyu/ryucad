@@ -287,6 +287,7 @@ pub(crate) fn delete(
             TRACKS => b.tracks.contains_key(&rid),
             VIAS => b.vias.contains_key(&rid),
             KEEPOUTS => b.keepouts.contains_key(&rid),
+            DRAWINGS => b.drawings.contains_key(&rid),
             _ => b.holes.contains_key(&rid),
         };
         if !held {

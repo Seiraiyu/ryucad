@@ -29,6 +29,8 @@ pub struct BoardFiles {
     pub rules: Option<Loaded<super::rules::RulesFile>>,
     /// By ID (ryueda 7.C).
     pub keepouts: BTreeMap<Id, Loaded<super::keepout::Keepout>>,
+    /// By ID (ryueda 7.C).
+    pub drawings: BTreeMap<Id, Loaded<super::drawing::Graphic>>,
 }
 
 fn unknown(path: &str) -> Fault {
@@ -89,6 +91,7 @@ fn load_one(
     let mut holes = BTreeMap::new();
     let mut rules = None;
     let mut keepouts = BTreeMap::new();
+    let mut drawings = BTreeMap::new();
     let mut any = false;
     for (name, kind) in src.list(dir)? {
         let path = join(dir, &name);
@@ -168,6 +171,19 @@ fn load_one(
                     faults,
                     &mut holes,
                     hole_faults,
+                )?;
+            }
+            (DRAWINGS, Kind::Dir) => {
+                any |= routes(
+                    src,
+                    &path,
+                    DRAWINGS,
+                    DRAWING_KIND,
+                    "drawing",
+                    &mut h,
+                    faults,
+                    &mut drawings,
+                    super::drawing::judge,
                 )?;
             }
             (KEEPOUTS, Kind::Dir) => {
@@ -273,6 +289,7 @@ fn load_one(
         holes,
         rules,
         keepouts,
+        drawings,
     }))
 }
 
@@ -486,6 +503,9 @@ impl BoardFiles {
         }
         for k in self.keepouts.values() {
             one(k.item.as_ref().err(), &k.faults);
+        }
+        for d in self.drawings.values() {
+            one(d.item.as_ref().err(), &d.faults);
         }
         out
     }

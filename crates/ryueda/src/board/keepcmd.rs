@@ -4,7 +4,7 @@
 
 use super::file::{Contour, KEEPOUT_KIND, KEEPOUTS, Op, route_path};
 use super::keepout::{Keep, Keepout};
-use super::route::{answer, asks, field, start};
+use super::route::{answer, field, start};
 use crate::coord;
 use crate::error::{Code, Error, Result};
 use crate::id::Id;

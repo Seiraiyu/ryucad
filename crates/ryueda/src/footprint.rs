@@ -463,7 +463,7 @@ pub fn simple(points: &[Point]) -> bool {
 }
 
 /// Why a shape can't be drawn, if it can't.
-fn undrawable(s: &Shape) -> Option<&'static str> {
+pub(crate) fn undrawable(s: &Shape) -> Option<&'static str> {
     if s.sizes().iter().any(|v| *v < 0) {
         return Some("a width or size is negative");
     }
