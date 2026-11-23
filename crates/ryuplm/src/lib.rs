@@ -63,8 +63,10 @@ pub struct Plm;
 impl ryu_session::Product for Plm {
     const NAME: &'static str = "ryuplm";
     const RUNTIME_DIR_VAR: &'static str = "RYUPLM_RUNTIME_DIR";
-    /// Nothing bulky: items are small files, kept in the log inline.
-    const BULKY: &'static [&'static str] = &[];
+    /// Documents' bytes (design 937): kept in the log against the bulky
+    /// budget, as ryucad's imported STEP files are. Records are small and
+    /// count there too, which is harmless.
+    const BULKY: &'static [&'static str] = &["documents/"];
     type Target = String;
     type View = ();
     type Seen = notify::Seen;
