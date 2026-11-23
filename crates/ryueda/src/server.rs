@@ -1276,18 +1276,34 @@ fn dispatch(
             at,
             rotation,
             side,
+            near,
+            edge,
+            within,
+            hold_side,
+            unconstrain,
+            group,
+            ungroup,
+            ref_at,
+            ref_rotation,
+            ref_hide,
+            ref_show,
             ops,
             expected_revision,
-        } => crate::board::cmd::place(
-            session,
-            &board,
-            match (&r#ref, &at) {
-                (Some(r), Some(a)) => Some((r.as_str(), a, rotation.as_deref(), side.as_deref())),
-                _ => None,
-            },
-            ops.as_ref(),
-            expected_revision.as_deref(),
-        ),
+        } => {
+            let one = json!({
+                "ref": r#ref, "at": at, "rotation": rotation, "side": side,
+                "near": near, "edge": edge, "within": within, "hold_side": hold_side,
+                "unconstrain": unconstrain, "group": group, "ungroup": ungroup,
+                "ref_at": ref_at, "ref_rotation": ref_rotation,
+                "ref_hide": ref_hide, "ref_show": ref_show,
+            });
+            let asks = if ops.is_none() && r#ref.is_none() {
+                Vec::new()
+            } else {
+                crate::board::route::asks(ops, one)?
+            };
+            crate::board::cmd::place(session, &board, asks, expected_revision.as_deref())
+        }
         Request::BoardUnplace {
             board,
             r#ref,

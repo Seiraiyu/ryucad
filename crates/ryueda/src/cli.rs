@@ -1666,13 +1666,12 @@ enum BoardCmd {
         /// An occurrence reference (s1/u1) or a designator.
         #[arg(value_name = "REF", required_unless_present = "ops")]
         r#ref: Option<String>,
-        /// X,Y (lengths; bare numbers in the project's unit).
-        #[arg(
-            long,
-            value_name = "X,Y",
-            required_unless_present = "ops",
-            allow_hyphen_values = true
-        )]
+        /// X,Y (lengths; bare numbers in the project's unit). Re-placing a
+        /// part keeps its constraints, group and designator place unless the
+        /// request changes them; without --at or a constraint a placed part
+        /// stays where it is. Parts placed by one request don't see each
+        /// other's new places: place them in turn.
+        #[arg(long, value_name = "X,Y", allow_hyphen_values = true)]
         at: Option<String>,
         /// Degrees counterclockwise.
         #[arg(long, allow_hyphen_values = true)]
@@ -1682,9 +1681,47 @@ enum BoardCmd {
         /// counterclockwise as seen from the top.
         #[arg(long)]
         side: Option<String>,
-        /// JSON: [{ref, at: [x, y], rotation?, side?}]; integers are nanometres (a
-        /// rotation millidegrees), strings lengths (a rotation degrees): "90", not 90.
-        #[arg(long, value_name = "OPS", conflicts_with_all = ["ref", "at", "rotation", "side"])]
+        /// Place near a pad or part (U1/7, U1): the legaliser finds the
+        /// nearest free point of the placement grid when --at is absent,
+        /// and the constraint is kept and checked on every write.
+        #[arg(long, value_name = "REF")]
+        near: Option<String>,
+        /// Place against a side of the board: left, right, top, bottom, any.
+        #[arg(long, value_name = "SIDE")]
+        edge: Option<String>,
+        /// The distance --near or --edge allows (a length).
+        #[arg(long, value_name = "LEN")]
+        within: Option<String>,
+        /// Keep the part on its side: a constraint.
+        #[arg(long)]
+        hold_side: bool,
+        /// Remove the part's constraints.
+        #[arg(long, conflicts_with_all = ["near", "edge", "hold_side"])]
+        unconstrain: bool,
+        /// Put the part in a group (a free name; `board group` moves it).
+        #[arg(long)]
+        group: Option<String>,
+        /// Take the part out of its group.
+        #[arg(long, conflicts_with = "group")]
+        ungroup: bool,
+        /// The designator's place relative to the part: DX,DY.
+        #[arg(long, value_name = "DX,DY", allow_hyphen_values = true)]
+        ref_at: Option<String>,
+        /// The designator's rotation relative to the part, degrees.
+        #[arg(long, allow_hyphen_values = true)]
+        ref_rotation: Option<String>,
+        /// Hide the designator.
+        #[arg(long)]
+        ref_hide: bool,
+        /// Show a hidden designator.
+        #[arg(long, conflicts_with = "ref_hide")]
+        ref_show: bool,
+        /// JSON: [{ref, at?: [x, y], rotation?, side?, near?, edge?, within?,
+        /// constraints?: [{near, within} | {edge, within} | {side}], group?,
+        /// fields?: {reference?: {at?, rotation?, hidden?, size?}, value?: …}}];
+        /// integers are nanometres (a rotation millidegrees), strings lengths
+        /// (a rotation degrees): "90", not 90.
+        #[arg(long, value_name = "OPS", conflicts_with_all = ["ref", "at", "rotation", "side", "near", "edge", "within", "hold_side", "unconstrain", "group", "ungroup", "ref_at", "ref_rotation", "ref_hide", "ref_show"])]
         ops: Option<String>,
         #[command(flatten)]
         expect: Expect,
@@ -3961,6 +3998,17 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             at,
             rotation,
             side,
+            near,
+            edge,
+            within,
+            hold_side,
+            unconstrain,
+            group,
+            ungroup,
+            ref_at,
+            ref_rotation,
+            ref_hide,
+            ref_show,
             ops,
             expect,
         }) => Request::BoardPlace {
@@ -3969,6 +4017,20 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             at: at.as_deref().map(|a| pair_arg("--at", a)).transpose()?,
             rotation: rotation.clone(),
             side: side.clone(),
+            near: near.clone(),
+            edge: edge.clone(),
+            within: within.clone(),
+            hold_side: *hold_side,
+            unconstrain: *unconstrain,
+            group: group.clone(),
+            ungroup: *ungroup,
+            ref_at: ref_at
+                .as_deref()
+                .map(|a| pair_arg("--ref-at", a))
+                .transpose()?,
+            ref_rotation: ref_rotation.clone(),
+            ref_hide: *ref_hide,
+            ref_show: *ref_show,
             ops: ops.as_deref().map(|o| json_arg("--ops", o)).transpose()?,
             expected_revision: expect.expect.clone(),
         },

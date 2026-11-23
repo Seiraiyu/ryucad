@@ -6092,3 +6092,91 @@ fn board_measure_from_the_cli() {
     assert_eq!(part["closest"]["layer"], Value::Null, "{part}");
     p.fails(&["board", "measure", id, "R9/1", "R1/1"], "not_found", 1);
 }
+
+/// A part's placement as `board show` prints it.
+fn placement_of(p: &Pair, board: &str, refdes: &str) -> Value {
+    let s = p.ok(&["board", "show", board]);
+    s["occurrences"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["refdes"] == refdes)
+        .unwrap_or_else(|| panic!("{refdes} in {s}"))["placement"]
+        .clone()
+}
+
+/// Placement by constraint from the CLI (ryueda 7.C): a part put near a
+/// pin by the legaliser, the constraint kept and judged; a part moved off
+/// it is a finding; re-placing keeps the constraint and the group; the
+/// designator moved alone; no room is a typed refusal.
+#[test]
+fn parts_placed_by_constraint_from_the_cli() {
+    let p = Pair::breakout();
+    p.ok(&[
+        "board", "create", "Main", "--design", "board", "--rect", "26,20", "--id", "main",
+    ]);
+    p.ok(&["board", "place", "main", "R1", "--at", "10,10"]);
+    let v = p.ok(&[
+        "board", "place", "main", "R2", "--near", "R1/2", "--within", "1mm", "--group", "pullups",
+    ]);
+    let at = v["placed"][0]["at"].clone();
+    assert!(
+        v["placed"][0]["legalised"]["tried"].as_u64().unwrap() >= 1,
+        "{v}"
+    );
+    assert!(
+        v["placed"][0].get("side").is_none(),
+        "a top part says no side"
+    );
+    let added: Vec<&str> = v["drc"]["added"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["code"].as_str().unwrap())
+        .collect();
+    assert!(!added.contains(&"placement_constraint_unmet"), "{v}");
+    assert!(!added.contains(&"drc_courtyard_overlap"), "{v}");
+    let r2 = placement_of(&p, "main", "R2");
+    assert_eq!(r2["constraints"][0]["near"], "R1/2", "{r2}");
+    assert_eq!(r2["group"], "pullups", "{r2}");
+    // Moved 5 mm away by hand: the promise is broken, and said so.
+    let x = at[0].as_i64().unwrap() + 5_000_000;
+    let ops = json!([{"ref": "R2", "at": [x, at[1]]}]).to_string();
+    let m = p.ok(&["board", "place", "main", "--ops", &ops]);
+    let unmet = m["drc"]["added"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["code"] == "placement_constraint_unmet")
+        .unwrap_or_else(|| panic!("{m}"))
+        .clone();
+    assert!(unmet["details"]["distance_nm"].as_i64().unwrap() > 1_000_000);
+    let r2 = placement_of(&p, "main", "R2");
+    assert_eq!(r2["group"], "pullups", "re-placing keeps the group: {r2}");
+    assert_eq!(
+        r2["constraints"][0]["near"], "R1/2",
+        "and the constraint: {r2}"
+    );
+    // The designator alone: the part stays.
+    p.ok(&["board", "place", "main", "R2", "--ref-at", "0,1.5"]);
+    let r2b = placement_of(&p, "main", "R2");
+    assert_eq!(r2b["at"], r2["at"]);
+    assert_eq!(r2b["fields"]["reference"]["at"], json!([0, 1_500_000]));
+    let clear = p.ok(&["board", "place", "main", "R2", "--unconstrain", "--ungroup"]);
+    assert!(
+        clear["drc"]["removed"]
+            .as_array()
+            .unwrap()
+            .contains(&unmet["id"]),
+        "{clear}"
+    );
+    // No room: within 0.01 mm of a pin whose own courtyard is in the way.
+    p.fails(
+        &[
+            "board", "place", "main", "C1", "--near", "R1/1", "--within", "0.01mm",
+        ],
+        "placement_no_room",
+        1,
+    );
+    p.fails(&["board", "place", "main", "C1"], "invalid_param", 1);
+}

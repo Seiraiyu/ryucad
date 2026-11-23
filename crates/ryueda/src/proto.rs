@@ -676,7 +676,40 @@ pub enum Request {
         /// `top` (the default) or `bottom`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         side: Option<String>,
-        /// `[{ref, at: [x, y], rotation?, side?}]`.
+        /// A pad or part to be within `within` of; the legaliser places
+        /// the part when `at` is absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        near: Option<String>,
+        /// left, right, top, bottom or any: a side of the outline to be
+        /// within `within` of.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        edge: Option<String>,
+        /// The constraint's distance, a length.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        within: Option<String>,
+        /// Add a constraint keeping the part on its side.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        hold_side: bool,
+        /// Remove every constraint.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        unconstrain: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        ungroup: bool,
+        /// The designator's place relative to the part, `[dx, dy]` lengths.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ref_at: Option<[String; 2]>,
+        /// The designator's rotation, degrees.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ref_rotation: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        ref_hide: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        ref_show: bool,
+        /// `[{ref, at?, rotation?, side?, near?, edge?, within?, hold_side?,
+        /// unconstrain?, group?, ungroup?, ref_at?, ref_rotation?,
+        /// ref_hide?, ref_show?, constraints?, fields?}]`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ops: Option<Value>,
         /// The board's revision.
