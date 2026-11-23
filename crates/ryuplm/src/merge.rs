@@ -6,10 +6,41 @@ pub use ryu_git::value::Outcome;
 use ryu_git::value::{self as value, Merged, Rules, Walk};
 use serde_json::{Map, Value};
 
-/// `previous_numbers` is one value: two sides renumbering is a conflict
-/// on `number`, not a merged list.
+/// `previous_numbers` is one value (two sides renumbering is a conflict on
+/// `number`); so are a document's `file` and `pin`: a name, size and hash
+/// belong together (Decision 11).
 fn atom(at: &str) -> bool {
-    at == "/previous_numbers"
+    matches!(at, "/previous_numbers" | "/file" | "/pin")
+}
+
+/// An item's `documents` as a set: an object keyed by reference, for the
+/// walk to merge key by key.
+fn set_keyed(v: &mut Value) {
+    if let Some(Value::Array(a)) = v.get("documents").cloned() {
+        let m: Map<String, Value> = a
+            .into_iter()
+            .filter_map(|x| x.as_str().map(|s| (s.to_owned(), Value::Bool(true))))
+            .collect();
+        v["documents"] = Value::Object(m);
+    }
+}
+
+/// The set back as a sorted list, as items write it; gone when empty.
+fn set_unkeyed(v: &mut Value) {
+    let Some(o) = v.as_object_mut() else { return };
+    if let Some(Value::Object(m)) = o.remove("documents") {
+        let mut refs: Vec<crate::document::DocRef> = m
+            .keys()
+            .filter_map(|k| crate::document::DocRef::parse(k))
+            .collect();
+        refs.sort();
+        if !refs.is_empty() {
+            o.insert(
+                "documents".into(),
+                refs.iter().map(|r| Value::from(r.text())).collect(),
+            );
+        }
+    }
 }
 
 /// An entry's key in `list`, as `keyed` makes it.
@@ -134,6 +165,7 @@ pub fn merge(base: Option<&Value>, ours: &Value, theirs: &Value) -> Merged {
         let mut v = v.clone();
         if kind == crate::item::KIND {
             crate::textconv::keyed(&mut v);
+            set_keyed(&mut v);
         }
         v
     };
@@ -147,6 +179,7 @@ pub fn merge(base: Option<&Value>, ours: &Value, theirs: &Value) -> Merged {
     };
     if kind == crate::item::KIND {
         unkeyed(&mut value, ours, theirs);
+        set_unkeyed(&mut value);
     }
     Merged {
         value,
@@ -158,6 +191,7 @@ pub fn merge(base: Option<&Value>, ours: &Value, theirs: &Value) -> Merged {
 fn newest(kind: &str) -> Option<u64> {
     Some(match kind {
         crate::item::KIND => crate::item::FORMAT,
+        crate::document::KIND => crate::document::FORMAT,
         crate::catalogue::KIND => crate::catalogue::FORMAT,
         ryupdm::config::KIND => ryupdm::config::FORMAT,
         _ => return None,
@@ -246,6 +280,47 @@ pub fn unresolved(root: &std::path::Path) -> Vec<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn documents_merge_as_a_set_and_files_whole() {
+        let item = |docs: &[&str]| serde_json::json!({"format": 1, "kind": "ryuplm.item", "number": "A-1", "documents": docs});
+        let m = merge(
+            Some(&item(&["d1000000000000"])),
+            &item(&["d1000000000000", "d2000000000000"]),
+            &item(&["d3000000000000"]),
+        );
+        assert!(m.conflicts.is_empty(), "{:?}", m.conflicts);
+        assert_eq!(
+            m.value["documents"],
+            serde_json::json!(["d2000000000000", "d3000000000000"])
+        );
+        let doc = |name: &str, hash: char| {
+            let mut v = crate::document::tests::full();
+            v["file"]["name"] = serde_json::json!(name);
+            v["file"]["blake3"] = serde_json::json!(hash.to_string().repeat(64));
+            v
+        };
+        // Ours renamed the file; theirs changed its bytes: one conflict on
+        // /file, never a record with one side's name and the other's hash.
+        let m = merge(
+            Some(&doc("a.pdf", 'a')),
+            &doc("b.pdf", 'a'),
+            &doc("a.pdf", 'b'),
+        );
+        assert_eq!(m.conflicts.len(), 1);
+        // Title on one side, bytes on the other: both kept.
+        let mut ours = doc("a.pdf", 'a');
+        ours["title"] = serde_json::json!("New title");
+        let m = merge(Some(&doc("a.pdf", 'a')), &ours, &doc("a.pdf", 'c'));
+        assert!(m.conflicts.is_empty());
+        assert_eq!(
+            (
+                m.value["title"].as_str(),
+                m.value["file"]["blake3"].as_str().map(|h| &h[..1])
+            ),
+            (Some("New title"), Some("c"))
+        );
+    }
 
     fn text(v: serde_json::Value) -> Vec<u8> {
         crate::canonical::to_string(&v).into_bytes()
