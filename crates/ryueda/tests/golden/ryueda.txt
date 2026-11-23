@@ -42,6 +42,10 @@ board.four.in1.svg 038f59b5787420ee7d247819fc11c307
 board.four.islands bd436ed2a03ce6aa58b9752fbd73c5c7
 board.four.layout e5b08941e01d0179793a1040514759bf
 board.four.show 2725271b060d5e114573d5660f13f1fb
+board.rules.drc f86f3312712ee621d0aa037a171cf6fa
+board.rules.export.manifest.json dc9146e7cc4b0af77c4cce569de70a9e
+board.rules.measure f8f2bcedabf75b780119da4eb9871a19
+board.rules.show 1608e7d7260f7f6f4cd298496e48672b
 breakout.erc f84678494c89aa19a5910ab3c7a8330e
 breakout.netlist 16daf5eca5b841dca1e0b3b6ee23a6b0
 diff.breakout c7f4564101cf7ec93b6e49d7814def43
