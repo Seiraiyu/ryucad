@@ -6189,6 +6189,15 @@ fn parts_placed_by_constraint_from_the_cli() {
         1,
     );
     p.fails(&["board", "place", "main", "C1"], "invalid_param", 1);
+    // A bottom part keeps its side when only its designator moves; a move
+    // without --side puts it on top, as stage 5 did.
+    p.ok(&[
+        "board", "place", "main", "R1", "--at", "10,10", "--side", "bottom",
+    ]);
+    p.ok(&["board", "place", "main", "R1", "--ref-at", "0,1"]);
+    assert_eq!(placement_of(&p, "main", "R1")["side"], "bottom");
+    p.ok(&["board", "place", "main", "R1", "--at", "10,10"]);
+    assert!(placement_of(&p, "main", "R1").get("side").is_none());
 }
 
 /// Groups from the CLI (ryueda 7.C): listed, moved, turned and flipped

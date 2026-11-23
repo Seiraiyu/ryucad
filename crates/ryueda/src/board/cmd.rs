@@ -552,7 +552,8 @@ pub fn placement_json(pl: &Placement) -> Value {
 
 /// `board place`: one part, or several all or nothing. A placed part
 /// keeps its constraints, group and field places unless the ask changes
-/// them; without `at` it is placed by the legaliser when the ask gives a
+/// them, and its side unless the ask moves it (`at`: top unless `side`
+/// says bottom); without `at` it is placed by the legaliser when the ask gives a
 /// near or edge constraint, else it stays where it is. Parts placed by
 /// one request don't see each other's new places: place such parts in
 /// turn.
@@ -614,7 +615,9 @@ pub fn place(
         if let Some(r) = given(a, "rotation") {
             pl.rotation_mdeg = rotation(Some(r))?;
         }
-        if given(a, "side").is_some() {
+        // A move (`at`) is to the top unless it says otherwise, as stage 5
+        // placed parts; a request without `at` keeps the part's side.
+        if given(a, "side").is_some() || given(a, "at").is_some() {
             pl.side = side_of(a.get("side").and_then(Value::as_str))?;
         }
         // Constraints: any given replace the list.

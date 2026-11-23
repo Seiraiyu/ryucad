@@ -1668,8 +1668,9 @@ enum BoardCmd {
         r#ref: Option<String>,
         /// X,Y (lengths; bare numbers in the project's unit). Re-placing a
         /// part keeps its constraints, group and designator place unless the
-        /// request changes them; without --at or a constraint a placed part
-        /// stays where it is. Parts placed by one request don't see each
+        /// request changes them; --at puts it on the top unless --side says
+        /// bottom; without --at or a constraint a placed part stays where it
+        /// is, on its side. Parts placed by one request don't see each
         /// other's new places: place them in turn.
         #[arg(long, value_name = "X,Y", allow_hyphen_values = true)]
         at: Option<String>,
