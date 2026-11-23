@@ -582,7 +582,11 @@ pub fn apply_waivers(
             }
             _ => false,
         };
-        let about = serde_json::json!({"reason": w.reason, "by": w.by, "limit": w.limit});
+        // `limit` only when the waiver has one, as in the file.
+        let mut about = serde_json::json!({"reason": w.reason, "by": w.by});
+        if let Some(l) = w.limit {
+            about["limit"] = serde_json::json!(l);
+        }
         if worse {
             if let Some(d) = f.details.as_object_mut() {
                 let mut x = about.clone();
@@ -842,6 +846,37 @@ mod tests {
                 assert_eq!(f[0].details["waiver_exceeded"]["code"], "waiver_exceeded");
             }
         }
+    }
+
+    /// A waiver without a limit leaves `limit` out of `waived`, as out
+    /// of the file, and holds whatever the finding measures; one with a
+    /// limit shows it.
+    #[test]
+    fn a_waiver_without_a_limit_says_none() {
+        let open = finding(Code::NetOpen, &["b:net/a"], serde_json::Value::Null);
+        let gap = finding(
+            Code::DrcClearance,
+            &["b:R1/1", "b:R2/1"],
+            serde_json::json!({"distance_nm": 10, "rule_nm": 100_000}),
+        );
+        let w: BTreeMap<String, Waiver> = [waiver(&open, None), waiver(&gap, None)]
+            .into_iter()
+            .collect();
+        let mut f = vec![open.clone(), gap.clone()];
+        apply_waivers(&mut f, &w, "b");
+        for x in &f {
+            let waived = x.waived.as_ref().unwrap();
+            assert!(waived.get("limit").is_none(), "{waived}");
+            assert!(x.details.get("waiver_exceeded").is_none());
+            assert!(
+                !serde_json::to_string(x).unwrap().contains("\"limit\""),
+                "{x:?}"
+            );
+        }
+        let w: BTreeMap<String, Waiver> = [waiver(&gap, Some(10))].into_iter().collect();
+        let mut f = vec![gap];
+        apply_waivers(&mut f, &w, "b");
+        assert_eq!(f[0].waived.as_ref().unwrap()["limit"], 10);
     }
 
     #[test]
