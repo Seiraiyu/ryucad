@@ -409,6 +409,17 @@ class Code(str, Enum):
     IMPORT_CONFLICT = "import_conflict"
     IMPORT_MISSING = "import_missing"
     IMPORT_MAPPING_INVALID = "import_mapping_invalid"
+    DOCUMENT_NOT_FOUND = "document_not_found"
+    DOCUMENT_BYTES_MISSING = "document_bytes_missing"
+    DOCUMENT_BYTES_CHANGED = "document_bytes_changed"
+    DOCUMENT_FILE_UNKNOWN = "document_file_unknown"
+    DOCUMENT_LARGE = "document_large"
+    DOCUMENT_TOO_LARGE = "document_too_large"
+    DOCUMENT_MISSING = "document_missing"
+    DOCUMENT_UNRESOLVED = "document_unresolved"
+    DOCUMENT_IN_USE = "document_in_use"
+    DOCUMENT_RELEASED = "document_released"
+    DOCUMENT_UNRELEASED = "document_unreleased"
     ITEM_HISTORY_LABEL_FOREIGN = "item_history_label_foreign"
     PART_NUMBER_TAKEN = "part_number_taken"
     LEDGER_UNAVAILABLE = "ledger_unavailable"
@@ -814,6 +825,17 @@ EXIT: dict[Code, int] = {
     Code.IMPORT_CONFLICT: 1,
     Code.IMPORT_MISSING: 1,
     Code.IMPORT_MAPPING_INVALID: 1,
+    Code.DOCUMENT_NOT_FOUND: 1,
+    Code.DOCUMENT_BYTES_MISSING: 1,
+    Code.DOCUMENT_BYTES_CHANGED: 1,
+    Code.DOCUMENT_FILE_UNKNOWN: 1,
+    Code.DOCUMENT_LARGE: 1,
+    Code.DOCUMENT_TOO_LARGE: 1,
+    Code.DOCUMENT_MISSING: 1,
+    Code.DOCUMENT_UNRESOLVED: 1,
+    Code.DOCUMENT_IN_USE: 1,
+    Code.DOCUMENT_RELEASED: 1,
+    Code.DOCUMENT_UNRELEASED: 1,
     Code.ITEM_HISTORY_LABEL_FOREIGN: 1,
     Code.PART_NUMBER_TAKEN: 1,
     Code.LEDGER_UNAVAILABLE: 4,
