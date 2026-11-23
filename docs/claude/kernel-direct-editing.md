@@ -780,7 +780,7 @@ Design 919, plan 23.C (#658).
 
   M8 and M14 survived the first tests, and each got the test named. M9, a refused step leaving a partial body, doesn't apply: a step that refuses returns no body.
 - **Testing.**
-  - `blends::partial`'s tests: `units_partition_the_closed_picks`, `where_every_set_builds_it_is_delete_blends`, `a_budget_that_runs_out_keeps_the_rest`, `a_unit_is_retried_only_after_a_neighbour_changed`, `a_cancel_answers_cancelled`, `a_refused_set_is_tried_unit_by_unit`, `a_unit_whose_faces_went_with_a_neighbour_is_deleted`, `a_cancel_during_a_step_answers_cancelled` and `a_budget_spent_in_a_unit_keeps_the_rest_with_it`.
+  - `blends::partial`'s tests: `units_partition_the_closed_picks`, `where_every_set_builds_it_is_delete_blends`, `a_budget_that_runs_out_keeps_the_rest`, `a_unit_is_retried_only_after_a_neighbour_changed`, `a_cancel_answers_cancelled`, `a_refused_set_is_tried_unit_by_unit`, `a_unit_whose_faces_went_with_a_neighbour_is_deleted`, `a_cancel_during_a_step_answers_cancelled`, `a_budget_spent_in_a_unit_keeps_the_rest_with_it` and `a_budget_spent_in_a_later_set_keeps_an_earlier_sets_units_with_it` (#1047's review: a refused set's units are untried, so a budget spent on a later set keeps them with it).
   - `work`'s `run_keeping_keeps_the_answer_past_a_budget_only`.
   - `tests/delete_faces.rs`' `a_partial_delete_of_nothing_is_the_body`, `the_partial_deletes_twin_holds_its_bridges_and_a_fillet` and `the_partial_deletes_twin_keeps_its_bridges`.
   - The `partial_deletes` golden section, and `tests/work.rs`' `the_partial_deletes_twin_is_bounded`, at 55,779 units.

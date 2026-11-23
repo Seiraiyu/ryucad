@@ -95,15 +95,15 @@ struct Pending {
 }
 
 impl Pending {
-    /// A unit of a set that refused (or that a stop kept from being
-    /// tried): tried again in the first pass unless the call stopped.
-    fn new(unit: BlendUnit, cause: Error, tried: bool) -> Self {
+    /// A unit of a set that refused, or that a stop kept from being
+    /// grown: tried in the first pass, or at a stop kept with it.
+    fn new(unit: BlendUnit, cause: Error) -> Self {
         Pending {
             unit,
             cause,
             near: BTreeSet::new(),
             at: 0,
-            tried,
+            tried: false,
         }
     }
 }
@@ -273,8 +273,7 @@ pub(crate) fn partial_with(
         // A set of this one unit alone refused, building, as the unit
         // would: tried again only after a neighbour changes (Decision 4).
         // One whose faces were gone is tried, and finds them gone.
-        let alone = stop.is_none()
-            && held.len() == 1
+        let alone = held.len() == 1
             && order[held[0]].1.is_none()
             && order[held[0]].0.len() == unit.faces.len();
         if let (true, Some(near)) = (alone, near) {
@@ -286,7 +285,7 @@ pub(crate) fn partial_with(
                 tried: true,
             });
         } else {
-            pending.push(Pending::new(unit, cause, stop.is_some()));
+            pending.push(Pending::new(unit, cause));
         }
     }
     let whole = pending.is_empty();
@@ -688,6 +687,47 @@ mod tests {
         assert!(matches!(cause(&second), Error::BudgetExceeded { .. }));
         let least = |f: &Vec<Name>| *f.iter().min().unwrap();
         assert_eq!(cause(&round), no(least(&round)));
+    }
+
+    /// Plan 23.C, Decision 5 (review of #1047): a budget that runs out
+    /// while a later set is grown keeps an earlier refused set's units
+    /// with the budget as their cause: they would have been tried unit by
+    /// unit. Here the corner's set refuses; the round's set, grown next,
+    /// runs the budget out; all three units are kept with the budget.
+    #[test]
+    fn a_budget_spent_in_a_later_set_keeps_an_earlier_sets_units_with_it() {
+        let b = a_corner_and_a_round();
+        let (first, second, round) = corner_units(&b);
+        let w = Work::unlimited().with_budget(1 << 40);
+        let m = Meter::new(&w);
+        let set = |o: &Body, ids: &BTreeSet<FaceId>, m: &Meter| -> Built {
+            let names: Vec<Name> = ids.iter().map(|&f| o.faces[f].name).collect();
+            if names.iter().any(|n| round.contains(n)) {
+                let _ = m.charge(1 << 41);
+            }
+            Err(TweakError::Uncertain { at: names[0] }.into())
+        };
+        let unit = |_: &Body, f: Vec<Name>, _: &Meter| -> Built { panic!("{f:?}") };
+        let spec = DeleteBlends {
+            max_size: Some(0.1),
+            ..Default::default()
+        };
+        let steps = Steps {
+            set: &set,
+            unit: &unit,
+        };
+        let (o, _, r) = partial_with(&b, &spec, &m, &steps).unwrap();
+        assert_eq!(o.dump(), b.dump());
+        assert!(r.deleted.is_empty());
+        assert_eq!(r.kept.len(), 3, "{r:?}");
+        for faces in [&first, &second, &round] {
+            let k = r.kept.iter().find(|k| &k.unit.faces == faces).unwrap();
+            assert!(
+                matches!(k.cause, Error::BudgetExceeded { .. }),
+                "{:?}",
+                k.cause
+            );
+        }
     }
 
     /// Design 919, plan 23.C: units partition the closed picks, each the
