@@ -194,6 +194,9 @@ not_found exit 1 "Not found"
   import str The mapping asked for.
   imports arr The mappings there are.
   move num The index of the schematic move that named it.
+  drawing str The drawing asked for.
+  group str The group asked for.
+  keepout str The keepout asked for.
   unresolved any What didn't resolve.
   errors any Why each place looked failed.
   hole str The hole asked for.
