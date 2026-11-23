@@ -306,6 +306,21 @@ impl<'a> Meter<'a> {
         self.spent.get() > self.cap.get()
     }
 
+    /// What halted this meter (plan 23.C): `None` while it runs; the
+    /// caller's cancel; or its budget, with what was spent.
+    pub(crate) fn stop_cause(&self) -> Option<Error> {
+        if !self.halted.get() {
+            return None;
+        }
+        if self.work.cancelled() {
+            return Some(Error::Cancelled);
+        }
+        Some(Error::BudgetExceeded {
+            spent: self.spent.get(),
+            budget: self.work.budget,
+        })
+    }
+
     /// Spends `units`. Halts past the budget or once cancelled (and from
     /// then on), and answers `Capped` past the innermost cap.
     #[inline]
@@ -529,6 +544,29 @@ pub(crate) fn run<T>(
         });
     }
     if m.halted.get() {
+        return Err(Error::Cancelled);
+    }
+    r
+}
+
+/// [`run`] for a call that settles its own budget (plan 23.C's partial
+/// delete keeps what it built and reports the rest): what it spent is
+/// counted, a cancel still answers `Cancelled`, and past the budget its
+/// answer stands.
+pub(crate) fn run_keeping<T>(
+    work: &Work<'_>,
+    f: impl FnOnce(&Meter<'_>) -> Result<T, Error>,
+) -> Result<T, Error> {
+    let table = Enclosures::new();
+    let m = Meter::with_enclosures(work, &table);
+    let r = f(&m);
+    let spent = m.spent.get();
+    let _ = work
+        .spent
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |s| {
+            Some(s.saturating_add(spent))
+        });
+    if m.halted.get() && work.cancelled() {
         return Err(Error::Cancelled);
     }
     r
@@ -796,6 +834,28 @@ mod tests {
         assert!(r[..45].iter().all(|&ok| ok));
         assert!(r[45..].iter().all(|&ok| !ok));
         assert_eq!(spent, 990 + 11 + 18);
+    }
+
+    /// Plan 23.C: what stopped a meter, and a run that keeps its answer
+    /// past the budget (counting what it spent) but not past a cancel.
+    #[test]
+    fn run_keeping_keeps_the_answer_past_a_budget_only() {
+        let w = Work::unlimited().with_budget(3);
+        let r = run_keeping(&w, |m| {
+            let _ = m.charge(5);
+            Ok(m.stop_cause())
+        });
+        assert_eq!(r, Ok(Some(Error::BudgetExceeded { spent: 5, budget: 3 })));
+        assert_eq!(w.spent(), 5);
+        let flag = AtomicBool::new(true);
+        let w = Work::unlimited().with_cancel(&flag);
+        let r = run_keeping(&w, |m| {
+            let _ = m.charge(1);
+            Ok(m.stop_cause())
+        });
+        assert_eq!(r, Err(Error::Cancelled));
+        let w = Work::unlimited();
+        assert_eq!(run_keeping(&w, |m| Ok(m.stop_cause())), Ok(None));
     }
 
     /// STC 07's shape (#658): a rung of pairs, each able to spend a
