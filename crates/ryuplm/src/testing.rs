@@ -591,3 +591,87 @@ pub fn xlsx(sheets: &[(&str, Vec<Vec<Cell>>)]) -> Vec<u8> {
         .collect();
     ryupdm::package::zip::write(&entries).expect("a small workbook fits a zip")
 }
+
+/// [`catalogue`]'s `n` items with `m` documents from `seed`: a document
+/// scheme, numbers in it, some legacy, two shared; each document's bytes
+/// seeded (1 to 4,096 bytes from BLAKE3 of the seed and its index), every
+/// eleventh changed after its record was written, every thirteenth
+/// missing, every seventeenth on the service; item k naming documents k %
+/// m and (k * 7) % m, every nineteenth also one this catalogue lacks.
+pub fn documents(seed: &str, n: usize, m: usize) -> BTreeMap<String, Vec<u8>> {
+    let mut f = catalogue(seed, n);
+    let config = json!({"format": 7, "kind": "ryupdm.config",
+        "part_number": {"schemes": [
+            {"name": "mech", "class": "machined", "pattern": "MECH-\\d{5}", "next": "MECH-{seq:5}"},
+            {"name": "fast", "class": "fastener", "pattern": "F\\d{4}", "next": "F{seq:4}"},
+            {"name": "legacy", "pattern": "\\d{3}-\\d{4}"},
+            {"name": "doc", "kind": "document", "pattern": "DOC-\\d{4}", "next": "DOC-{seq:4}"}]},
+        "properties": {"thread": {"type": "string"}, "finish": {"type": "string"}}});
+    f.insert(
+        "ryupdm.json".to_owned(),
+        crate::canonical::to_string(&config).into_bytes(),
+    );
+    let doc_seed = format!("{seed}.documents");
+    let mut seeded = crate::ids::Seeded::new(&doc_seed);
+    let mut ids = Vec::new();
+    for k in 0..m {
+        let id = seeded.next().expect("IDs never run out");
+        let len = 1 + (crate::ids::seeded_bits(seed, k as u64) % 4096) as usize;
+        let mut bytes = vec![0u8; len];
+        let mut h = blake3::Hasher::new();
+        h.update(seed.as_bytes());
+        h.update(&(k as u64).to_le_bytes());
+        h.finalize_xof().fill(&mut bytes);
+        let number = match k % 5 {
+            0 | 1 | 2 => format!("DOC-{:04}", k),
+            3 => format!("Legacy spec {k}"),
+            _ => format!("DOC-{:04}", k % 2), // shared: duplicates
+        };
+        let name = [
+            "Spec.pdf",
+            "datasheet.PDF",
+            "drawing 1.dxf",
+            "cert.png",
+            "notes.txt",
+        ][k % 5];
+        let mut d = crate::document::Document::new(
+            &number,
+            &format!("Document {k}"),
+            crate::document::File::of(name, &bytes, None).expect("a seeded file"),
+        );
+        d.doc_type = crate::document::TYPES[k % 6].to_owned();
+        if k % 17 == 0 {
+            d.storage = crate::document::Storage::Service;
+        }
+        f.insert(crate::ids::document_path(&id), d.to_text().into_bytes());
+        if d.storage == crate::document::Storage::Git && k % 13 != 0 {
+            if k % 11 == 0 {
+                bytes[0] ^= 0xff;
+            }
+            f.insert(crate::ids::bytes_path(&id, &d.file.name), bytes);
+        }
+        ids.push(id);
+    }
+    let item_ids: Vec<crate::id::Id> = f.keys().filter_map(|p| crate::ids::item_of(p)).collect();
+    for (k, iid) in item_ids.iter().enumerate() {
+        if m == 0 {
+            break;
+        }
+        let path = crate::ids::item_path(iid);
+        let mut item = Item::read(iid, &f[&path]).expect("a seeded item");
+        for j in [k % m, (k * 7) % m] {
+            item.documents.push(crate::document::DocRef {
+                catalogue: None,
+                document: ids[j].clone(),
+            });
+        }
+        if k % 19 == 0 {
+            item.documents
+                .push(crate::document::DocRef::parse("zzzzzzzzzzzzf").expect("an ID"));
+        }
+        item.documents.sort();
+        item.documents.dedup();
+        f.insert(path, item.to_text().into_bytes());
+    }
+    f
+}
