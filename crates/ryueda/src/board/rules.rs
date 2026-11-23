@@ -547,6 +547,7 @@ pub fn measurement(code: Code, details: &serde_json::Value) -> Option<(i64, bool
         | Code::DrcHoleSpacing => Some((get("distance_nm")?, false)),
         Code::DrcTrackWidth => Some((get("width_nm")?, false)),
         Code::DrcAnnularRing => Some((get("ring_nm")?, false)),
+        Code::PlacementConstraintUnmet => Some((get("distance_nm")?, true)),
         Code::DrcDrill => {
             let d = get("drill_nm")?;
             Some((d, get("max_nm").is_some_and(|m| d > m)))
@@ -846,6 +847,17 @@ mod tests {
                 assert_eq!(f[0].details["waiver_exceeded"]["code"], "waiver_exceeded");
             }
         }
+    }
+
+    #[test]
+    fn an_unmet_constraint_is_worse_when_farther() {
+        assert_eq!(
+            measurement(
+                Code::PlacementConstraintUnmet,
+                &serde_json::json!({"distance_nm": 5})
+            ),
+            Some((5, true))
+        );
     }
 
     /// A waiver without a limit leaves `limit` out of `waived`, as out
