@@ -117,6 +117,18 @@ fn stopped(m: &Meter) -> Result<Option<Error>, Error> {
     }
 }
 
+/// A grown body and its journal, or the refusal.
+type Built = Result<(Body, Journal), Error>;
+
+/// How a partial delete makes its steps: a set grown whole, as
+/// `delete_faces_in` grows it, and a unit's faces deleted by growth. The
+/// kernel's are [`delete_blends_partial`]'s; the unit tests give some that
+/// refuse where they choose.
+pub(crate) struct Steps<'s> {
+    pub(crate) set: &'s dyn Fn(&Body, &BTreeSet<FaceId>, &Meter) -> Built,
+    pub(crate) unit: &'s dyn Fn(&Body, Vec<Name>, &Meter) -> Built,
+}
+
 /// [`super::delete_blends_partial_with`]'s body (design 919, plan 23.C).
 pub(crate) fn delete_blends_partial(
     key: OpKey,
@@ -124,8 +136,35 @@ pub(crate) fn delete_blends_partial(
     spec: &DeleteBlends,
     m: &Meter,
 ) -> Result<(Body, Journal, PartialDelete), Error> {
-    use crate::tweak::delete::{delete_faces_in, grow, sets};
+    use crate::tweak::delete::{delete_faces_in, grow};
     use crate::tweak::{DeleteSpec, Heal};
+    let set = |b: &Body, ids: &BTreeSet<FaceId>, m: &Meter| grow::grow(key, b, ids, m);
+    let unit = |b: &Body, faces: Vec<Name>, m: &Meter| {
+        let spec = DeleteSpec {
+            faces,
+            heal: Heal::Grow,
+        };
+        delete_faces_in(key, b, &spec, m)
+    };
+    partial_with(
+        body,
+        spec,
+        m,
+        &Steps {
+            set: &set,
+            unit: &unit,
+        },
+    )
+}
+
+/// [`delete_blends_partial`] with its steps made by `steps`.
+pub(crate) fn partial_with(
+    body: &Body,
+    spec: &DeleteBlends,
+    m: &Meter,
+    steps_by: &Steps,
+) -> Result<(Body, Journal, PartialDelete), Error> {
+    use crate::tweak::delete::sets;
     if let Some(s) = spec.max_size
         && !(s.is_finite() && s >= 0.0)
     {
@@ -176,12 +215,13 @@ pub(crate) fn delete_blends_partial(
     let (mut out, mut journal) = (body.clone(), Journal::new());
     let mut steps: Vec<Journal> = Vec::new();
     // Each set's outcome: `None` built, else why it refused, with the
-    // faces round it then and how many steps had built.
-    type Refusal = (Error, BTreeSet<Name>, usize);
+    // faces round it then (none where its faces were gone) and how many
+    // steps had built.
+    type Refusal = (Error, Option<BTreeSet<Name>>, usize);
     let mut outcomes: Vec<Option<Refusal>> = Vec::new();
     for (names, refused) in &order {
         if let Some(s) = &stop {
-            outcomes.push(Some((s.clone(), BTreeSet::new(), steps.len())));
+            outcomes.push(Some((s.clone(), None, steps.len())));
             continue;
         }
         let ids: BTreeSet<FaceId> = out
@@ -196,7 +236,7 @@ pub(crate) fn delete_blends_partial(
                 face: *names.iter().next().expect("a set holds a face"),
             }
             .into()),
-            None => grow::grow(key, &out, &ids, m),
+            None => (steps_by.set)(&out, &ids, m),
         };
         match r {
             Ok((grown, j)) => {
@@ -211,8 +251,10 @@ pub(crate) fn delete_blends_partial(
             }
             Err(e) => {
                 stop = stopped(m)?;
-                let near: Vec<Name> = names.iter().copied().collect();
-                let near = neighbours(&out, &near);
+                let near = (!ids.is_empty()).then(|| {
+                    let names: Vec<Name> = names.iter().copied().collect();
+                    neighbours(&out, &names)
+                });
                 outcomes.push(Some((stop.clone().unwrap_or(e), near, steps.len())));
             }
         }
@@ -230,11 +272,12 @@ pub(crate) fn delete_blends_partial(
         };
         // A set of this one unit alone refused, building, as the unit
         // would: tried again only after a neighbour changes (Decision 4).
+        // One whose faces were gone is tried, and finds them gone.
         let alone = stop.is_none()
             && held.len() == 1
             && order[held[0]].1.is_none()
             && order[held[0]].0.len() == unit.faces.len();
-        if alone {
+        if let (true, Some(near)) = (alone, near) {
             pending.push(Pending {
                 near,
                 at,
@@ -268,11 +311,7 @@ pub(crate) fn delete_blends_partial(
                 // A neighbour's growth took its faces: deleted already.
                 Ok(None)
             } else {
-                let spec = DeleteSpec {
-                    faces: present,
-                    heal: Heal::Grow,
-                };
-                delete_faces_in(key, &out, &spec, m).map(Some)
+                (steps_by.unit)(&out, present, m).map(Some)
             };
             match r {
                 Ok(built) => {
@@ -378,6 +417,180 @@ mod tests {
             },
         ];
         blend(OpKey(0x23c1), &b, &edges).unwrap().0
+    }
+
+    /// The block of [`two_rounds`] with its top's front edge rounded 0.05
+    /// and its top's +x edge 0.03, meeting at a corner (one set of two
+    /// units: their radii differ, so no chain joins them), and its
+    /// bottom's back edge rounded 0.05 (a set of its own).
+    fn a_corner_and_a_round() -> Body {
+        let k = OpKey(0x23d0);
+        let (b, _) = primitive::block(k, 1.0, 0.6, 0.4, &Rigid::IDENTITY).unwrap();
+        let face = |r| Name::derive(k, Role::Face(r), &[]);
+        let edge = |a, c| {
+            let (a, c) = (face(a), face(c));
+            b.edges()
+                .find(|&e| {
+                    let n: Vec<Name> = b
+                        .edge_fins(e)
+                        .map(|fin| b.faces[b.loops[b.fins[fin].loop_].face].name)
+                        .collect();
+                    n.contains(&a) && n.contains(&c)
+                })
+                .map(|e| b.edges[e].name)
+                .unwrap()
+        };
+        let round = |a, c, radius| EdgeBlend {
+            edge: edge(a, c),
+            kind: BlendKind::Fillet { radius },
+        };
+        let edges = [
+            round(FaceRole::PlusZ, FaceRole::MinusY, 0.05),
+            round(FaceRole::PlusZ, FaceRole::PlusX, 0.03),
+            round(FaceRole::MinusZ, FaceRole::PlusY, 0.05),
+        ];
+        blend(OpKey(0x23d1), &b, &edges).unwrap().0
+    }
+
+    /// Plan 23.C, Decisions 3 and 4, through steps that refuse where the
+    /// test chooses. The corner's set refuses whole and is tried unit by
+    /// unit: its first unit is deleted, its second refuses and is kept,
+    /// with its faces' names. The round's set (of its one unit) refuses
+    /// too and waits for a neighbour to change: the corner's first unit's
+    /// step changes the +x face beside it, so it is tried again and
+    /// deleted. A second pass skips the kept unit: nothing changed round
+    /// it since it refused. One valid solid.
+    #[test]
+    fn a_refused_set_is_tried_unit_by_unit() {
+        use std::cell::Cell;
+        let b = a_corner_and_a_round();
+        let rec = crate::tweak::recognise_blends(&b, &RecogniseOptions::default()).unwrap();
+        assert_eq!(rec.blends.len(), 3, "{:?}", rec.blends);
+        let all: BTreeSet<usize> = (0..rec.blends.len()).collect();
+        let on_top = |n: &Name| {
+            let f = b.faces().find(|&f| b.faces[f].name == *n).unwrap();
+            crate::intersect::face_box(&b, f).max().z > 0.399
+        };
+        let us = units(&rec, &all);
+        let (top, round): (Vec<BlendUnit>, Vec<BlendUnit>) =
+            us.into_iter().partition(|u| u.faces.iter().all(on_top));
+        let (first, second, round) = (&top[0].faces, &top[1].faces, &round[0].faces);
+        let no = |f: Name| -> Error { TweakError::Uncertain { at: f }.into() };
+        let holds = |names: &[Name], of: &[Name]| names.iter().find(|n| of.contains(n)).copied();
+        let (tries, round_tries) = (Cell::new(0), Cell::new(0));
+        let k = OpKey(0x23d2);
+        let set = |o: &Body, ids: &BTreeSet<FaceId>, m: &Meter| {
+            let names: Vec<Name> = ids.iter().map(|&f| o.faces[f].name).collect();
+            match holds(&names, second).or(holds(&names, round)) {
+                Some(n) => Err(no(n)),
+                None => crate::tweak::delete::grow::grow(k, o, ids, m),
+            }
+        };
+        let unit = |o: &Body, faces: Vec<Name>, m: &Meter| {
+            if let Some(n) = holds(&faces, second) {
+                tries.set(tries.get() + 1);
+                return Err(no(n));
+            }
+            if holds(&faces, round).is_some() {
+                round_tries.set(round_tries.get() + 1);
+            }
+            let spec = DeleteSpec {
+                faces,
+                heal: Heal::Grow,
+            };
+            crate::tweak::delete::delete_faces_in(k, o, &spec, m)
+        };
+        let spec = DeleteBlends {
+            max_size: Some(0.1),
+            ..Default::default()
+        };
+        // unmetered: a unit test.
+        let m = Meter::free();
+        let steps = Steps {
+            set: &set,
+            unit: &unit,
+        };
+        let (o, j, r) = partial_with(&b, &spec, &m, &steps).unwrap();
+        let faces = |us: &[&BlendUnit]| -> Vec<Name> {
+            let mut f: Vec<Name> = us.iter().flat_map(|u| u.faces.clone()).collect();
+            f.sort();
+            f
+        };
+        let mut want = [first.clone(), round.clone()].concat();
+        want.sort();
+        assert_eq!(faces(&r.deleted.iter().collect::<Vec<_>>()), want, "{r:?}");
+        assert_eq!(r.kept.len(), 1, "{r:?}");
+        assert_eq!(&r.kept[0].unit.faces, second);
+        assert_eq!(tries.get(), 1, "the kept unit: once, then skipped");
+        assert_eq!(
+            round_tries.get(),
+            1,
+            "the round: once its neighbour changed"
+        );
+        assert_eq!(r.kept[0].cause, no(second[0]));
+        for f in second {
+            assert!(o.by_name(*f).is_some(), "{f:?}");
+        }
+        assert_eq!(crate::check::check(&o), []);
+        // The journal nets the steps: every input face is in the result
+        // or accounted for.
+        for f in b.faces() {
+            let n = b.faces[f].name;
+            let told = j.events().iter().any(|e| match e {
+                Event::Deleted(x) | Event::Modified(x) => *x == n,
+                Event::Replaced { old, .. } => *old == n,
+                _ => false,
+            });
+            assert!(o.by_name(n).is_some() || told, "{n:?}");
+        }
+    }
+
+    /// Plan 23.C: a step that took a later set's faces away. The corner's
+    /// set is grown with the round's faces too (a step chosen by the
+    /// test), so the round's set finds none of its faces: it refuses
+    /// `GapNotHealed` as `delete_faces_in` would, and its unit, whose faces
+    /// are gone, counts as deleted with no step of its own.
+    #[test]
+    fn a_unit_whose_faces_went_with_a_neighbour_is_deleted() {
+        let b = a_corner_and_a_round();
+        let rec = crate::tweak::recognise_blends(&b, &RecogniseOptions::default()).unwrap();
+        let all: BTreeSet<usize> = (0..rec.blends.len()).collect();
+        let every: Vec<Name> = units(&rec, &all)
+            .into_iter()
+            .flat_map(|u| u.faces)
+            .collect();
+        let k = OpKey(0x23d3);
+        let grow_all = |o: &Body, m: &Meter| {
+            let spec = DeleteSpec {
+                faces: every.clone(),
+                heal: Heal::Grow,
+            };
+            crate::tweak::delete::delete_faces_in(k, o, &spec, m)
+        };
+        let first = std::cell::Cell::new(true);
+        let set = |o: &Body, ids: &BTreeSet<FaceId>, m: &Meter| {
+            if first.replace(false) {
+                grow_all(o, m)
+            } else {
+                crate::tweak::delete::grow::grow(k, o, ids, m)
+            }
+        };
+        let unit =
+            |_: &Body, faces: Vec<Name>, _: &Meter| -> Built { panic!("no unit step: {faces:?}") };
+        let spec = DeleteBlends {
+            max_size: Some(0.1),
+            ..Default::default()
+        };
+        // unmetered: a unit test.
+        let m = Meter::free();
+        let steps = Steps {
+            set: &set,
+            unit: &unit,
+        };
+        let (o, _, r) = partial_with(&b, &spec, &m, &steps).unwrap();
+        assert_eq!(r.deleted.len(), 3, "{r:?}");
+        assert!(r.kept.is_empty(), "{r:?}");
+        assert_eq!(o.dump(), grow_all(&b, &m).unwrap().0.dump());
     }
 
     /// Design 919, plan 23.C: units partition the closed picks, each the
