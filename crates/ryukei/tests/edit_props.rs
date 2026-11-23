@@ -225,6 +225,97 @@ fn seeded_edits_check_clean() {
     }
 }
 
+/// How many seeds the partial deletes try (plan 23.C), apart from the
+/// edits' own.
+const PARTIAL_SEEDS: u64 = 32;
+
+/// Plan 23.C: seeded partial blend deletes. Each result checks clean,
+/// meshes, accounts for every face in its journal, gives the same bits
+/// on one thread and eight, and its deleted and kept units hold no face
+/// twice. A refusal is typed.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "minutes in a debug build")]
+fn seeded_partial_deletes_check_clean() {
+    use ryukei_testkit::edit_bytes::{partial_case, run_partial};
+    let one = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    let eight = rayon::ThreadPoolBuilder::new()
+        .num_threads(8)
+        .build()
+        .unwrap();
+    let mut rng = Lcg::new(0x23c5);
+    let (mut built, mut refused, mut kept) = (0, 0, 0);
+    let mut slow = Vec::new();
+    for seed in 0..PARTIAL_SEEDS {
+        let data = bytes(&mut rng);
+        let Some(case) = partial_case(&data) else {
+            continue;
+        };
+        let key = OpKey(0x23c6);
+        let started = Instant::now();
+        let got = one.install(|| within_deadline(|w| run_partial(&case, key, w)));
+        println!(
+            "seed {seed}: partial on {} faces: {:.2} s",
+            case.body.counts().faces,
+            started.elapsed().as_secs_f64()
+        );
+        let (o, j, r) = match got {
+            Ok(made) => made,
+            Err(Error::Cancelled) => {
+                println!("seed {seed}: past the deadline");
+                slow.push(seed);
+                continue;
+            }
+            Err(Error::InvalidTweak(e)) => {
+                println!("seed {seed}: refused {e:?}");
+                refused += 1;
+                continue;
+            }
+            Err(e) => panic!("seed {seed}: not a tweak's refusal: {e:?}"),
+        };
+        built += 1;
+        kept += r.kept.len();
+        for k in &r.kept {
+            println!(
+                "seed {seed}: kept {} faces: {:?}",
+                k.unit.faces.len(),
+                k.cause
+            );
+            assert!(
+                matches!(k.cause, Error::InvalidTweak(_)),
+                "seed {seed}: {:?}",
+                k.cause
+            );
+            for f in &k.unit.faces {
+                assert!(o.by_name(*f).is_some(), "seed {seed}: kept {f:?} renamed");
+            }
+        }
+        assert_eq!(check(&o), [], "seed {seed}");
+        assert_eq!(check_intersections(&o), [], "seed {seed}");
+        journal_accounts_for_every_face(&case.body, &o, &j, seed);
+        let mut faces: Vec<Name> = r
+            .deleted
+            .iter()
+            .chain(r.kept.iter().map(|k| &k.unit))
+            .flat_map(|u| u.faces.clone())
+            .collect();
+        let n = faces.len();
+        faces.sort();
+        faces.dedup();
+        assert_eq!(faces.len(), n, "seed {seed}: a face in two units");
+        let (again, _, _) = eight
+            .install(|| run_partial(&case, key, &Work::unlimited()))
+            .unwrap();
+        assert_eq!(again.dump(), o.dump(), "seed {seed}: eight threads differ");
+        measured(&o, seed);
+    }
+    println!("{built} built ({kept} units kept), {refused} refused, past the deadline {slow:?}");
+    assert!(built > 0);
+    assert!(slow.is_empty(), "past the deadline: {slow:?}");
+}
+
 /// Two kinds alike within `tol`: a fillet's radius, a chamfer's
 /// distances either way round (a `Distances` chamfer is recognised with
 /// its supports in name order), a `DistanceAngle` chamfer by the distance
