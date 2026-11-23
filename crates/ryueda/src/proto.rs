@@ -889,6 +889,53 @@ pub enum Request {
     },
     #[serde(rename = "board.rules.explain")]
     BoardRulesExplain { board: String, refs: Vec<String> },
+    /// A keepout: an area on copper layers keeping kinds of item out.
+    #[serde(rename = "board.keepout.add")]
+    BoardKeepoutAdd {
+        board: String,
+        /// `{start, edges}` as an outline is written.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        contour: Option<Value>,
+        /// `[x0, y0, x1, y1]` lengths.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rect: Option<Vec<String>>,
+        /// top, in1 …, bottom, all; all when empty.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        layer: Vec<String>,
+        /// copper, tracks, vias, pads, pours, placements, holes.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        keep: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        /// `[{contour | rect, layer?, keep, id?}]`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ops: Option<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// A keepout's contour, layers or kinds replaced.
+    #[serde(rename = "board.keepout.edit")]
+    BoardKeepoutEdit {
+        board: String,
+        keepout: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        contour: Option<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rect: Option<Vec<String>>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        layer: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        keep: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "board.keepout.delete")]
+    BoardKeepoutDelete {
+        board: String,
+        keepouts: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     /// Each group of a board and its members.
     #[serde(rename = "board.group.list")]
     BoardGroupList { board: String },
@@ -1771,6 +1818,9 @@ impl Request {
                 | Request::BoardRulesUnset { .. }
                 | Request::BoardWaive { .. }
                 | Request::BoardGroupMove { .. }
+                | Request::BoardKeepoutAdd { .. }
+                | Request::BoardKeepoutEdit { .. }
+                | Request::BoardKeepoutDelete { .. }
                 | Request::BoardGroupFlip { .. }
                 | Request::BoardEdit { .. }
                 | Request::BoardDelete { .. }

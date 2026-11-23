@@ -1796,6 +1796,10 @@ enum BoardCmd {
     /// Groups: parts moved together, rigidly, all or nothing.
     #[command(subcommand)]
     Group(GroupCmd),
+    /// Keepouts: areas on copper layers keeping tracks, vias, pads, pours,
+    /// parts or holes out.
+    #[command(subcommand)]
+    Keepout(KeepoutCmd),
     /// The exact distance between two items (R1/1, track/t1, via/v1,
     /// hole/h1, R1/1#hole, R1 by its courtyard, net:NAME) on each copper
     /// layer they share, with the clearance the rules ask of them.
@@ -1963,6 +1967,70 @@ enum HoleCmd {
         #[command(flatten)]
         expect: Expect,
     },
+}
+
+#[derive(Subcommand)]
+enum KeepoutCmd {
+    /// A keepout by --rect X0,Y0,X1,Y1 or --contour JSON, keeping --keep
+    /// kinds (copper, tracks, vias, pads, pours, placements, holes; repeat)
+    /// out of --layer layers (top, in1 …, bottom, all; repeat; all by
+    /// default). Placements are kept off the side whose outer layer it
+    /// names. --ops for several, all or nothing.
+    Add {
+        board: String,
+        /// JSON: {start: [x, y], edges: [{type: line, to} | {type: arc, mid, to}]}.
+        #[arg(long, value_name = "JSON", conflicts_with = "rect")]
+        contour: Option<String>,
+        #[arg(long, value_name = "X0,Y0,X1,Y1", allow_hyphen_values = true)]
+        rect: Option<String>,
+        #[arg(long = "layer")]
+        layers: Vec<String>,
+        #[arg(long = "keep")]
+        keeps: Vec<String>,
+        #[arg(long)]
+        id: Option<String>,
+        /// JSON: [{contour | rect: [x0, y0, x1, y1], layer?: [..], keep: [..], id?}].
+        #[arg(long, value_name = "OPS", conflicts_with_all = ["contour", "rect", "layers", "keeps", "id"])]
+        ops: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Replace a keepout's contour (--rect or --contour), layers or kinds.
+    Edit {
+        board: String,
+        keepout: String,
+        #[arg(long, value_name = "JSON", conflicts_with = "rect")]
+        contour: Option<String>,
+        #[arg(long, value_name = "X0,Y0,X1,Y1", allow_hyphen_values = true)]
+        rect: Option<String>,
+        #[arg(long = "layer")]
+        layers: Vec<String>,
+        #[arg(long = "keep")]
+        keeps: Vec<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Delete keepouts by ID.
+    Delete {
+        board: String,
+        #[arg(required = true)]
+        keepouts: Vec<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+}
+
+/// `X0,Y0,X1,Y1` as four values.
+fn quad_arg(flag: &str, text: &str) -> Result<Vec<String>> {
+    let parts: Vec<String> = text.split(',').map(|x| x.trim().to_owned()).collect();
+    if parts.len() != 4 || parts.iter().any(String::is_empty) {
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!("{flag} is four values, X0,Y0,X1,Y1"),
+        )
+        .with("flag", flag));
+    }
+    Ok(parts)
 }
 
 #[derive(Subcommand)]
@@ -4196,6 +4264,51 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             a: a.clone(),
             b: b.clone(),
             layer: layer.clone(),
+        },
+        Command::Board(BoardCmd::Keepout(KeepoutCmd::Add {
+            board,
+            contour,
+            rect,
+            layers,
+            keeps,
+            id,
+            ops,
+            expect,
+        })) => Request::BoardKeepoutAdd {
+            board: board.clone(),
+            contour: contour.as_deref().map(|c| json_arg("--contour", c)).transpose()?,
+            rect: rect.as_deref().map(|r| quad_arg("--rect", r)).transpose()?,
+            layer: layers.clone(),
+            keep: keeps.clone(),
+            id: id.clone(),
+            ops: ops.as_deref().map(|o| json_arg("--ops", o)).transpose()?,
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Board(BoardCmd::Keepout(KeepoutCmd::Edit {
+            board,
+            keepout,
+            contour,
+            rect,
+            layers,
+            keeps,
+            expect,
+        })) => Request::BoardKeepoutEdit {
+            board: board.clone(),
+            keepout: keepout.clone(),
+            contour: contour.as_deref().map(|c| json_arg("--contour", c)).transpose()?,
+            rect: rect.as_deref().map(|r| quad_arg("--rect", r)).transpose()?,
+            layer: layers.clone(),
+            keep: keeps.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Board(BoardCmd::Keepout(KeepoutCmd::Delete {
+            board,
+            keepouts,
+            expect,
+        })) => Request::BoardKeepoutDelete {
+            board: board.clone(),
+            keepouts: keepouts.clone(),
+            expected_revision: expect.expect.clone(),
         },
         Command::Board(BoardCmd::Group(GroupCmd::List { board })) => Request::BoardGroupList {
             board: board.clone(),

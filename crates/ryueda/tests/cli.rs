@@ -850,6 +850,9 @@ fn every_protocol_method_has_a_command() {
         ("board.waive", &["board", "waive"]),
         ("board.measure", &["board", "measure"]),
         ("board.group.list", &["board", "group", "list"]),
+        ("board.keepout.add", &["board", "keepout", "add"]),
+        ("board.keepout.edit", &["board", "keepout", "edit"]),
+        ("board.keepout.delete", &["board", "keepout", "delete"]),
         ("board.group.move", &["board", "group", "move"]),
         ("board.group.flip", &["board", "group", "flip"]),
         ("board.export", &["board", "export"]),
@@ -6227,4 +6230,60 @@ fn groups_move_rigidly_from_the_cli() {
         1,
     );
     p.fails(&["board", "group", "move", "main", "g"], "invalid_param", 1);
+}
+
+/// Keepouts from the CLI (ryueda 7.C): added by rectangle, a via inside
+/// it a finding, the keepout edited off it, refused when it doesn't
+/// close, deleted.
+#[test]
+fn keepouts_from_the_cli() {
+    let p = Pair::breakout();
+    for args in breakout_board::script() {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        p.ok(&args);
+    }
+    let id = breakout_board::BOARD;
+    // The round's ground via g_u2 sits at (4.85, 2.0).
+    let k = p.ok(&[
+        "board", "keepout", "add", id, "--rect", "4,1,6,3", "--keep", "vias", "--id", "k1",
+    ]);
+    assert_eq!(
+        k["keepouts"][0]["reference"],
+        format!("{id}:keepout/k1"),
+        "{k}"
+    );
+    let added = k["drc"]["added"].as_array().unwrap();
+    assert!(
+        added.iter().any(|f| f["code"] == "drc_keepout"
+            && f["refs"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(format!("{id}:via/g_u2")))),
+        "{k}"
+    );
+    let e = p.ok(&[
+        "board",
+        "keepout",
+        "edit",
+        id,
+        "k1",
+        "--rect",
+        "0.5,9,1.5,10",
+    ]);
+    assert!(!e["drc"]["removed"].as_array().unwrap().is_empty(), "{e}");
+    let bad = json!({"start": [0, 0], "edges": [{"type": "line", "to": [1, 1]}, {"type": "line", "to": [1, 0]}]}).to_string();
+    p.fails(
+        &["board", "keepout", "edit", id, "k1", "--contour", &bad],
+        "board_contour_invalid",
+        1,
+    );
+    p.fails(
+        &[
+            "board", "keepout", "add", id, "--rect", "0,0,1,1", "--keep", "vias", "--layer", "in1",
+        ],
+        "board_layer_not_found",
+        1,
+    );
+    p.ok(&["board", "keepout", "delete", id, "k1"]);
+    p.fails(&["board", "keepout", "delete", id, "k1"], "not_found", 1);
 }

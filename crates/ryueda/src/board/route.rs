@@ -23,7 +23,7 @@ fn invalid(msg: impl Into<String>, param: &str) -> Error {
 }
 
 /// A field of an ask, absent when missing or null.
-fn field<'a>(a: &'a Value, k: &str) -> Option<&'a Value> {
+pub(crate) fn field<'a>(a: &'a Value, k: &str) -> Option<&'a Value> {
     a.get(k).filter(|v| !v.is_null())
 }
 
@@ -123,11 +123,15 @@ fn point(
 }
 
 /// The findings before a write, if the board checks.
-type Before = Option<Vec<super::drc::Finding>>;
+pub(crate) type Before = Option<Vec<super::drc::Finding>>;
 
 /// The board a write names, checked against `expected`, and its findings
 /// before the write.
-fn start(session: &mut Session, board: &str, expected: Option<&str>) -> Result<(Id, Before)> {
+pub(crate) fn start(
+    session: &mut Session,
+    board: &str,
+    expected: Option<&str>,
+) -> Result<(Id, Before)> {
     let b = find(session.project(), board)?;
     check_revision(&format!("board {}", b.id), &b.revision, expected)?;
     let id = b.id.clone();
@@ -137,7 +141,7 @@ fn start(session: &mut Session, board: &str, expected: Option<&str>) -> Result<(
 
 /// A write's answer: the board, its revision, what the write made and
 /// what it did to the board's findings.
-fn answer(session: &mut Session, id: &Id, made: Value, before: Before) -> Value {
+pub(crate) fn answer(session: &mut Session, id: &Id, made: Value, before: Before) -> Value {
     let mut v = made;
     v["board"] = json!(format!("board/{id}"));
     v["revision"] = json!(session.project().boards.get(id).map(|b| b.revision.clone()));
@@ -263,7 +267,7 @@ pub fn track_edit(
 }
 
 /// Deletes routes of one folder by ID, all or nothing.
-fn delete(
+pub(crate) fn delete(
     session: &mut Session,
     board: &str,
     folder: &str,
@@ -282,6 +286,7 @@ fn delete(
         let held = match folder {
             TRACKS => b.tracks.contains_key(&rid),
             VIAS => b.vias.contains_key(&rid),
+            KEEPOUTS => b.keepouts.contains_key(&rid),
             _ => b.holes.contains_key(&rid),
         };
         if !held {

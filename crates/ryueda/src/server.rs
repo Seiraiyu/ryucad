@@ -1438,6 +1438,44 @@ fn dispatch(
         Request::BoardMeasure { board, a, b, layer } => {
             crate::board::cmd::measure(session, &board, &a, &b, layer.as_deref())
         }
+        Request::BoardKeepoutAdd {
+            board,
+            contour,
+            rect,
+            layer,
+            keep,
+            id,
+            ops,
+            expected_revision,
+        } => {
+            let one =
+                json!({"contour": contour, "rect": rect, "layer": layer, "keep": keep, "id": id});
+            crate::board::keepcmd::add(
+                session,
+                &board,
+                crate::board::route::asks(ops, one)?,
+                expected_revision.as_deref(),
+            )
+        }
+        Request::BoardKeepoutEdit {
+            board,
+            keepout,
+            contour,
+            rect,
+            layer,
+            keep,
+            expected_revision,
+        } => {
+            let a = json!({"contour": contour, "rect": rect, "layer": layer, "keep": keep});
+            crate::board::keepcmd::edit(session, &board, &keepout, &a, expected_revision.as_deref())
+        }
+        Request::BoardKeepoutDelete {
+            board,
+            keepouts,
+            expected_revision,
+        } => {
+            crate::board::keepcmd::delete(session, &board, &keepouts, expected_revision.as_deref())
+        }
         Request::BoardGroupList { board } => crate::board::group::list(session.project(), &board),
         Request::BoardGroupMove {
             board,
