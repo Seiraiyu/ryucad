@@ -37,8 +37,22 @@ pub fn people(ui: &mut egui::Ui, ws: &mut Workspace) {
         })
         .collect();
     // Drawn in the toolbar's right-to-left run: the strip at the right,
-    // then View > Follow agents' work, where the people are (#812).
-    if let Some(f) = ryu_app::people::strip(ui, &lines, ws.session.following.as_deref()) {
+    // then View > Follow agents' work, where the people are (#812). The
+    // strip gets what the button leaves, its names cut short and the rest
+    // clipped past that: given all of it, a longer name ("runneradmin",
+    // Windows' runners') pushed the button left over the toolbar's last
+    // one, Markup, which then took no clicks (#994).
+    let follow =
+        crate::ui::icon::button_size(crate::ui::toolbar::ICON).x + ui.spacing().item_spacing.x;
+    let room = (ui.available_width() - follow).max(0.0);
+    let mut region = ui.available_rect_before_wrap();
+    region.min.x = region.max.x - room;
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(region).layout(*ui.layout()));
+    child.set_clip_rect(region.intersect(ui.clip_rect()));
+    let pressed = ryu_app::people::strip(&mut child, &lines, ws.session.following.as_deref());
+    let used = child.min_rect().size().min(egui::vec2(room, f32::INFINITY));
+    ui.allocate_exact_size(used, egui::Sense::hover());
+    if let Some(f) = pressed {
         ws.follow(f);
     }
     // An icon, so the toolbar keeps its room at 1000 points.

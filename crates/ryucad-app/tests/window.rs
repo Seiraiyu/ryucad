@@ -7237,6 +7237,59 @@ fn the_mate_dialog_takes_the_keyboard_and_esc_closes_it_with_nothing_selected() 
     });
 }
 
+/// #994: however long the people's names, the toolbar's buttons and the
+/// people strip at its right never overlap at 1000 points: a long name
+/// (Windows' runners' `runneradmin`) once pushed Follow work over Markup,
+/// which then took no clicks.
+#[test]
+fn long_names_leave_the_toolbars_buttons_clear() {
+    use egui_kittest::kittest::NodeT;
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    p.ok(&[
+        "--as",
+        "an-agent-with-a-very-long-name-indeed-for-the-strip",
+        "status",
+        "reviewing every face of every part in the project",
+    ]);
+    let mut h = window(&p);
+    h.set_size(egui::vec2(1000.0, 1000.0));
+    frames(&mut h, loaded);
+    h.run_steps(2);
+    let bar = h.get_by_label("Markup").rect();
+    let buttons: Vec<(String, egui::Rect)> = h
+        .query_all_by(|n| {
+            n.role() == egui::accesskit::Role::Button
+                && n.raw_bounds()
+                    .is_some_and(|r| r.y0 < f64::from(bar.bottom()) && r.y1 > f64::from(bar.top()))
+        })
+        .map(|n| {
+            let label = n.accesskit_node().label().unwrap_or_default();
+            (label, n.rect())
+        })
+        .collect();
+    assert!(
+        buttons.iter().any(|(l, _)| l == "Follow work"),
+        "{buttons:?}"
+    );
+    for (i, (a, ra)) in buttons.iter().enumerate() {
+        assert!(ra.right() <= 1000.0, "{a} at {ra:?} past the window");
+        for (b, rb) in &buttons[i + 1..] {
+            assert!(
+                !ra.intersects(rb.shrink(0.5)),
+                "{a} at {ra:?} over {b} at {rb:?}"
+            );
+        }
+    }
+    h.get_by_label("Markup").click();
+    waited(&mut h, "the bar", |a| {
+        a.opened().ws.annotations.markup.is_some()
+    });
+}
+
 /// #742: the Markup bar wraps inside a narrow viewport.
 #[test]
 fn the_markup_bar_fits_a_narrow_viewport() {

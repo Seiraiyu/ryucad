@@ -6,11 +6,14 @@
 //! their names.
 
 pub(crate) mod fit;
+pub(crate) mod partial;
 pub(crate) mod recognise;
 pub(crate) mod remake;
 
 #[cfg(test)]
 mod tests;
+
+pub use partial::{BlendUnit, KeptUnit, PartialDelete};
 
 use crate::Error;
 use crate::blend::BlendKind;
@@ -135,6 +138,38 @@ pub fn delete_blends_with(
     work: &Work,
 ) -> Result<(Body, Journal), Error> {
     crate::work::run(work, |m| remake::delete_blends(key, body, spec, m))
+}
+
+/// What [`delete_blends`] picks, deleted where it can be (design 919,
+/// plan 23.C). Each edge-connected set is grown whole first, as
+/// `delete_blends` grows it; a set that refuses is tried unit by unit (a
+/// picked blend closed over its chain and corners), each in order of
+/// least face name, each again after a step changed a face beside it,
+/// until a pass deletes nothing. Every step checks its own result, so the
+/// body is one valid solid; the report says which units were deleted and
+/// which kept, each with its cause. Where every set builds, the body and
+/// journal are `delete_blends`'. Refusals before anything is built are
+/// `delete_blends`' (a bad size, `NotABlend`, recognition, `NotASolid`);
+/// a cancel answers `Cancelled`. A greedy order: a unit kept might have
+/// gone in another order.
+pub fn delete_blends_partial(
+    key: OpKey,
+    body: &Body,
+    spec: &DeleteBlends,
+) -> Result<(Body, Journal, PartialDelete), Error> {
+    delete_blends_partial_with(key, body, spec, &Work::unlimited())
+}
+
+/// [`delete_blends_partial`] under `work`: past its budget the units not
+/// yet settled are kept with `BudgetExceeded` as their cause, and what
+/// was built stands.
+pub fn delete_blends_partial_with(
+    key: OpKey,
+    body: &Body,
+    spec: &DeleteBlends,
+    work: &Work,
+) -> Result<(Body, Journal, PartialDelete), Error> {
+    crate::work::run_keeping(work, |m| partial::delete_blends_partial(key, body, spec, m))
 }
 
 /// `body` with each named face's blend made again at the kind given

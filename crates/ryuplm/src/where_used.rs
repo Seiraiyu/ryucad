@@ -205,8 +205,11 @@ pub fn answer(session: &mut Session, ask: &Ask) -> Result<Value> {
     };
     let mut problems = Vec::new();
     let here = session.root().display().to_string();
+    // The folders' projects walked once, here, and shared with every other
+    // checkout's scan below (#1044).
+    let scans = crate::reps::Scans::default();
     let mut reps = crate::reps::Disk::new(
-        crate::reps::Index::scan(&crate::reps::tops(session.root(), &folders)),
+        crate::reps::Index::scan_with(&crate::reps::tops(session.root(), &folders), &scans),
         session.root(),
     );
     let mut working = tag(
@@ -231,7 +234,7 @@ pub fn answer(session: &mut Session, ask: &Ask) -> Result<Value> {
             let handles: Vec<_> = wave
                 .iter()
                 .map(|dir| {
-                    let (t, folders, working_only) = (&t, &folders, ask.working);
+                    let (t, folders, working_only, scans) = (&t, &folders, ask.working, &scans);
                     s.spawn(move || {
                         let shown = dir.display().to_string();
                         let mut problems = Vec::new();
@@ -250,7 +253,7 @@ pub fn answer(session: &mut Session, ask: &Ask) -> Result<Value> {
                             return (shown, Ok((None, Vec::new(), Vec::new())), problems);
                         }
                         let mut r = crate::reps::Disk::new(
-                            crate::reps::Index::scan(&crate::reps::tops(dir, folders)),
+                            crate::reps::Index::scan_with(&crate::reps::tops(dir, folders), scans),
                             dir,
                         );
                         let w = rows_in(&c, t, &mut r, &At::Working, &mut problems);

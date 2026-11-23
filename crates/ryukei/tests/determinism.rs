@@ -3856,6 +3856,42 @@ fn released_pin_section(golden: &mut Golden) {
     s.u64(w.spent());
 }
 
+/// ryukei 23.C's partial deletes (design 919): the partial_deletes twin
+/// (`ryukei_testkit::partial_deletes`) deleted partially: the result's
+/// body, created names and mesh, then each kept unit's faces and cause,
+/// or the refusal's bytes; then the units spent.
+fn partial_deletes_section(golden: &mut Golden) {
+    use ryukei::tweak::{DeleteBlends, delete_blends_partial_with};
+    use ryukei::work::Work;
+    use ryukei_testkit::partial_deletes::{MAX_SIZE, body};
+    let mut s = golden.section("partial_deletes");
+    let b = body();
+    let spec = DeleteBlends {
+        max_size: Some(MAX_SIZE),
+        ..Default::default()
+    };
+    let w = Work::unlimited();
+    match delete_blends_partial_with(OpKey(0x23cb), &b, &spec, &w) {
+        Ok((o, j, r)) => {
+            hash_body(&mut s, &o, &j);
+            for k in &r.kept {
+                for f in &k.unit.faces {
+                    s.u64((f.to_u128() >> 64) as u64);
+                }
+                for byte in format!("{:?}", k.cause).bytes() {
+                    s.u64(u64::from(byte));
+                }
+            }
+        }
+        Err(e) => {
+            for byte in format!("{e:?}").bytes() {
+                s.u64(u64::from(byte));
+            }
+        }
+    }
+    s.u64(w.spent());
+}
+
 /// The golden file every section's line is in.
 const GOLDEN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/determinism.txt");
 
@@ -3960,6 +3996,7 @@ sections! {
     slit_seeds => slit_seeds_section,
     ruled_pin => ruled_pin_section,
     released_pin => released_pin_section,
+    partial_deletes => partial_deletes_section,
 }
 
 /// Offsets past their focal surfaces (design 484, plan 17.A): a spline

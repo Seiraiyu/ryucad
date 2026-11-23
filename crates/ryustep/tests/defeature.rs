@@ -1007,3 +1007,163 @@ fn pinned_bodies_defeature() {
         start.elapsed().as_secs_f64()
     );
 }
+
+/// SolidWorks 2026's totals (design 919: Delete Face → Delete and Patch,
+/// chain by chain, cumulative, on seiraiyu1, 2026-11-18): each body
+/// SolidWorks refuses as one operation, the faces it deletes, and the
+/// faces ryukei picks under 2 mm (census VIII, plan 23.C, matches);
+/// then the faces ryukei's partial delete deletes, which must not fall.
+///
+/// SolidWorks' bar is unmet on all four (plan 23.C, census VIII on #658;
+/// the coxswain's ratchet, 2026-11-23, like `KNOWN_REFUSED`): every unit
+/// kept refuses when grown on its own, as the set holding it does, so no
+/// order of units reaches SolidWorks' counts. The refusals are the
+/// growth's (#652's family, mostly `Uncertain` near the gap), left to
+/// ryukei 23.D's verdict.
+const SOLIDWORKS_DELETES: &[Row] = &[
+    ("nist_ftc_07_asme1_rd.stp", 0, 75, 101, 32),
+    ("nist_ftc_10_asme1_rb.stp", 0, 90, 94, 28),
+    ("nist_stc_10_asme1_ap242-e2.stp", 3044, 104, 108, 38),
+    ("nist_ftc_07_asme1_ap242-e2.stp", 13541, 68, 101, 0),
+];
+
+/// The bodies whose partial delete met [`DEADLINE`] on the bar machine
+/// (plan 23.C, Decision 6): asserted with `RYUKEI_BARS` for these only;
+/// the others' times are printed, and the guide records them.
+const PARTIAL_WITHIN_DEADLINE: &[&str] = &[];
+
+/// `body`, SolidWorks' row `row`, deleted partially on one thread (plan
+/// 23.C): at least as many faces as the row's ratchet (SolidWorks'
+/// count printed beside it), the picks
+/// partitioned into deleted and kept, one valid solid (`check`, and
+/// `check_intersections` but for a `CannotCheck` pair the input had), a
+/// clean mesh, every kept face under its name, each kept unit's cause
+/// typed. The time and units are printed; a count below the ratchet is
+/// returned, so every body's run is reported before the test fails.
+fn deleted_partially(row: &Row, body: &Body) -> Option<String> {
+    use ryukei::tweak::delete_blends_partial_with;
+    let &(file, rep, sw, picked, floor) = row;
+    let spec = DeleteBlends {
+        max_size: Some(MAX_SIZE),
+        faces: Vec::new(),
+        options: RecogniseOptions::default(),
+    };
+    let one = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    let w = Work::unlimited();
+    let t = Instant::now();
+    let (o, _, r) = one
+        .install(|| delete_blends_partial_with(OpKey(0x13d), body, &spec, &w))
+        .unwrap_or_else(|e| panic!("{file} #{rep}: {e:?}"));
+    let secs = t.elapsed().as_secs_f64();
+    let deleted: usize = r.deleted.iter().map(|u| u.faces.len()).sum();
+    let kept: usize = r.kept.iter().map(|k| k.unit.faces.len()).sum();
+    println!(
+        "{file} #{rep}: {deleted} of {picked} faces deleted (SolidWorks {sw}), {} units kept, {secs:.1} s, {} units",
+        r.kept.len(),
+        w.spent()
+    );
+    for k in &r.kept {
+        println!(
+            "{file} #{rep}:   kept {} faces from {:032x}: {:?}",
+            k.unit.faces.len(),
+            k.unit.faces[0].to_u128(),
+            k.cause
+        );
+    }
+    assert_eq!(deleted + kept, picked, "{file} #{rep}: the picks");
+    for k in &r.kept {
+        assert!(
+            matches!(k.cause, Error::InvalidTweak(_)),
+            "{file} #{rep}: {:?}",
+            k.cause
+        );
+        for f in &k.unit.faces {
+            assert!(o.by_name(*f).is_some(), "{file} #{rep}: kept {f:?} renamed");
+        }
+    }
+    assert_eq!(check(&o), [], "{file} #{rep}");
+    let after = named(&o, &check_intersections(&o));
+    if !after.is_empty() {
+        let before = named(body, &check_intersections(body));
+        let new: Vec<_> = after
+            .iter()
+            .filter(|f| f.0 != "cannot_check" || !before.contains(f))
+            .collect();
+        assert!(new.is_empty(), "{file} #{rep}: {new:?}");
+        println!("{file} #{rep}: unchecked as before: {after:?}");
+    }
+    let m = ryukei::mesh::tessellate(&o, &MeshParams::new(1e-5, 0.3)).unwrap();
+    assert_eq!(m.faults, [], "{file} #{rep}");
+    if bars() && PARTIAL_WITHIN_DEADLINE.contains(&file) {
+        assert!(secs < DEADLINE.as_secs_f64(), "{file} #{rep}: {secs:.1} s");
+    }
+    (deleted < floor).then(|| {
+        format!("{file} #{rep}: {deleted} faces deleted, at least {floor} (SolidWorks {sw})")
+    })
+}
+
+/// A row of [`SOLIDWORKS_DELETES`].
+type Row = (&'static str, u64, usize, usize, usize);
+
+/// `run` over the rows a hand run takes (those whose file holds
+/// `RYUKEI_PARTIAL_ONLY`, if it is set), then every shortfall it returned
+/// asserted at once.
+fn each_row(rows: &[Row], run: impl FnMut(&Row) -> Option<String>) {
+    let only = std::env::var("RYUKEI_PARTIAL_ONLY").unwrap_or_default();
+    let short: Vec<String> = rows
+        .iter()
+        .filter(|r| r.0.contains(only.as_str()))
+        .filter_map(run)
+        .collect();
+    assert!(short.is_empty(), "{short:#?}");
+}
+
+/// The committed bodies SolidWorks 2026 refuses as one operation (FTC 07
+/// rd and FTC 10 rb), deleted partially (plan 23.C): each loses at least
+/// its ratchet's faces, printed beside what SolidWorks deletes chain by
+/// chain. Hours on cox-worker-4: run by hand, and the guide records each
+/// run (question 1245); `RYUKEI_PARTIAL_ONLY=<part of a file name>` runs
+/// one.
+#[test]
+#[ignore = "hours: run by hand (plan 23.C, question 1245)"]
+fn the_refused_bodies_are_deleted_partially() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpus");
+    each_row(&SOLIDWORKS_DELETES[..2], |row| {
+        let bytes = std::fs::read(root.join(row.0)).unwrap();
+        let m = read(
+            &bytes,
+            &ReadOptions {
+                key: OpKey(7),
+                heal: Default::default(),
+            },
+        )
+        .unwrap();
+        let Ok((body, _, _)) = &m.bodies[row.1 as usize].result else {
+            panic!("{} #{}: not healed", row.0, row.1);
+        };
+        deleted_partially(row, body)
+    });
+}
+
+/// The pinned bodies SolidWorks 2026 refuses as one operation (STC 10's
+/// and FTC 07's AP242 editions), deleted partially (plan 23.C), as
+/// [`the_refused_bodies_are_deleted_partially`]. Run after
+/// `scripts/fetch-corpus.sh`, by hand.
+#[test]
+#[ignore = "needs scripts/fetch-corpus.sh; hours: run by hand (plan 23.C, question 1245)"]
+fn pinned_refused_bodies_are_deleted_partially() {
+    each_row(&SOLIDWORKS_DELETES[2..], |row| {
+        let name = pinned_files()
+            .into_iter()
+            .find(|n| n.ends_with(row.0))
+            .unwrap_or_else(|| panic!("{} isn't pinned", row.0));
+        let (_, body) = pinned_bodies(&name)
+            .into_iter()
+            .find(|(r, _)| *r == row.1)
+            .unwrap_or_else(|| panic!("{name} #{}", row.1));
+        deleted_partially(row, &body)
+    });
+}

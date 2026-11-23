@@ -212,6 +212,7 @@ pub mod nurbs;
 pub mod nurbs_bytes;
 pub mod nurbs_race;
 pub mod offset_bytes;
+pub mod partial_deletes;
 pub mod pinned_faces;
 pub mod projection;
 pub mod race;
