@@ -636,3 +636,59 @@ fn documents_release_and_items_wait_for_theirs() {
     assert_eq!(listed["items"][0]["kind"], "document");
     assert_eq!(listed["items"][0]["item"], json!(doc));
 }
+
+#[test]
+fn diff_lists_documents() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    git(&root, &["init", "-q", "-b", "main"]);
+    ryuplm::server::init(&root, None).unwrap();
+    let spec = outside.path().join("spec.pdf");
+    std::fs::write(&spec, b"%PDF one").unwrap();
+    let add = |n: &str| Request::DocumentAdd {
+        file: spec.display().to_string(),
+        number: Some(n.into()),
+        next: None,
+        fields: ryuplm::documents::New {
+            title: Some("Spec".into()),
+            ..Default::default()
+        },
+        expected_revision: None,
+    };
+    ask(&root, add("DOC-1")).unwrap();
+    git(&root, &["add", "-A"]);
+    git(&root, &["commit", "-q", "-m", "a spec"]);
+    ask(
+        &root,
+        Request::DocumentEdit {
+            document: "DOC-1".into(),
+            fields: ryuplm::documents::New {
+                title: Some("New".into()),
+                ..Default::default()
+            },
+            unset: vec![],
+            expected_revision: None,
+        },
+    )
+    .unwrap();
+    let v = ask(
+        &root,
+        Request::Diff {
+            from: None,
+            to: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(v["documents"]["changed"][0]["number"], "DOC-1");
+    assert_eq!(
+        v["documents"]["changed"][0]["added"],
+        json!(["title = New"])
+    );
+    assert_eq!(
+        v["documents"]["changed"][0]["removed"],
+        json!(["title = Spec"])
+    );
+    assert_eq!(v["documents"]["added"], json!([]));
+    assert_eq!(v["changed"], json!([]), "items' keys are items'");
+}
