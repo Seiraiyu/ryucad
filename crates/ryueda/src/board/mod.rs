@@ -13,6 +13,7 @@ pub mod file;
 pub mod graphic;
 pub mod layout;
 pub mod load;
+pub mod measure;
 pub mod occ;
 pub mod opening;
 pub mod outline;
