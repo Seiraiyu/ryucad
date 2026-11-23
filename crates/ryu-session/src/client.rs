@@ -571,8 +571,7 @@ fn spawn<P: Serve>(root: &Path, endpoint: &Endpoint<P>, exe: &Path) -> Result<()
         cmd.args(["--idle-timeout", &secs]);
     }
     cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(log);
-    detach(&mut cmd);
-    cmd.spawn().map_err(unavailable)?;
+    spawn_detached(&mut cmd).map_err(unavailable)?;
     Ok(())
 }
 
@@ -594,26 +593,58 @@ pub fn command(exe: impl AsRef<std::ffi::OsStr>) -> Command {
     cmd
 }
 
-/// Out of the terminal's process group, so Ctrl-C on the CLI spares it:
-/// how daemons (and the app, from `open`) are started.
+/// Starts `cmd` detached ([`detach`]): how daemons and the apps, from
+/// `open`, are started. On Windows it breaks away from its starter's job,
+/// so a shell whose job is killed on close (Windows Terminal's tabs, some
+/// agents' shells) takes neither with it (#799); a job that refuses
+/// breakaway fails `CreateProcess` with access denied, and the process is
+/// then started inside it, as before.
+pub fn spawn_detached(cmd: &mut Command) -> std::io::Result<std::process::Child> {
+    detach(cmd);
+    match cmd.spawn() {
+        Err(e) if cfg!(windows) && e.raw_os_error() == Some(5) => {
+            detach_without_breakaway(cmd);
+            cmd.spawn()
+        }
+        other => other,
+    }
+}
+
+/// Out of the terminal's process group, so Ctrl-C on the CLI spares it.
 #[cfg(unix)]
 pub fn detach(cmd: &mut Command) {
     use std::os::unix::process::CommandExt;
     cmd.process_group(0);
 }
 
+/// [`detach`]: there is no job to break away from.
+#[cfg(unix)]
+pub fn detach_without_breakaway(cmd: &mut Command) {
+    detach(cmd);
+}
+
+/// [`detach_without_breakaway`], and out of its starter's job (#799).
+#[cfg(windows)]
+pub fn detach(cmd: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+    detach_without_breakaway(cmd);
+    cmd.creation_flags(DETACHED | CREATE_BREAKAWAY_FROM_JOB);
+}
+
+#[cfg(windows)]
+const DETACHED: u32 = 0x0000_0008 | 0x0000_0200; // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+
 /// No console, its own process group, and none of this process's handles:
 /// an inherited stdout pipe would keep whoever reads the CLI's output
 /// waiting until the daemon exits.
 #[cfg(windows)]
-pub fn detach(cmd: &mut Command) {
+pub fn detach_without_breakaway(cmd: &mut Command) {
     use std::os::windows::process::CommandExt;
     use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, SetHandleInformation};
     use windows_sys::Win32::System::Console::{
         GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
     };
-    const DETACHED_PROCESS: u32 = 0x0000_0008;
-    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
     for which in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
         // SAFETY: plain Win32 calls on this process's own standard handles.
         unsafe {
@@ -623,7 +654,7 @@ pub fn detach(cmd: &mut Command) {
             }
         }
     }
-    cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+    cmd.creation_flags(DETACHED);
 }
 
 /// The daemon's status, without starting one.
@@ -675,13 +706,34 @@ pub fn stop<P: Serve>(root: &Path) -> Result<Value> {
 }
 
 /// Stops every daemon this user has, of any version: the installers run
-/// this before replacing the binary.
+/// this before replacing the binary. `still_running` names the endpoints
+/// of those asked that hadn't gone after [`STOP_WAIT`], with their logs,
+/// so an installer can say so rather than report a clean stop (#1023).
 pub fn stop_all<P: Serve>() -> Result<Value> {
-    let stopped = Endpoint::<P>::all()?
-        .iter()
-        .filter(|e| stop_endpoint(e).0)
-        .count();
-    Ok(json!({ "stopped": stopped }))
+    stop_these(&Endpoint::<P>::all()?, stop_endpoint)
+}
+
+/// [`stop_all`] over `endpoints`, each stopped by `stop`.
+fn stop_these<P>(
+    endpoints: &[Endpoint<P>],
+    stop: impl Fn(&Endpoint<P>) -> (bool, bool),
+) -> Result<Value> {
+    let mut stopped = 0;
+    let mut still = Vec::new();
+    for e in endpoints {
+        let (asked, gone) = stop(e);
+        if asked {
+            stopped += 1;
+            if !gone {
+                still.push(json!({"address": e.address, "log": e.log}));
+            }
+        }
+    }
+    let mut v = json!({ "stopped": stopped });
+    if !still.is_empty() {
+        v["still_running"] = Value::Array(still);
+    }
+    Ok(v)
 }
 
 #[cfg(test)]
@@ -743,6 +795,34 @@ mod tests {
             exe: dir.join("no-such-binary"),
             version: Test::version(),
         }
+    }
+
+    /// #1023: a daemon asked to stop that outlives the wait is named,
+    /// with its log, not counted as a clean stop and forgotten.
+    #[test]
+    fn stop_all_names_a_daemon_that_didnt_go() {
+        let dir = tempfile::tempdir().unwrap();
+        let es: Vec<_> = ["gone", "stuck", "none"]
+            .iter()
+            .map(|n| endpoint_in(dir.path(), n))
+            .collect();
+        let v = stop_these(&es, |e| {
+            if e.log.ends_with("gone.log") {
+                (true, true)
+            } else if e.log.ends_with("stuck.log") {
+                (true, false)
+            } else {
+                (false, true)
+            }
+        })
+        .unwrap();
+        assert_eq!(v["stopped"], 2, "{v}");
+        let still = v["still_running"].as_array().unwrap();
+        assert_eq!(still.len(), 1, "{v}");
+        assert_eq!(still[0]["address"], es[1].address.as_str());
+        assert_eq!(still[0]["log"], json!(es[1].log));
+        let v = stop_these(&es[..1], |_| (true, true)).unwrap();
+        assert_eq!(v, json!({"stopped": 1}));
     }
 
     #[test]

@@ -58,12 +58,20 @@ fn loaded_block(root: &Path, dark: bool, block: &str) -> Harness<'static, App> {
 }
 
 fn looks_as_it_did(img: &image::RgbaImage, name: &str) {
+    if let Some(why) = differs(img, name) {
+        panic!("{why}");
+    }
+}
+
+/// Why `img` doesn't look as snapshot `name` did (its `.new.png` written
+/// beside it), or `None` when it does, isn't compared here, or was saved.
+fn differs(img: &image::RgbaImage, name: &str) -> Option<String> {
     let path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("tests/snapshots/{name}-lavapipe.png"));
     if std::env::var_os("UPDATE_SNAPSHOTS").is_some() {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         img.save(&path).unwrap();
-        return;
+        return None;
     }
     let (adapter, _, _) = ryueda_app::ui::smoke::headless().unwrap();
     let info = adapter.get_info();
@@ -77,7 +85,7 @@ fn looks_as_it_did(img: &image::RgbaImage, name: &str) {
             "{}: drawn, not compared (the picture is lavapipe's)",
             info.name
         );
-        return;
+        return None;
     }
     let want = image::open(&path)
         .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
@@ -89,13 +97,13 @@ fn looks_as_it_did(img: &image::RgbaImage, name: &str) {
         .filter(|(a, b)| a.0.iter().zip(b.0).any(|(x, y)| x.abs_diff(y) > CHANNEL))
         .count();
     let limit = (f64::from(img.width() * img.height()) * SHARE) as usize;
-    if differ > limit {
-        img.save(path.with_extension("new.png")).unwrap();
+    if differ <= limit {
+        return None;
     }
-    assert!(
-        differ <= limit,
+    img.save(path.with_extension("new.png")).unwrap();
+    Some(format!(
         "{differ} pixels differ (at most {limit}); see {name}-lavapipe.new.png"
-    );
+    ))
 }
 
 #[test]
@@ -188,6 +196,9 @@ fn a_compare_looks_as_it_did_in_both_themes() {
         return;
     }
     let root = breakout_in_git("snapshot-compare");
+    // Both themes compared before either fails, so a change draws both
+    // anew (`.new.png`, uploaded by CI) in one run.
+    let mut failed = Vec::new();
     for (dark, name) in [(false, "compare-light"), (true, "compare-dark")] {
         let mut h = loaded(&root, dark);
         agent(&root, "compare.set", json!({"rev": "HEAD"}));
@@ -206,9 +217,10 @@ fn a_compare_looks_as_it_did_in_both_themes() {
             h.step();
         }
         let img = h.render().unwrap();
-        looks_as_it_did(&img, name);
+        failed.extend(differs(&img, name));
         agent(&root, "compare.set", json!({"off": true}));
     }
+    assert!(failed.is_empty(), "{failed:#?}");
 }
 
 #[test]

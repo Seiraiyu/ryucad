@@ -63,10 +63,16 @@ fn design() -> BTreeMap<String, Vec<u8>> {
         put(&mut f, &format!("blocks/top/components/r{i}.json"), "ryueda.component",
             json!({"of": {"id": "r"}, "refdes": format!("R{}", i + 1), "pins": {"1": one, "2": two}}));
         if i > 0 {
-            put(&mut f, &format!("blocks/top/nets/n{i}.json"), "ryueda.net", json!({"name": format!("N{i}")}));
+            // N1 is a power net (ryueda 7.B): its class's rules apply.
+            let mut net = json!({"name": format!("N{i}")});
+            if i == 1 {
+                net["class"] = json!("power");
+            }
+            put(&mut f, &format!("blocks/top/nets/n{i}.json"), "ryueda.net", net);
         }
     }
     put(&mut f, "designs/d.json", "ryueda.design", json!({"name": "D", "root": "top"}));
+    put(&mut f, "classes/power.json", "ryueda.class", json!({"name": "Power"}));
     f
 }
 
@@ -135,6 +141,33 @@ fuzz_target!(|data: &[u8]| {
             if b.next() % 3 == 0 {
                 pl["side"] = json!("bottom");
             }
+            // Placement intent (ryueda 7.C): constraints, a group, field places.
+            let mut cs = Vec::new();
+            for _ in 0..b.next() % 3 {
+                cs.push(match b.next() % 4 {
+                    0 => json!({"near": format!("f:R{}/{}", b.next() % 6, 1 + b.next() % 2), "within_nm": b.length()}),
+                    1 => json!({"near": format!("R{}", b.next() % 6), "within_nm": b.length()}),
+                    2 => {
+                        let e = ["left", "right", "top", "bottom", "any"][b.next() % 5];
+                        json!({"edge": e, "within_nm": b.length()})
+                    },
+                    _ => {
+                        let side = ["top", "bottom"][b.next() % 2];
+                        json!({"side": side})
+                    },
+                });
+            }
+            if !cs.is_empty() {
+                pl["constraints"] = json!(cs);
+            }
+            if b.next() % 4 == 0 {
+                let g = ["g", "", "a/b", "power"][b.next() % 4];
+                pl["group"] = json!(g);
+            }
+            if b.next() % 4 == 0 {
+                pl["fields"] = json!({"reference": {"at": [b.coord(), b.coord()], "rotation_mdeg": b.next() as i64 * 1_000,
+                    "hidden": b.next() % 2 == 0, "size_nm": [b.length(), b.length()]}});
+            }
             put(&mut files, &format!("boards/f/placements/r{i}.json"), "ryueda.placement", pl);
         }
     }
@@ -161,6 +194,66 @@ fuzz_target!(|data: &[u8]| {
     for i in 0..b.next() % 3 {
         put(&mut files, &format!("boards/f/holes/h{i}.json"), "ryueda.hole", json!({"at": [b.coord(), b.coord()], "drill_nm": b.length()}));
     }
+    // The board's rules (ryueda 7.B): none, or defaults drawn around the
+    // preset's floor (under it too), a class that exists and one that
+    // doesn't, and up to two waivers with drawn IDs and limits.
+    if b.next() % 3 != 0 {
+        let around = |b: &mut Bytes| 100_000 + (b.next() as i64 - 128) * 1_000;
+        let mut rules = json!({"defaults": {}});
+        for key in ["clearance_nm", "track_width_nm", "edge_clearance_nm", "hole_clearance_nm"] {
+            if b.next() % 2 == 0 {
+                rules["defaults"][key] = json!(around(&mut b));
+            }
+        }
+        if b.next() % 2 == 0 {
+            rules["classes"]["power"] = json!({"track_width_nm": around(&mut b), "clearance_nm": around(&mut b)});
+        }
+        if b.next() % 4 == 0 {
+            rules["classes"]["ghost"] = json!({"clearance_nm": around(&mut b)});
+        }
+        const CODES: [&str; 4] = ["drc_clearance", "drc_track_width", "net_short", "net_open"];
+        for _ in 0..b.next() % 3 {
+            let id = format!("{:016x}", (b.next() as u64) << 8 | b.next() as u64);
+            let mut w = json!({"code": CODES[b.next() % CODES.len()], "refs": ["f:R1/1"], "reason": "fuzz", "by": "fuzz"});
+            if b.next() % 2 == 0 {
+                w["limit"] = json!(around(&mut b));
+            }
+            rules["waivers"][id] = w;
+        }
+        put(&mut files, "boards/f/rules.json", "ryueda.board-rules", rules);
+    }
+    // Keepouts and drawings (ryueda 7.C).
+    const KEEPS: [&str; 7] = ["copper", "tracks", "vias", "pads", "pours", "placements", "holes"];
+    for i in 0..b.next() % 3 {
+        let (x, y, w, h) = (b.coord(), b.coord(), b.length(), b.length());
+        let contour = if b.next() % 5 == 0 {
+            json!({"start": [x, y], "edges": [{"type": "line", "to": [x + w, y]}, {"type": "line", "to": [x + w, y + h]}]})
+        } else {
+            json!({"start": [x, y], "edges": [{"type": "line", "to": [x + w, y]}, {"type": "line", "to": [x + w, y + h]},
+                {"type": "line", "to": [x, y + h]}, {"type": "line", "to": [x, y]}]})
+        };
+        let layers: Vec<&str> = (0..1 + b.next() % 2)
+            .map(|_| if b.next() % 4 == 0 { "all" } else { LAYERS[b.next() % LAYERS.len()] })
+            .collect();
+        let keeps: Vec<&str> = (0..b.next() % 3).map(|_| KEEPS[b.next() % KEEPS.len()]).collect();
+        put(&mut files, &format!("boards/f/keepouts/k{i}.json"), "ryueda.keepout",
+            json!({"contour": contour, "layers": layers, "keeps": keeps}));
+    }
+    const DRAW_LAYERS: [&str; 8] = ["silk.top", "silk.bottom", "fab.top", "mask.bottom", "comments", "user.3", "copper.top", "edge"];
+    for i in 0..b.next() % 3 {
+        let layer = DRAW_LAYERS[b.next() % DRAW_LAYERS.len()];
+        let d = match b.next() % 4 {
+            0 => json!({"layer": layer, "type": "line", "start": [b.coord(), b.coord()], "end": [b.coord(), b.coord()], "width_nm": b.length()}),
+            1 => json!({"layer": layer, "type": "circle", "center": [b.coord(), b.coord()], "radius_nm": b.length(), "width_nm": b.length()}),
+            2 => json!({"layer": layer, "type": "rect", "start": [b.coord(), b.coord()], "end": [b.coord(), b.coord()], "width_nm": b.length(), "fill": b.next() % 2 == 0}),
+            _ => {
+                let text: String = (0..b.next() % 6).map(|_| char::from_u32(32 + (b.next() as u32 * 7) % 400).unwrap_or('?')).collect();
+                json!({"layer": layer, "type": "text", "text": text, "at": [b.coord(), b.coord()], "rotation_mdeg": b.next() as i64 * 1_409,
+                    "size_nm": [b.length(), b.length()], "thickness_nm": b.length()})
+            }
+        };
+        put(&mut files, &format!("boards/f/drawings/d{i}.json"), "ryueda.board-drawing", d);
+    }
     let p = load(&files);
     let _ = p.faults();
     let (one, eight) = pools();
@@ -183,7 +276,33 @@ fuzz_target!(|data: &[u8]| {
                             .ok()
                             .map(|(_, occs)| format!("{:?}", ryueda::board::assembly::rows(&occs, board)))
                     });
-                    Ok((serde_json::to_string(&c.findings).unwrap(), fab, rows))
+                    // The legaliser for the first part with a near or edge
+                    // constraint: a place or a typed refusal.
+                    let legal = board.board.item.as_ref().ok().and_then(|bf| {
+                        let (_, occs) = ryueda::board::occ::occurrences(&p, &bf.design).ok()?;
+                        let (o, pl) = occs.iter().find_map(|o| {
+                            let pl = board.placements.get(&o.reference)?.item.as_ref().ok()?;
+                            pl.constraints
+                                .iter()
+                                .any(|c| !matches!(c, ryueda::board::file::Constraint::Side { .. }))
+                                .then_some((o, pl))
+                        })?;
+                        let ask = ryueda::board::place::Ask {
+                            occ: o,
+                            rotation_mdeg: pl.rotation_mdeg,
+                            side: pl.side,
+                            constraints: &pl.constraints,
+                            now: Some(pl.at),
+                        };
+                        Some(match ryueda::board::place::legalise(board.id.as_str(), &c.shapes, &c.rules, &c.preset, &ask) {
+                            Ok(v) => v.to_string(),
+                            Err(e) => {
+                                assert_ne!(e.code, ryueda::error::Code::Internal, "{e:?}");
+                                format!("{:?}", e.code)
+                            }
+                        })
+                    });
+                    Ok((serde_json::to_string(&c.findings).unwrap(), fab, rows, legal))
                 }
                 Err(e) => Err(e.code),
             })

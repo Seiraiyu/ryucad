@@ -262,12 +262,79 @@ pub fn order(layout: &Layout) -> Vec<String> {
     list.into_iter().map(|(k, _)| k.clone()).collect()
 }
 
+/// Names the sheets this layout made `Sheet <k>` in canvas order, each
+/// the first `k` no other sheet's name has (#880). A sheet in `kept` (the
+/// previous layout's, by ID) or named in `given` (a `sheet`
+/// instruction's) keeps its name. IDs never change.
+pub fn name_new_in_order(layout: &mut Layout, kept: &BTreeSet<String>, given: &BTreeSet<String>) {
+    let new: Vec<String> = order(layout)
+        .into_iter()
+        .filter(|id| !kept.contains(id) && !given.contains(&layout.sheets[id].name))
+        .collect();
+    let mut taken: BTreeSet<String> = layout
+        .sheets
+        .iter()
+        .filter(|(id, _)| !new.contains(id))
+        .map(|(_, s)| s.name.clone())
+        .collect();
+    let mut k = 1u64;
+    for id in new {
+        let name = loop {
+            let x = format!("Sheet {k}");
+            k += 1;
+            if !taken.contains(&x) {
+                break x;
+            }
+        };
+        taken.insert(name.clone());
+        layout.sheets.get_mut(&id).expect("listed").name = name;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::input::{Net, Part};
     use crate::layout::{Placed, Sheet};
     use crate::testing;
+
+    #[test]
+    fn new_sheets_are_named_in_canvas_order() {
+        let mut l = Layout::default();
+        // s2 sits on the top row; s1 then s3 below, left to right.
+        for (id, at) in [
+            ("s1", [0, 0]),
+            ("s2", [0, 300_000_000]),
+            ("s3", [300_000_000, 0]),
+        ] {
+            l.sheets
+                .insert(id.into(), Sheet::new(format!("Sheet {}", &id[1..]), at));
+        }
+        assert_eq!(order(&l), ["s2", "s1", "s3"]);
+        name_new_in_order(&mut l, &BTreeSet::new(), &BTreeSet::new());
+        let names: Vec<&str> = order(&l)
+            .iter()
+            .map(|id| l.sheets[id].name.as_str())
+            .collect();
+        assert_eq!(names, ["Sheet 1", "Sheet 2", "Sheet 3"]);
+        // A kept sheet keeps its name, and the new ones take the rest.
+        let mut k = l.clone();
+        k.sheets.get_mut("s1").unwrap().name = "Power".into();
+        k.sheets.get_mut("s3").unwrap().name = "Sheet 9".into();
+        let kept: BTreeSet<String> = ["s1".to_owned()].into();
+        name_new_in_order(&mut k, &kept, &BTreeSet::new());
+        assert_eq!(k.sheets["s1"].name, "Power");
+        assert_eq!(k.sheets["s2"].name, "Sheet 1");
+        assert_eq!(k.sheets["s3"].name, "Sheet 2");
+        // A sheet an instruction named keeps its name.
+        let mut g = l.clone();
+        g.sheets.get_mut("s2").unwrap().name = "Analog".into();
+        let given: BTreeSet<String> = ["Analog".to_owned()].into();
+        name_new_in_order(&mut g, &BTreeSet::new(), &given);
+        assert_eq!(g.sheets["s2"].name, "Analog");
+        assert_eq!(g.sheets["s1"].name, "Sheet 1");
+        assert_eq!(g.sheets["s3"].name, "Sheet 2");
+    }
 
     fn sheet(l: &mut Layout, id: &str) {
         l.sheets.insert(id.into(), Sheet::new(id.into(), [0, 0]));

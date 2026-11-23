@@ -56,14 +56,19 @@ pub fn project_file(rel: &str) -> bool {
             crate::conn::CLASSES,
             library::DIR,
             crate::pdm::PROPERTIES,
+            crate::board::preset::PRESETS,
         ]
         .contains(d),
-        [d, _, f] if *d == crate::board::BOARDS => *f == crate::board::BOARD_FILE,
+        [d, _, f] if *d == crate::board::BOARDS => {
+            *f == crate::board::BOARD_FILE || *f == crate::board::RULES_FILE
+        }
         [d, _, p, _] if *d == crate::board::BOARDS => [
             crate::board::PLACEMENTS,
             crate::board::TRACKS,
             crate::board::VIAS,
             crate::board::HOLES,
+            crate::board::file::KEEPOUTS,
+            crate::board::file::DRAWINGS,
         ]
         .contains(p),
         [d, _, _] => *d == crate::conn::BLOCKS || *d == library::DIR || *d == crate::pdm::RELEASES,
@@ -244,6 +249,8 @@ pub(crate) mod tests {
             "boards/b/vias/v1.json",
             "boards/b/holes/h1.json",
             "boards/b/placements/r1.json",
+            "boards/b/rules.json",
+            "presets/acme-2l.json",
         ] {
             assert!(super::project_file(f), "{f}");
         }
@@ -381,6 +388,8 @@ pub(crate) mod tests {
             "library/models/r.step",
             "boards/b/board.json",
             "boards/b/placements/s1.u1.json",
+            "boards/b/keepouts/k1.json",
+            "boards/b/drawings/d1.json",
         ] {
             assert!(project_file(f), "{f}");
         }

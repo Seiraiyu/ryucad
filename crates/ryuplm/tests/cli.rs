@@ -156,6 +156,8 @@ fn version_names_ryuplm() {
     for k in ["ryuplm", "commit", "target", "protocol"] {
         assert!(v["result"].get(k).is_some(), "{k}");
     }
+    // The shape of the answers other tools read (design 938): asked once.
+    assert_eq!(v["result"]["schema_outputs"], 1, "{v}");
     let bad = Command::cargo_bin("ryuplm")
         .unwrap()
         .arg("no-such-command")
@@ -272,6 +274,8 @@ fn every_protocol_method_has_a_command() {
         ("bom.get", &["bom", "show"]),
         ("bom.diff", &["bom", "diff"]),
         ("bom.where_used", &["where-used"]),
+        ("reps.list", &["reps"]),
+        ("index", &["index"]),
         ("import.guess", &["import", "guess"]),
         ("import.check", &["import", "check"]),
         ("import.run", &["import", "run"]),
@@ -287,6 +291,7 @@ fn every_protocol_method_has_a_command() {
         ("release.check", &["release", "check"]),
         ("release.sync", &["release", "sync"]),
         ("diff", &["diff"]),
+        ("resolve", &["resolve"]),
         ("activity.log", &["history"]),
         ("undo", &["undo"]),
         ("redo", &["redo"]),
@@ -569,4 +574,163 @@ fn a_history_imports_and_shows_from_the_cli() {
     let l = shown(&["release", "list", "100-0001"]);
     assert_eq!(l["legacy"], s["legacy"]);
     assert_eq!(p.files(&p.direct), p.files(&p.daemon));
+}
+
+#[test]
+fn git_attributes_are_the_drivers_lines() {
+    // Outside any catalogue: the service asks before it has a checkout.
+    let dir = tempfile::tempdir().unwrap();
+    let out = Command::cargo_bin("ryuplm")
+        .unwrap()
+        .current_dir(dir.path())
+        .args(["git", "attributes"])
+        .output()
+        .unwrap();
+    let (code, v) = parse(out, dir.path());
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(v["result"]["schema"], 1);
+    assert_eq!(v["result"]["lines"], json!(ryuplm::drivers::LINES));
+    assert!(
+        v["result"]["lines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|l| l == "items/*/*.json merge=ryuplm diff=ryuplm text eol=lf")
+    );
+}
+
+/// `git` in `dir`, with an identity and no inherited repository.
+fn git(dir: &Path, args: &[&str]) {
+    let out = std::process::Command::new("git")
+        .current_dir(dir)
+        .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+        .args(args)
+        .env_remove("GIT_DIR")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+#[cfg_attr(
+    not(feature = "cad"),
+    ignore = "needs ryucad's lines: the `cad` feature"
+)]
+fn the_services_answers_from_the_cli() {
+    let p = Pair::project();
+    let pid = mech(&p);
+    for n in ["BOX-1", "SCREW-1", "GLUE-1"] {
+        p.ok(&["item", "create", n, "--name", n]);
+    }
+    p.ok(&["item", "link", "BOX-1", "ryucad", pid, "box"]);
+    p.ok(&["item", "link", "SCREW-1", "ryucad", pid, "screw"]);
+    let added = p.ok(&["bom", "add", "BOX-1", "GLUE-1", "0.5", "--unit", "kg"]);
+    let line = added["line"].as_str().unwrap().to_owned();
+    let box_id = p.ok(&["item", "show", "BOX-1"])["item"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // Every answer the service reads says its schema.
+    for args in [
+        vec!["info"],
+        vec!["item", "list"],
+        vec!["item", "show", "BOX-1"],
+        vec!["release", "list"],
+        vec!["bom", "show", "BOX-1"],
+        vec!["reps"],
+        vec!["check"],
+    ] {
+        assert_eq!(p.ok(&args)["schema"], 1, "{args:?}");
+    }
+    // A window, both ways.
+    let w = p.ok(&[
+        "item", "list", "--sort", "number", "--offset", "1", "--limit", "1",
+    ]);
+    assert_eq!(
+        (
+            w["total"].clone(),
+            w["count"].clone(),
+            w["items"][0]["number"].clone()
+        ),
+        (json!(3), json!(1), json!("GLUE-1"))
+    );
+    assert_eq!(p.ok(&["item", "list", "--text", "screw"])["total"], 1);
+    p.fails(&["item", "list", "--sort", "colour"], "invalid_param", 1);
+    // What it reaches.
+    let reps = p.ok(&["reps"]);
+    assert_eq!(
+        (
+            reps["projects"][0]["project"].clone(),
+            reps["projects"][0]["items"].clone()
+        ),
+        (json!(pid), json!(2))
+    );
+    // References.
+    let r = p.ok(&[
+        "resolve",
+        &format!("item/{box_id}"),
+        &format!("item/{box_id}/line/{line}"),
+        "item/zzzzzzzzzzzzf",
+    ]);
+    let standing: Vec<&str> = r["refs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["standing"].as_str().unwrap())
+        .collect();
+    assert_eq!(standing, ["here", "here", "gone"]);
+    p.fails(&["resolve", "sheet:1"], "invalid_param", 1);
+    // The index: the same bytes in process and through the daemon.
+    let mut texts = Vec::new();
+    for top in [&p.direct, &p.daemon] {
+        let (code, v) = p.run_in(top, &["index", "--out", "../index.jsonl"]);
+        assert_eq!(code, 0, "{v}");
+        assert_eq!(
+            (v["result"]["items"].clone(), v["result"]["lines"].clone()),
+            (json!(3), json!(2))
+        );
+        texts.push(fs::read_to_string(top.join("index.jsonl")).unwrap());
+    }
+    // `Pair::project` copies one manifest to both folders, so they match.
+    assert_eq!(texts[0], texts[1]);
+    let lines: Vec<Value> = texts[0]
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let boxed = lines.iter().find(|l| l["number"] == "BOX-1").unwrap();
+    let from: Vec<&str> = boxed["lines"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["from"].as_str().unwrap())
+        .collect();
+    assert_eq!(from, ["own", "ryucad"], "{boxed}");
+    assert_eq!(boxed["links"][0]["resolved"], true);
+    // check --against, in a repository of each folder's own. The two
+    // commits differ (their times do), so each way is read by itself.
+    for top in [&p.direct, &p.daemon] {
+        let root = top.join("p");
+        git(&root, &["init", "-q", "-b", "main"]);
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-q", "-m", "base"]);
+    }
+    p.ok(&["item", "create", "NEW-1"]);
+    for top in [&p.direct, &p.daemon] {
+        let (code, v) = p.run_in(top, &["check", "--against", "HEAD"]);
+        assert_eq!(code, 0, "{v}");
+        let a = &v["result"]["against"];
+        assert_eq!(a["items"]["added"][0]["number"], "NEW-1");
+        assert_eq!(a["rev"], "HEAD");
+        assert_eq!(a["commit"].as_str().unwrap().len(), 40);
+        let (code, v) = p.run_in(top, &["check", "--against", "no-such-rev"]);
+        assert_eq!(
+            (code, &v["error"]["code"]),
+            (1, &json!("rev_not_found")),
+            "{v}"
+        );
+    }
 }

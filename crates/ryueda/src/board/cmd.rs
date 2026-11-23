@@ -110,11 +110,23 @@ pub fn create(
     rect: Option<&[String; 2]>,
     outline: Option<&Value>,
     layers: Option<u32>,
+    preset: Option<&str>,
     id: Option<&str>,
     expected: Option<&str>,
 ) -> Result<Value> {
     let p = session.project();
     check_revision("the project", &p.revision, expected)?;
+    let preset_name = preset.unwrap_or(&super::preset::DEFAULT.name).to_owned();
+    let chosen = super::preset::resolve(p, &preset_name).ok_or_else(|| {
+        Error::new(
+            Code::BoardPresetNotFound,
+            format!(
+                "there is no preset {preset_name}; presets are {}",
+                super::preset::names_in(p)
+            ),
+        )
+        .with("preset", &preset_name)
+    })?;
     let unit = p.manifest.default_unit;
     let design = crate::netlist::one_design(p, Some(design))?;
     if named_elsewhere(p, name, None) {
@@ -148,7 +160,7 @@ pub fn create(
     };
     let stackup = match layers {
         None | Some(2) => None,
-        Some(n) => Some(super::stackup::even(super::preset::DEFAULT, n as usize)?),
+        Some(n) => Some(super::stackup::even(&chosen, n as usize)?),
     };
     let id = new_id(id, "board", |s| {
         Id::parse(s, "board").is_ok_and(|i| p.boards.contains_key(&i))
@@ -156,7 +168,7 @@ pub fn create(
     let board = Board {
         name: name.to_owned(),
         design,
-        preset: super::preset::DEFAULT.name.into(),
+        preset: preset_name,
         outline,
         cutouts: Vec::new(),
         stackup,
@@ -316,13 +328,26 @@ pub fn drc(session: &mut Session, board: &str, codes: &[String]) -> Result<Value
         "findings": owned,
         "counts": counts(&owned),
         "errors": errors,
-        "warnings": owned.len() - errors,
+        "warnings": owned
+            .iter()
+            .filter(|f| f.severity == crate::fault::Severity::Warning)
+            .count(),
         "incomplete": c.incomplete,
     });
+    // ryueda 7.B: waived findings counted only when there are any, so
+    // boards without waivers answer as before.
+    let waived = owned.iter().filter(|f| f.waived.is_some()).count();
+    if waived > 0 {
+        v["waived"] = json!(waived);
+    }
     // ryueda 7.A's rules, shown for boards with a stackup of their own:
     // added to `rules` they would move every stage 5 answer.
     if board_of(&session.project().boards[&id]).is_ok_and(|f| f.stackup.is_some()) {
         v["layer_rules"] = c.preset.layer_rules_json();
+    }
+    // ryueda 7.B: the board's own rules, resolved, when it has them.
+    if session.project().boards[&id].rules.is_some() {
+        v["board_rules"] = c.rules.to_json();
     }
     if errors > 0 {
         return Err(Error::new(
@@ -331,6 +356,22 @@ pub fn drc(session: &mut Session, board: &str, codes: &[String]) -> Result<Value
         )
         .with("report", v));
     }
+    Ok(v)
+}
+
+/// `board.measure`: two items' exact distance on each copper layer they
+/// share, with the clearance the board's rules ask of them.
+pub fn measure(
+    session: &mut Session,
+    board: &str,
+    a: &str,
+    b: &str,
+    layer: Option<&str>,
+) -> Result<Value> {
+    let id = find(session.project(), board)?.id.clone();
+    let c = session.board_check(&id)?;
+    let mut v = super::measure::measure(&c.conn, &c.shapes, &c.rules, a, b, layer)?;
+    v["revision"] = json!(session.project().boards[&id].revision);
     Ok(v)
 }
 
@@ -357,7 +398,7 @@ pub fn status(session: &mut Session, board: &str) -> Result<Value> {
         .iter()
         .filter(|f| f.code == Code::BoardUnplaced)
         .count();
-    Ok(json!({
+    let mut v = json!({
         "board": format!("board/{id}"),
         "revision": b.revision,
         "placed": b.placements.len(),
@@ -367,7 +408,11 @@ pub fn status(session: &mut Session, board: &str) -> Result<Value> {
         "errors": c.errors(),
         "warnings": c.warnings(),
         "incomplete": c.incomplete,
-    }))
+    });
+    if c.waived() > 0 {
+        v["waived"] = json!(c.waived());
+    }
+    Ok(v)
 }
 
 pub fn list(p: &Project) -> Value {
@@ -404,44 +449,146 @@ fn rotation(v: Option<&Value>) -> Result<i64> {
     }
 }
 
-/// One part placed from flags: its reference, `at`, rotation and side.
-pub type PlaceOne<'a> = (&'a str, &'a [String; 2], Option<&'a str>, Option<&'a str>);
+fn length(a: &Value, k: &str, unit: Unit) -> Result<Option<i64>> {
+    a.get(k)
+        .filter(|v| !v.is_null())
+        .map(|v| coord::nm(v, unit))
+        .transpose()
+}
 
-/// `board place`: one part, or several all or nothing.
+fn flag(a: &Value, k: &str) -> bool {
+    a.get(k).and_then(Value::as_bool).unwrap_or(false)
+}
+
+fn given<'a>(a: &'a Value, k: &str) -> Option<&'a Value> {
+    a.get(k).filter(|v| !v.is_null())
+}
+
+fn side_of(text: Option<&str>) -> Result<PlacementSide> {
+    match text {
+        None | Some("top") => Ok(PlacementSide::Top),
+        Some("bottom") => Ok(PlacementSide::Bottom),
+        Some(x) => Err(Error::new(
+            Code::InvalidParam,
+            format!("--side is top or bottom, not {x}"),
+        )
+        .with("param", "side")),
+    }
+}
+
+fn edge_side(text: &str) -> Result<EdgeSide> {
+    serde_json::from_value(json!(text)).map_err(|_| {
+        Error::new(
+            Code::InvalidParam,
+            format!("--edge is left, right, top, bottom or any, not {text}"),
+        )
+        .with("param", "edge")
+    })
+}
+
+/// One constraint from a request: `within` a length.
+fn constraint_of(v: &Value, unit: Unit) -> Result<Constraint> {
+    let within = || {
+        length(v, "within", unit)?.ok_or_else(|| {
+            Error::new(Code::InvalidParam, "--near and --edge need --within")
+                .with("param", "within")
+        })
+    };
+    if let Some(n) = v.get("near").and_then(Value::as_str) {
+        Ok(Constraint::Near {
+            near: n.to_owned(),
+            within_nm: within()?,
+        })
+    } else if let Some(e) = v.get("edge").and_then(Value::as_str) {
+        Ok(Constraint::Edge {
+            edge: edge_side(e)?,
+            within_nm: within()?,
+        })
+    } else if let Some(s) = v.get("side").and_then(Value::as_str) {
+        Ok(Constraint::Side {
+            side: side_of(Some(s))?,
+        })
+    } else {
+        Err(Error::new(
+            Code::InvalidParam,
+            "a constraint is {near, within}, {edge, within} or {side}",
+        )
+        .with("param", "constraints"))
+    }
+}
+
+/// A field's place from a request: `{at?, rotation?, hidden?, size?}`.
+fn field_of(v: &Value, unit: Unit) -> Result<FieldPlace> {
+    Ok(FieldPlace {
+        at: given(v, "at").map(|x| coord::point(x, unit)).transpose()?,
+        rotation_mdeg: given(v, "rotation")
+            .map(|x| rotation(Some(x)))
+            .transpose()?,
+        hidden: v.get("hidden").and_then(Value::as_bool),
+        size_nm: given(v, "size")
+            .map(|x| coord::point(x, unit))
+            .transpose()?,
+    })
+}
+
+/// A placement as answers print it: what stage 5 printed, and the side,
+/// constraints, group and field places only when set.
+pub fn placement_json(pl: &Placement) -> Value {
+    let mut v = json!({"at": pl.at, "rotation_mdeg": pl.rotation_mdeg});
+    if !pl.side.is_top() {
+        v["side"] = json!(pl.side.name());
+    }
+    if !pl.constraints.is_empty() {
+        v["constraints"] = json!(pl.constraints);
+    }
+    if let Some(g) = &pl.group {
+        v["group"] = json!(g);
+    }
+    if !pl.fields.is_empty() {
+        v["fields"] = json!(pl.fields);
+    }
+    v
+}
+
+/// `board place`: one part, or several all or nothing. A placed part
+/// keeps its constraints, group and field places unless the ask changes
+/// them, and its side unless the ask moves it (`at`: top unless `side`
+/// says bottom); without `at` it is placed by the legaliser when the ask gives a
+/// near or edge constraint, else it stays where it is. Parts placed by
+/// one request don't see each other's new places: place such parts in
+/// turn.
 pub fn place(
     session: &mut Session,
     board: &str,
-    one: Option<PlaceOne>,
-    ops: Option<&Value>,
+    asks: Vec<Value>,
     expected: Option<&str>,
 ) -> Result<Value> {
+    let id = {
+        let b = find(session.project(), board)?;
+        check_revision(&format!("board {}", b.id), &b.revision, expected)?;
+        b.id.clone()
+    };
+    // The board as it is, for the legaliser.
+    let check = session.board_check(&id).ok();
     let p = session.project();
     let unit = p.manifest.default_unit;
-    let b = find(p, board)?;
-    check_revision(&format!("board {}", b.id), &b.revision, expected)?;
-    let id = b.id.clone();
+    let b = &p.boards[&id];
     let design = board_of(b)?.design.clone();
-    let asks: Vec<Value> = match (one, ops) {
-        (Some((r, at, rot, side)), None) => {
-            vec![json!({"ref": r, "at": at, "rotation": rot, "side": side})]
-        }
-        (None, Some(Value::Array(list))) if !list.is_empty() => list.clone(),
-        _ => {
-            return Err(Error::new(
-                Code::InvalidParam,
-                "give REF --at X,Y, or --ops with a list of {ref, at: [x, y], rotation?}",
-            ));
-        }
-    };
+    if asks.is_empty() {
+        return Err(Error::new(
+            Code::InvalidParam,
+            "give REF with --at, --near or --edge, or --ops with a list of {ref, at?, …}",
+        ));
+    }
     let (_, occs) = occ::occurrences(p, &design)?;
     let mut w = Writes::default();
     let mut placed = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
     for (i, a) in asks.iter().enumerate() {
-        let r = a.get("ref").and_then(Value::as_str).ok_or_else(|| {
+        let r_text = a.get("ref").and_then(Value::as_str).ok_or_else(|| {
             Error::new(Code::InvalidParam, format!("op {i} needs a ref")).with("op", i)
         })?;
-        let o = occ::resolve(&occs, &design, r)?;
+        let o = occ::resolve(&occs, &design, r_text)?;
         if o.footprint_ref.is_none() {
             return Err(Error::new(
                 Code::InvalidParam,
@@ -450,47 +597,140 @@ pub fn place(
                     o.reference
                 ),
             )
-            .with("ref", r));
+            .with("ref", r_text));
         }
         if !seen.insert(o.reference.clone()) {
             return Err(Error::new(
                 Code::InvalidParam,
                 format!("{} is placed twice in one request", o.reference),
             )
-            .with("ref", r));
+            .with("ref", r_text));
         }
-        let at = a.get("at").ok_or_else(|| {
-            Error::new(Code::InvalidParam, format!("op {i} needs at")).with("op", i)
-        })?;
-        let placement = Placement {
-            at: coord::point(at, unit)?,
-            rotation_mdeg: rotation(a.get("rotation"))?,
-            side: match a.get("side").and_then(Value::as_str) {
-                None | Some("top") => PlacementSide::Top,
-                Some("bottom") => PlacementSide::Bottom,
-                Some(x) => {
-                    return Err(Error::new(
-                        Code::InvalidParam,
-                        format!("--side is top or bottom, not {x}"),
-                    )
-                    .with("param", "side"));
-                }
-            },
+        let had = b
+            .placements
+            .get(&o.reference)
+            .and_then(|l| l.item.as_ref().ok())
+            .cloned();
+        let mut pl = had.clone().unwrap_or_default();
+        if let Some(r) = given(a, "rotation") {
+            pl.rotation_mdeg = rotation(Some(r))?;
+        }
+        // A move (`at`) is to the top unless it says otherwise, as stage 5
+        // placed parts; a request without `at` keeps the part's side.
+        if given(a, "side").is_some() || given(a, "at").is_some() {
+            pl.side = side_of(a.get("side").and_then(Value::as_str))?;
+        }
+        // Constraints: any given replace the list.
+        let mut asked: Vec<Constraint> = match given(a, "constraints") {
+            Some(Value::Array(l)) => l
+                .iter()
+                .map(|c| constraint_of(c, unit))
+                .collect::<Result<_>>()?,
+            Some(_) => {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    "constraints is a list of {near, within}, {edge, within} or {side}",
+                )
+                .with("param", "constraints"));
+            }
+            None => Vec::new(),
         };
-        w.put(
-            placement_path(&id, &o.reference),
-            &placement,
-            PLACEMENT_KIND,
-        );
-        let mut entry = json!({
-            "occurrence": o.reference,
-            "refdes": o.refdes,
-            "at": placement.at,
-            "rotation_mdeg": placement.rotation_mdeg,
-        });
-        // Stage 5's answers don't move: a top part says no side.
-        if !placement.side.is_top() {
-            entry["side"] = json!(placement.side.name());
+        if let Some(n) = given(a, "near") {
+            asked.push(constraint_of(
+                &json!({"near": n, "within": a.get("within")}),
+                unit,
+            )?);
+        }
+        if let Some(e) = given(a, "edge") {
+            asked.push(constraint_of(
+                &json!({"edge": e, "within": a.get("within")}),
+                unit,
+            )?);
+        }
+        if flag(a, "hold_side") {
+            asked.push(Constraint::Side { side: pl.side });
+        }
+        let constrained = !asked.is_empty();
+        if constrained {
+            pl.constraints = asked;
+        }
+        if flag(a, "unconstrain") {
+            pl.constraints.clear();
+        }
+        if let Some(g) = a.get("group").and_then(Value::as_str) {
+            pl.group = Some(g.to_owned());
+        }
+        if flag(a, "ungroup") {
+            pl.group = None;
+        }
+        if let Some(f) = given(a, "fields") {
+            if let Some(v) = given(f, "reference") {
+                pl.fields.reference = Some(field_of(v, unit)?);
+            }
+            if let Some(v) = given(f, "value") {
+                pl.fields.value = Some(field_of(v, unit)?);
+            }
+        }
+        {
+            let r = pl.fields.reference.get_or_insert_with(FieldPlace::default);
+            if let Some(at) = given(a, "ref_at") {
+                r.at = Some(coord::point(at, unit)?);
+            }
+            if let Some(rot) = given(a, "ref_rotation") {
+                r.rotation_mdeg = Some(rotation(Some(rot))?);
+            }
+            if flag(a, "ref_hide") {
+                r.hidden = Some(true);
+            }
+            if flag(a, "ref_show") {
+                r.hidden = Some(false);
+            }
+            if *r == FieldPlace::default() {
+                pl.fields.reference = None;
+            }
+        }
+        // Where: asked, else found, else kept.
+        let mut legalised = None;
+        if let Some(at) = given(a, "at") {
+            pl.at = coord::point(at, unit)?;
+        } else if constrained
+            && pl
+                .constraints
+                .iter()
+                .any(|c| !matches!(c, Constraint::Side { .. }))
+        {
+            let c = check.as_ref().ok_or_else(|| {
+                Error::new(
+                    Code::InvalidParam,
+                    format!("board {id} doesn't check, so the legaliser can't run; give --at"),
+                )
+            })?;
+            let ask = super::place::Ask {
+                occ: o,
+                rotation_mdeg: pl.rotation_mdeg,
+                side: pl.side,
+                constraints: &pl.constraints,
+                now: had.as_ref().map(|h| h.at),
+            };
+            let found = super::place::legalise(id.as_str(), &c.shapes, &c.rules, &c.preset, &ask)?;
+            pl.at = coord::point(&found["at"], unit)?;
+            legalised = Some(json!({"searched_nm": found["searched_nm"], "tried": found["tried"]}));
+        } else if had.is_none() {
+            return Err(Error::new(
+                Code::InvalidParam,
+                format!(
+                    "{} isn't placed: give --at, or --near or --edge with --within",
+                    o.reference
+                ),
+            )
+            .with("ref", r_text));
+        }
+        w.put(placement_path(&id, &o.reference), &pl, PLACEMENT_KIND);
+        let mut entry = placement_json(&pl);
+        entry["occurrence"] = json!(o.reference);
+        entry["refdes"] = json!(o.refdes);
+        if let Some(l) = legalised {
+            entry["legalised"] = l;
         }
         placed.push(entry);
     }
@@ -577,13 +817,7 @@ pub fn show(p: &Project, board: &str, pads: bool) -> Result<Value> {
                         "value": o.value,
                         "footprint": o.footprint_ref,
                         "dnp": o.dnp,
-                        "placement": placement.map(|pl| {
-                            let mut v = json!({"at": pl.at, "rotation_mdeg": pl.rotation_mdeg});
-                            if !pl.side.is_top() {
-                                v["side"] = json!(pl.side.name());
-                            }
-                            v
-                        }),
+                        "placement": placement.map(placement_json),
                     })
                 })
                 .collect();

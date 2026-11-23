@@ -827,6 +827,11 @@ impl Workspace {
     }
 
     fn fail(&mut self, e: Error) {
+        // While a revision is drawn, a part it lacks is no failure: an
+        // added part, swapped to the revision (#1021).
+        if self.comparing.blink.draws_rev() && model::absent_at(&e).is_some() {
+            return;
+        }
         let now = Instant::now();
         // A cancel the window asked for isn't a failure to dwell on.
         if e.code == Code::Cancelled {

@@ -50,6 +50,40 @@ fn erc(b: divan::Bencher) {
     b.bench(|| ryueda::erc::check_netlist(&p, &n));
 }
 
+/// The BOM of the generated design (#976): its lines from a flattened
+/// netlist, `bom.get` whole through a session, warm, and its JSON.
+#[divan::bench]
+fn bom_lines(b: divan::Bencher) {
+    let p = Project::load(board()).unwrap();
+    let n = ryueda::netlist::flatten(&p, &design()).unwrap();
+    let all: Vec<&ryueda::netlist::Occurrence> = n.occurrences.iter().collect();
+    b.bench(|| ryueda::pdm::bom::lines_of(&p, &all, 1));
+}
+
+fn bom_ask() -> ryueda::pdm::bom::Ask<'static> {
+    ryueda::pdm::bom::Ask {
+        design: None,
+        rev: None,
+        format: None,
+        build: false,
+        by_block: false,
+    }
+}
+
+#[divan::bench]
+fn bom_get(b: divan::Bencher) {
+    let mut s = ryueda::session::Session::open(board()).unwrap();
+    let ask = bom_ask();
+    b.bench_local(|| ryueda::pdm::bom::get(&mut s, &ask).unwrap());
+}
+
+#[divan::bench]
+fn bom_json(b: divan::Bencher) {
+    let mut s = ryueda::session::Session::open(board()).unwrap();
+    let v = ryueda::pdm::bom::get(&mut s, &bom_ask()).unwrap();
+    b.bench(|| serde_json::to_string(&v).unwrap());
+}
+
 fn kicad_data() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/kicad")
 }

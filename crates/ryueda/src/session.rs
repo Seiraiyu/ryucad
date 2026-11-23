@@ -62,7 +62,14 @@ pub struct Session {
     /// The last [`BOARDS`] boards' checks, by the same keys as their
     /// shapes, most recently used first.
     pub(crate) checks: Vec<(String, std::sync::Arc<crate::board::drc::BoardCheck>)>,
+    /// The last [`NETLISTS`] designs flattened from the working files,
+    /// most recently used first: dropped whenever the project is read
+    /// again ([`Session::set_project`]).
+    netlists: Vec<(crate::id::Id, std::sync::Arc<crate::netlist::Netlist>)>,
 }
+
+/// How many designs' working netlists a session keeps (#976).
+pub const NETLISTS: usize = 4;
 
 /// How many boards' shapes a session keeps.
 const BOARDS: usize = 4;
@@ -158,6 +165,7 @@ impl Session {
             fetched: None,
             boards: Vec::new(),
             checks: Vec::new(),
+            netlists: Vec::new(),
         })
     }
 
@@ -314,17 +322,41 @@ impl Session {
         &self.project
     }
 
+    /// Design `design`'s netlist as the working files have it, flattened
+    /// once per reading of the project (#976).
+    pub fn netlist(
+        &mut self,
+        design: &crate::id::Id,
+    ) -> Result<std::sync::Arc<crate::netlist::Netlist>> {
+        if let Some(i) = self.netlists.iter().position(|(d, _)| d == design) {
+            let hit = self.netlists.remove(i);
+            let n = hit.1.clone();
+            self.netlists.insert(0, hit);
+            return Ok(n);
+        }
+        let n = std::sync::Arc::new(crate::netlist::flatten(&self.project, design)?);
+        self.netlists.insert(0, (design.clone(), n.clone()));
+        self.netlists.truncate(NETLISTS);
+        Ok(n)
+    }
+
+    /// The project read again: what was derived from the old one goes.
+    fn set_project(&mut self, project: Project) {
+        self.project = project;
+        self.netlists.clear();
+    }
+
     /// Brings the session up to date with the files, returning those that
     /// changed (relative, with `/`) and how.
     pub fn refresh_changes(&mut self) -> Result<Vec<(String, &'static str)>> {
         let changes = self.stamps.scan(&self.root, listed(&self.root))?;
         if !changes.is_empty() {
-            self.project = load(&self.root, &self.stamps, &*self.pins)?;
+            self.set_project(load(&self.root, &self.stamps, &*self.pins)?);
             self.pins_key = pins_key(&self.root, &self.project.manifest);
         } else {
             let key = pins_key(&self.root, &self.project.manifest);
             if key != self.pins_key {
-                self.project = load(&self.root, &self.stamps, &*self.pins)?;
+                self.set_project(load(&self.root, &self.stamps, &*self.pins)?);
                 self.pins_key = key;
             }
         }
@@ -334,7 +366,7 @@ impl Session {
     /// Reads the project again over the same files: what resolves its
     /// pins may have changed (a fetch into the dependency cache).
     pub(crate) fn reload_pins(&mut self) -> Result<()> {
-        self.project = load(&self.root, &self.stamps, &*self.pins)?;
+        self.set_project(load(&self.root, &self.stamps, &*self.pins)?);
         self.pins_key = pins_key(&self.root, &self.project.manifest);
         Ok(())
     }
@@ -350,9 +382,9 @@ impl Session {
     pub fn adopt(&mut self, project: Project, written: &[String]) -> Result<()> {
         let changes = self.stamps.scan(&self.root, listed(&self.root))?;
         if changes.iter().all(|(p, _)| written.contains(p)) {
-            self.project = project;
+            self.set_project(project);
         } else {
-            self.project = load(&self.root, &self.stamps, &*self.pins)?;
+            self.set_project(load(&self.root, &self.stamps, &*self.pins)?);
         }
         self.pins_key = pins_key(&self.root, &self.project.manifest);
         Ok(())
@@ -409,6 +441,24 @@ pub fn current(root: &Path) -> Result<Files> {
 mod tests {
 
     #[test]
+    fn a_designs_netlist_is_kept_until_the_project_is_read_again() {
+        let (dir, p) = crate::netlist::tests::project(&[]);
+        let design = crate::netlist::one_design(&p, None).unwrap();
+        let root = dir.path().join("board");
+        let mut s = Session::open(&root).unwrap();
+        let a = s.netlist(&design).unwrap();
+        let b = s.netlist(&design).unwrap();
+        assert!(std::sync::Arc::ptr_eq(&a, &b), "flattened once");
+        s.reload_pins().unwrap();
+        let c = s.netlist(&design).unwrap();
+        assert!(
+            !std::sync::Arc::ptr_eq(&a, &c),
+            "flattened again once the project is read again"
+        );
+        assert_eq!(a.occurrences.len(), c.occurrences.len());
+    }
+
+    #[test]
     fn a_boards_check_is_kept_until_a_revision_moves() {
         let (dir, p) = crate::netlist::tests::project(&[]);
         let design = crate::netlist::one_design(&p, None).unwrap().to_string();
@@ -419,6 +469,7 @@ mod tests {
             "B",
             &design,
             Some(&["30".into(), "20".into()]),
+            None,
             None,
             None,
             Some("b"),

@@ -7,29 +7,44 @@ use super::sets::faces_of;
 use crate::name::{Event, Journal, Name, OpKey};
 use crate::topo::{Body, FaceId};
 use crate::tweak::engine::Changes;
-use crate::tweak::retrim::retrim;
+use crate::tweak::retrim::retrim_gap;
 use crate::work::Meter;
 use crate::{Error, TweakError};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// `body` with `deleted` grown over. A walk still reaching a working
-/// face's side with the region at its largest is `GapNotHealed`: nothing
-/// within reach closes the gap (a slab's side between parallel planes).
+/// `body` with `deleted` grown over, within the gap's budget (design
+/// 919, plan 23.B): [`grow_within`] at `GAP`.
 pub(crate) fn grow(
     key: OpKey,
     body: &Body,
     deleted: &BTreeSet<FaceId>,
     m: &Meter,
 ) -> Result<(Body, Journal), Error> {
+    grow_within(key, body, deleted, crate::work::Scope::Gap.limit(), m)
+}
+
+/// `body` with `deleted` grown over, the set's whole ladder within a gap
+/// of `units` ([`retrim_gap`]). A walk still reaching a working face's
+/// side with the region at its largest is `GapNotHealed`: nothing within
+/// reach closes the gap (a slab's side between parallel planes). Past the
+/// gap the last finished rung's cause answers, or `Uncertain` at the
+/// set's least face.
+pub(crate) fn grow_within(
+    key: OpKey,
+    body: &Body,
+    deleted: &BTreeSet<FaceId>,
+    units: u64,
+    m: &Meter,
+) -> Result<(Body, Journal), Error> {
     let changes = Changes {
         deleted: deleted.clone(),
         ..Changes::default()
     };
-    let (out, j) = retrim(key, body, &changes, m).map_err(|e| match e {
-        Error::InvalidTweak(TweakError::RegionTooSmall { .. }) => TweakError::GapNotHealed {
-            face: least(body, deleted),
+    let least = least(body, deleted);
+    let (out, j) = retrim_gap(key, body, &changes, least, units, m).map_err(|e| match e {
+        Error::InvalidTweak(TweakError::RegionTooSmall { .. }) => {
+            { TweakError::GapNotHealed { face: least } }.into()
         }
-        .into(),
         e => e,
     })?;
     let j = replaced(body, &out, deleted, &j);

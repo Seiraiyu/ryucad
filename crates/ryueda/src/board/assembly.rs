@@ -79,8 +79,8 @@ pub fn rows(occs: &[Occ], b: &BoardFiles) -> (Vec<Row>, Vec<Value>) {
             }),
         }
     }
-    rows.sort_by_key(|r| designator_key(&r.designator));
-    left.sort_by_key(|l| designator_key(&l.0));
+    rows.sort_by_cached_key(|r| designator_key(&r.designator));
+    left.sort_by_cached_key(|l| designator_key(&l.0));
     (rows, left.into_iter().map(|(_, v)| v).collect())
 }
 
@@ -135,7 +135,10 @@ pub fn pos_csv(rows: &[Row]) -> String {
 /// The pick and place file in the preset's assembly form.
 pub fn pos_form(rows: &[Row], f: &AssemblyForm) -> String {
     let mut out = String::new();
-    csv_line(&mut out, &f.pos.map(str::to_owned));
+    csv_line(
+        &mut out,
+        &f.pos.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
+    );
     for r in rows {
         csv_line(
             &mut out,
@@ -143,7 +146,7 @@ pub fn pos_form(rows: &[Row], f: &AssemblyForm) -> String {
                 r.designator.clone(),
                 format!("{}{}", mm(r.at[0]), f.length_suffix),
                 format!("{}{}", mm(r.at[1]), f.length_suffix),
-                if r.bottom { f.bottom } else { f.top }.to_owned(),
+                if r.bottom { &f.bottom } else { &f.top }.to_string(),
                 degrees(r.rotation_mdeg),
             ],
         );
@@ -175,7 +178,10 @@ pub fn sku(offers: &str, supplier: &str) -> String {
 pub fn bom_form(lines: &[Line], f: &AssemblyForm) -> String {
     let col = |l: &Line, c: &str| l.columns.get(c).cloned().unwrap_or_default();
     let mut out = String::new();
-    csv_line(&mut out, &f.bom.map(str::to_owned));
+    csv_line(
+        &mut out,
+        &f.bom.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
+    );
     for l in lines {
         let refdes = col(l, "refdes");
         if refdes.is_empty() {
@@ -187,7 +193,7 @@ pub fn bom_form(lines: &[Line], f: &AssemblyForm) -> String {
                 col(l, "value"),
                 refdes,
                 col(l, "footprint"),
-                sku(&col(l, "offers"), f.supplier),
+                sku(&col(l, "offers"), &f.supplier),
             ],
         );
     }
@@ -227,7 +233,7 @@ mod tests {
              R10,10k,R_0402,0.0,-2.5,45.5,top\n\
              R11,10k,R_0402,2.0,-2.5,90,bottom\n"
         );
-        let f = JLC_2L.assembly.unwrap();
+        let f = JLC_2L.assembly.clone().unwrap();
         let text = pos_form(&rows, &f);
         let head = f.pos.join(",");
         assert!(text.starts_with(&format!("{head}\n")), "{text}");
@@ -251,7 +257,7 @@ mod tests {
 
     #[test]
     fn the_form_bom_takes_the_suppliers_part_number() {
-        let f = JLC_2L.assembly.unwrap();
+        let f = JLC_2L.assembly.clone().unwrap();
         let mut cols = std::collections::BTreeMap::new();
         cols.insert("value".to_owned(), "10k".to_owned());
         cols.insert("refdes".to_owned(), "R1,R2".to_owned());
@@ -290,7 +296,7 @@ mod tests {
         let with_footprint = occs.iter().filter(|o| o.footprint.is_some()).count();
         assert_eq!(rows.len() + left.len(), with_footprint, "{left:?}");
         let mut sorted = rows.clone();
-        sorted.sort_by_key(|r| designator_key(&r.designator));
+        sorted.sort_by_cached_key(|r| designator_key(&r.designator));
         assert_eq!(rows, sorted);
     }
 }

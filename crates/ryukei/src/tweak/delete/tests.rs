@@ -268,8 +268,9 @@ fn a_bosss_side_and_top_are_one_feature_capped_by_the_plate() {
     assert!((volume(&o) - 0.2).abs() < 1e-9);
 }
 
-#[test]
-fn a_fillet_grows_back_to_its_sharp_edge() {
+/// The test block with its edge between top and front rounded 0.1,
+/// and the fillet's face.
+fn filleted_block() -> (Body, FaceId) {
     let (b, _) = primitive::block(K, 1.0, 0.6, 0.4, &Rigid::IDENTITY).unwrap();
     let top = Name::derive(
         K,
@@ -304,6 +305,23 @@ fn a_fillet_grows_back_to_its_sharp_edge() {
     let EntityId::Face(f) = r.by_name(fillet).unwrap() else {
         panic!()
     };
+    (r, f)
+}
+
+#[test]
+fn a_fillet_grows_back_to_its_sharp_edge() {
+    let top = Name::derive(
+        K,
+        crate::name::Role::Face(crate::name::FaceRole::PlusZ),
+        &[],
+    );
+    let front = Name::derive(
+        K,
+        crate::name::Role::Face(crate::name::FaceRole::MinusY),
+        &[],
+    );
+    let (r, f) = filleted_block();
+    let fillet = r.faces[f].name;
     // unmetered: a unit test.
     let m = Meter::free();
     let (o, j) = grow::grow(D, &r, &BTreeSet::from([f]), &m).unwrap();
@@ -354,4 +372,70 @@ fn deleting_a_whole_body_or_a_slabs_side_heals_nothing() {
         delete_faces(D, &b, &spec(vec![side], Heal::Auto)).unwrap_err(),
         TweakError::GapNotHealed { face: side }.into()
     );
+}
+
+/// Design 919, plan 23.B: a set's whole ladder under one gap. A slab's
+/// side (nothing within reach closes it: every rung's walk fails) spends
+/// `all` units refusing `GapNotHealed`. Given `all`, or a unit less (the
+/// gap spent in its last rung), it answers the last finished rung's
+/// cause, `GapNotHealed` at the side. Given one unit, no rung finishes:
+/// `Uncertain` at the side, its set's least face. The same units and
+/// answers on 1, 2 and 8 threads.
+#[test]
+fn a_set_past_its_gap_refuses_with_its_last_finished_rungs_cause() {
+    use crate::name::{FaceRole, Role};
+    let (b, _) = primitive::block(K, 1.0, 0.6, 0.4, &Rigid::IDENTITY).unwrap();
+    let name = Name::derive(K, Role::Face(FaceRole::PlusX), &[]);
+    let side = b.faces().find(|&f| b.faces[f].name == name).unwrap();
+    let deleted = BTreeSet::from([side]);
+    let run = |units: u64, threads: usize| {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        pool.install(|| {
+            let w = Work::unlimited();
+            let m = Meter::new(&w);
+            let r = grow::grow_within(D, &b, &deleted, units, &m).map(|_| ());
+            (r, m.spent())
+        })
+    };
+    let (r, all) = run(u64::MAX, 1);
+    assert_eq!(
+        r.unwrap_err(),
+        TweakError::GapNotHealed { face: name }.into()
+    );
+    for threads in [1, 2, 8] {
+        assert_eq!(run(u64::MAX, threads).1, all, "{threads} threads");
+        for units in [all, all - 1] {
+            let (r, _) = run(units, threads);
+            assert_eq!(
+                r.unwrap_err(),
+                TweakError::GapNotHealed { face: name }.into(),
+                "{units} units, {threads} threads"
+            );
+        }
+        let (r, spent) = run(1, threads);
+        assert_eq!(r.unwrap_err(), TweakError::Uncertain { at: name }.into());
+        assert!(spent < all, "{spent} of {all}");
+    }
+}
+
+/// Plan 23.B: a set that builds spends what it did. A fillet grown back
+/// to its sharp edge under `GAP`: the same body, journal and units as
+/// with no gap.
+#[test]
+fn a_set_that_builds_spends_what_it_did_under_its_gap() {
+    let (b, fillet) = filleted_block();
+    let deleted = BTreeSet::from([fillet]);
+    let w = Work::unlimited();
+    let m = Meter::new(&w);
+    let (o, j) = grow::grow_within(D, &b, &deleted, u64::MAX, &m).unwrap();
+    let free = m.spent();
+    let w = Work::unlimited();
+    let m = Meter::new(&w);
+    let (o2, j2) = grow::grow(D, &b, &deleted, &m).unwrap();
+    assert_eq!(o.dump(), o2.dump());
+    assert_eq!(j.events(), j2.events());
+    assert_eq!(m.spent(), free);
 }

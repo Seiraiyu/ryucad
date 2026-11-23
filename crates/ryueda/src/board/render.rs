@@ -17,7 +17,7 @@ pub const BACKGROUND: [u8; 3] = [16, 20, 24];
 const MARGIN_NM: i64 = 1_000_000;
 
 /// Every layer `board render` knows.
-pub const LAYERS: [&str; 14] = [
+pub const LAYERS: [&str; 15] = [
     "copper.top",
     "copper.bottom",
     "mask.top",
@@ -30,6 +30,7 @@ pub const LAYERS: [&str; 14] = [
     "fab.bottom",
     "courtyard.top",
     "courtyard.bottom",
+    "keepout",
     "drill",
     "outline",
 ];
@@ -62,6 +63,7 @@ pub fn ink(layer: &str) -> Ink {
         "silk.top" | "silk.bottom" => paint([235, 235, 235], 240),
         "fab.top" | "fab.bottom" => paint([170, 110, 210], 160),
         "courtyard.top" | "courtyard.bottom" => paint([230, 90, 200], 160),
+        "keepout" => paint([220, 60, 60], 90),
         "drill" => Ink::Cut,
         "outline" => paint([240, 200, 40], 255),
         l if l.starts_with("copper.in") => {
@@ -92,7 +94,7 @@ pub fn default_layers(bottom: bool) -> Vec<String> {
     ]
 }
 
-fn hole_shape(h: &ryu_copper::layout::HoleShape) -> Shape {
+pub(crate) fn hole_shape(h: &ryu_copper::layout::HoleShape) -> Shape {
     use ryu_copper::layout::HoleShape as H;
     let region = match h {
         H::Round { at, d } => ryu_board::shape::circle(*at, ryu_board::geom::half(*d))
@@ -153,7 +155,13 @@ pub fn render(board: &str, s: &BoardShapes, ask: &Ask) -> Result<(Value, &'stati
     } else {
         ask.layers.to_vec()
     };
-    let known = self::layers(s.n());
+    // Every layer render knows, and any other a drawing is on.
+    let mut known = self::layers(s.n());
+    for l in s.layers.keys() {
+        if !known.contains(l) {
+            known.push(l.clone());
+        }
+    }
     if let Some(bad) = layers.iter().find(|l| !known.contains(l)) {
         return Err(Error::new(
             Code::InvalidParam,
@@ -186,6 +194,7 @@ pub fn render(board: &str, s: &BoardShapes, ask: &Ask) -> Result<(Value, &'stati
         let shapes: Vec<&Shape> = match l.as_str() {
             "drill" => holes.iter().collect(),
             "outline" => vec![&outline],
+            "keepout" => s.keepouts.iter().map(|k| &k.shape).collect(),
             other => s
                 .layers
                 .get(other)
@@ -292,6 +301,51 @@ mod tests {
         assert_eq!(e.code, Code::InvalidParam);
         assert!(e.message.contains("copper.in2"), "{}", e.message);
         assert_eq!(layers(2), LAYERS.map(str::to_owned).to_vec());
+    }
+
+    #[test]
+    fn keepouts_and_documentation_layers_render() {
+        use crate::board::testing::{MM, board, rect};
+        let mut s = board(10 * MM, 5 * MM);
+        s.keepouts.push(crate::board::shapes::KeepoutInfo {
+            reference: "b:keepout/k1".into(),
+            part: None,
+            layers: vec![0],
+            keeps: vec![crate::footprint::Keep::Vias],
+            shape: rect(ryu_board::geom::Point::new(5 * MM, 2 * MM), 2 * MM, 2 * MM),
+        });
+        s.layers.entry("comments".into()).or_default().push((
+            "b:drawing/d1".into(),
+            rect(ryu_board::geom::Point::new(2 * MM, 2 * MM), MM, MM),
+        ));
+        let ask = |l: &str| {
+            let layers = vec![l.to_owned()];
+            render(
+                "b",
+                &s,
+                &Ask {
+                    layers: &layers,
+                    bottom: false,
+                    net: None,
+                    window: None,
+                    size: 200,
+                    svg: true,
+                },
+            )
+        };
+        for l in ["keepout", "comments"] {
+            let (_, _, svg) = ask(l).unwrap();
+            assert!(
+                String::from_utf8(svg).unwrap().contains("<path"),
+                "{l} is drawn"
+            );
+        }
+        assert_eq!(
+            ask("eco.1").unwrap_err().code,
+            Code::InvalidParam,
+            "a layer nothing uses is unknown"
+        );
+        assert!(layers(2).contains(&"keepout".to_owned()));
     }
 
     #[test]

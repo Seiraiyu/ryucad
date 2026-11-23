@@ -58,7 +58,17 @@ fn the_window_hears_what_agents_do() {
         _ => None,
     });
     assert_eq!(parts["parts"][0]["part"], "p");
-    assert!(woken.load(Ordering::SeqCst) >= 2);
+    // Each event is sent, then its wake called: the answer's wake can
+    // still be on its way when the test has taken the answer (#1016).
+    let t = std::time::Instant::now();
+    while woken.load(Ordering::SeqCst) < 2 {
+        assert!(
+            t.elapsed() < std::time::Duration::from_secs(10),
+            "woken {}",
+            woken.load(Ordering::SeqCst)
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
 }
 
 #[test]

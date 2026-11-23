@@ -25,6 +25,14 @@ pub const HOLES: &str = "holes";
 pub const TRACK_KIND: &str = "ryueda.track";
 pub const VIA_KIND: &str = "ryueda.via";
 pub const HOLE_KIND: &str = "ryueda.hole";
+/// A board's rules (design 924): `boards/<board>/rules.json`.
+pub const RULES_FILE: &str = "rules.json";
+pub const RULES_KIND: &str = "ryueda.board-rules";
+/// A board's keepouts and drawings (ryueda 7.C).
+pub const KEEPOUTS: &str = "keepouts";
+pub const KEEPOUT_KIND: &str = "ryueda.keepout";
+pub const DRAWINGS: &str = "drawings";
+pub const DRAWING_KIND: &str = "ryueda.board-drawing";
 
 /// A copper layer by its position in the stackup: the top, the `k`th
 /// inner layer from the top (1 or more), or the bottom.
@@ -203,7 +211,7 @@ pub enum Op {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Placement {
     pub at: Point,
@@ -212,6 +220,128 @@ pub struct Placement {
     /// The side the part sits on; written only for the bottom.
     #[serde(default, skip_serializing_if = "PlacementSide::is_top")]
     pub side: PlacementSide,
+    /// Promises judged on every check (ryueda 7.C); one merge atom.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub constraints: Vec<Constraint>,
+    /// A free name; members move together (`board group`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    /// The designator's and value's places, over the footprint's.
+    #[serde(default, skip_serializing_if = "PartFields::is_empty")]
+    pub fields: PartFields,
+}
+
+/// A placement's constraint: exactly one of `near`, `edge`, `side`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub enum Constraint {
+    /// The least distance between this part's pads' copper and a pad's or
+    /// part's is at most `within_nm`.
+    Near { near: String, within_nm: i64 },
+    /// The part's courtyard lies within `within_nm` of a side of the
+    /// outline's box, or of the outline anywhere (`any`).
+    Edge { edge: EdgeSide, within_nm: i64 },
+    /// The part stays on this side.
+    Side { side: PlacementSide },
+}
+
+impl<'de> Deserialize<'de> for Constraint {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Constraint, D::Error> {
+        use serde::de::Error as _;
+        let m = serde_json::Map::<String, serde_json::Value>::deserialize(d)?;
+        if let Some(k) = m
+            .keys()
+            .find(|k| !["near", "edge", "side", "within_nm"].contains(&k.as_str()))
+        {
+            return Err(D::Error::custom(format!("a constraint has no field {k}")));
+        }
+        let kinds = ["near", "edge", "side"]
+            .iter()
+            .filter(|k| m.contains_key(**k))
+            .count();
+        if kinds != 1 {
+            return Err(D::Error::custom(
+                "a constraint is one of near, edge or side",
+            ));
+        }
+        let within = || -> std::result::Result<i64, D::Error> {
+            m.get("within_nm")
+                .and_then(serde_json::Value::as_i64)
+                .ok_or_else(|| D::Error::custom("near and edge need within_nm"))
+        };
+        if let Some(n) = m.get("near") {
+            let near: String = serde_json::from_value(n.clone()).map_err(D::Error::custom)?;
+            Ok(Constraint::Near {
+                near,
+                within_nm: within()?,
+            })
+        } else if let Some(e) = m.get("edge") {
+            let edge: EdgeSide = serde_json::from_value(e.clone()).map_err(D::Error::custom)?;
+            Ok(Constraint::Edge {
+                edge,
+                within_nm: within()?,
+            })
+        } else if m.contains_key("within_nm") {
+            Err(D::Error::custom("a side constraint has no within_nm"))
+        } else {
+            let side: PlacementSide =
+                serde_json::from_value(m["side"].clone()).map_err(D::Error::custom)?;
+            Ok(Constraint::Side { side })
+        }
+    }
+}
+
+/// A side of the outline's box, or the outline anywhere.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EdgeSide {
+    Left,
+    Right,
+    Top,
+    Bottom,
+    Any,
+}
+
+impl EdgeSide {
+    pub fn name(self) -> &'static str {
+        match self {
+            EdgeSide::Left => "left",
+            EdgeSide::Right => "right",
+            EdgeSide::Top => "top",
+            EdgeSide::Bottom => "bottom",
+            EdgeSide::Any => "any",
+        }
+    }
+}
+
+/// The designator's and value's places on one part.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PartFields {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference: Option<FieldPlace>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<FieldPlace>,
+}
+
+impl PartFields {
+    pub fn is_empty(&self) -> bool {
+        self.reference.is_none() && self.value.is_none()
+    }
+}
+
+/// A field's place relative to the part; each key over the footprint's.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FieldPlace {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<Point>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation_mdeg: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_nm: Option<[i64; 2]>,
 }
 
 /// The side of the board a part sits on.
@@ -394,6 +524,7 @@ mod tests {
             at: [1, 2],
             rotation_mdeg: 0,
             side: PlacementSide::Top,
+            ..Placement::default()
         };
         assert_eq!(
             value(&top, PLACEMENT_KIND),
@@ -416,6 +547,51 @@ mod tests {
         )
         .unwrap();
         assert_eq!(old.side, PlacementSide::Top);
+    }
+
+    #[test]
+    fn constraints_groups_and_fields_are_format_2_and_round_trip() {
+        let v = json!({"kind": PLACEMENT_KIND, "format": 2, "at": [1, 2], "rotation_mdeg": 0,
+            "constraints": [{"near": "U1/7", "within_nm": 2_000_000},
+                            {"edge": "left", "within_nm": 500_000},
+                            {"side": "top"}],
+            "group": "power stage",
+            "fields": {"reference": {"at": [0, 1_500_000], "rotation_mdeg": 90_000}}});
+        let p: Placement = doc::from_value(v.clone(), "p.json", PLACEMENT_KIND, NEWEST).unwrap();
+        assert_eq!(p.constraints.len(), 3);
+        assert_eq!(
+            p.constraints[1],
+            Constraint::Edge {
+                edge: EdgeSide::Left,
+                within_nm: 500_000
+            }
+        );
+        assert_eq!(p.group.as_deref(), Some("power stage"));
+        assert_eq!(
+            p.fields.reference.as_ref().unwrap().at,
+            Some([0, 1_500_000])
+        );
+        assert_eq!(value(&p, PLACEMENT_KIND), v);
+        for one in [
+            json!({"group": "g"}),
+            json!({"fields": {"value": {"hidden": true}}}),
+            json!({"constraints": [{"side": "bottom"}]}),
+        ] {
+            let mut x = json!({"at": [0, 0], "rotation_mdeg": 0});
+            x.as_object_mut()
+                .unwrap()
+                .extend(one.as_object().unwrap().clone());
+            assert_eq!(crate::conn::format_of(PLACEMENT_KIND, &x), 2, "{one}");
+        }
+        // A constraint with two kinds, or an unknown key, is refused.
+        for bad in [
+            json!([{"near": "U1", "edge": "left", "within_nm": 1}]),
+            json!([{"near": "U1", "within": 1}]),
+            json!([{"side": "top", "within_nm": 1}]),
+        ] {
+            let v = json!({"kind": PLACEMENT_KIND, "format": 2, "at": [0, 0], "constraints": bad});
+            assert!(doc::from_value::<Placement>(v, "p.json", PLACEMENT_KIND, NEWEST).is_err());
+        }
     }
 
     #[test]

@@ -188,7 +188,6 @@ fn text_job(
         .or_else(|| row.text.find(": "))
         .unwrap_or(row.text.len());
     let mut job = LayoutJob::default();
-    let marked = ui.visuals().selection.bg_fill.gamma_multiply(0.6);
     // Pieces at the id's end and the match's ends.
     let mut cuts = vec![0, split, row.text.len()];
     if let Some((a, b)) = mark {
@@ -202,14 +201,12 @@ fn text_job(
             continue;
         }
         let in_mark = mark.is_some_and(|(x, y)| a >= x && b <= y);
+        let (color, background) =
+            mark_colours(in_mark, if a < split { colour } else { weak }, ui.visuals());
         let fmt = egui::TextFormat {
             font_id: font.clone(),
-            color: if a < split { colour } else { weak },
-            background: if in_mark {
-                marked
-            } else {
-                Color32::TRANSPARENT
-            },
+            color,
+            background,
             ..Default::default()
         };
         job.append(&row.text[a..b], 0.0, fmt);
@@ -707,5 +704,20 @@ pub fn tree(ui: &mut egui::Ui, ws: &mut Workspace, view: &mut View) {
     }
     if let Some((id, r)) = run {
         view.ran = Some((id, (!r.is_empty()).then_some(r)));
+    }
+}
+
+/// A row piece's text and background: a find match is the selection's
+/// fill with the selection's own text colour, which every look makes
+/// readable on it (#868); anything else keeps `colour` on nothing.
+pub(crate) fn mark_colours(
+    in_mark: bool,
+    colour: Color32,
+    visuals: &egui::Visuals,
+) -> (Color32, Color32) {
+    if in_mark {
+        (visuals.selection.stroke.color, visuals.selection.bg_fill)
+    } else {
+        (colour, Color32::TRANSPARENT)
     }
 }

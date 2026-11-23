@@ -7,7 +7,8 @@ use super::connect::{self, Connectivity};
 use super::layout::Key;
 use super::load::BoardFiles;
 use super::occ::{self, Occ};
-use super::preset::{self, Preset};
+use super::preset::{self, HoleKind, Preset};
+use super::rules::Rules;
 use super::shapes::BoardShapes;
 use crate::error::{Code, Result};
 use crate::fault::Severity;
@@ -36,11 +37,15 @@ pub struct Finding {
     pub message: String,
     #[serde(skip_serializing_if = "Value::is_null")]
     pub details: Value,
+    /// The waiver that waives it (`rules.json`'s), when it holds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub waived: Option<Value>,
 }
 
 impl Finding {
+    /// An error not waived.
     pub fn is_error(&self) -> bool {
-        self.severity == Severity::Error
+        self.severity == Severity::Error && self.waived.is_none()
     }
 }
 
@@ -80,6 +85,7 @@ pub fn finding(
         refs,
         message,
         details,
+        waived: None,
     }
 }
 
@@ -458,11 +464,17 @@ fn island_nets(c: &Connectivity) -> BTreeMap<IslandId<Key>, BTreeSet<String>> {
 }
 
 /// The closest gap between two items on a layer, and their references.
-type Closest = (ryu_copper::connect::Gap<Key>, String, String);
+type Closest = (
+    ryu_copper::connect::Gap<Key>,
+    String,
+    String,
+    super::rules::Resolved,
+    Verdict,
+);
 
 /// Copper of two islands closer than the rule on a layer, once per pair
 /// of items (their closest pieces); not two islands of one net alone.
-pub fn clearance(c: &Connectivity, preset: &Preset) -> Vec<Finding> {
+pub fn clearance(c: &Connectivity, rules: &Rules) -> Vec<Finding> {
     let board = c.built.board.as_str();
     let nets = island_nets(c);
     let one_net = |a: &IslandId<Key>, b: &IslandId<Key>| match (nets.get(a), nets.get(b)) {
@@ -473,9 +485,25 @@ pub fn clearance(c: &Connectivity, preset: &Preset) -> Vec<Finding> {
     // on both layers): the closest gap, with every layer it is under on.
     let mut best: BTreeMap<(String, String), Closest> = BTreeMap::new();
     let mut layers: BTreeMap<(String, String), BTreeSet<usize>> = BTreeMap::new();
+    let widest = rules.widest_clearance();
+    let nets_of = |id: &IslandId<Key>| -> Vec<&str> {
+        nets.get(id)
+            .map(|s| s.iter().map(String::as_str).collect())
+            .unwrap_or_default()
+    };
     for layer in 0..c.built.layout.layers.len() {
-        for g in c.copper.clearance(layer, preset.clearance_nm) {
+        for g in c.copper.clearance(layer, widest) {
             if one_net(&g.islands.0, &g.islands.1) {
+                continue;
+            }
+            // The pair's own clearance: the engine was asked the widest.
+            let need = rules.pair_clearance(&nets_of(&g.islands.0), &nets_of(&g.islands.1));
+            let verdict = if need.value == widest {
+                g.verdict
+            } else {
+                under(&g.distance, need.value)
+            };
+            if verdict == Verdict::No {
                 continue;
             }
             let (ra, rb) = (c.built.reference(&g.a.0), c.built.reference(&g.b.0));
@@ -486,16 +514,30 @@ pub fn clearance(c: &Connectivity, preset: &Preset) -> Vec<Finding> {
                 .get(&key)
                 .is_none_or(|(x, ..)| g.distance.nm < x.distance.nm)
             {
-                best.insert(key, (g, ra, rb));
+                best.insert(key, (g, ra, rb, need, verdict));
             }
         }
     }
     best.into_iter()
-        .map(|(key, (g, ra, rb))| {
+        .map(|(key, (g, ra, rb, need, verdict))| {
             let on: Vec<&str> = layers[&key]
                 .iter()
                 .map(|l| c.built.layer_name(*l))
                 .collect();
+            let mut details = json!({
+                "layer": c.built.layer_name(g.layer),
+                "layers": on,
+                "distance_nm": g.distance.nm,
+                "exact": g.distance.exact,
+                "bound_nm": g.distance.bound,
+                "uncertain": verdict == Verdict::Uncertain,
+                "a_at": [g.distance.a.x, g.distance.a.y],
+                "b_at": [g.distance.b.x, g.distance.b.y],
+                "rule_nm": need.value,
+            });
+            if rules.has_clearance_rules() {
+                details["rule"] = json!(need.source);
+            }
             finding(
                 Code::DrcClearance,
                 Severity::Error,
@@ -505,22 +547,30 @@ pub fn clearance(c: &Connectivity, preset: &Preset) -> Vec<Finding> {
                     "{ra} and {rb} are {} nm apart on {}, under the {} nm clearance",
                     g.distance.nm,
                     c.built.layer_name(g.layer),
-                    preset.clearance_nm
+                    need.value
                 ),
-                json!({
-                    "layer": c.built.layer_name(g.layer),
-                    "layers": on,
-                    "distance_nm": g.distance.nm,
-                    "exact": g.distance.exact,
-                    "bound_nm": g.distance.bound,
-                    "uncertain": g.verdict == Verdict::Uncertain,
-                    "a_at": [g.distance.a.x, g.distance.a.y],
-                    "b_at": [g.distance.b.x, g.distance.b.y],
-                    "rule_nm": preset.clearance_nm,
-                }),
+                details,
             )
         })
         .collect()
+}
+
+/// Whether a measured distance is under `rule`: exact distances compare
+/// directly, bounded ones by their bound either way, else uncertain.
+fn under(d: &ryu_copper::measure::Distance, rule: Nm) -> Verdict {
+    if d.exact {
+        if d.nm < rule {
+            Verdict::Yes
+        } else {
+            Verdict::No
+        }
+    } else if d.nm + d.bound < rule {
+        Verdict::Yes
+    } else if d.nm - d.bound >= rule {
+        Verdict::No
+    } else {
+        Verdict::Uncertain
+    }
 }
 
 /// Whether a track's copper and a pad's copper share an island.
@@ -610,22 +660,29 @@ pub fn mask_clearance(c: &Connectivity, s: &BoardShapes, preset: &Preset) -> Vec
 const FLAT: Nm = 10;
 
 /// Tracks narrower than the rule.
-pub fn widths(s: &BoardShapes, board: &str, preset: &Preset) -> Vec<Finding> {
+pub fn widths(s: &BoardShapes, board: &str, rules: &Rules) -> Vec<Finding> {
     s.tracks
         .iter()
-        .filter(|t| t.width_nm < preset.track_width_min_nm)
-        .map(|t| {
-            finding(
+        .filter_map(|t| {
+            let rule = rules.track_width_min(Some(&t.net));
+            if t.width_nm >= rule.value {
+                return None;
+            }
+            let mut details = json!({"width_nm": t.width_nm, "rule_nm": rule.value});
+            if rules.has_width_rules() {
+                details["rule"] = json!(rule.source);
+            }
+            Some(finding(
                 Code::DrcTrackWidth,
                 Severity::Error,
                 board,
                 vec![format!("{board}:track/{}", t.id)],
                 format!(
                     "track {} is {} nm wide, under the {} nm minimum",
-                    t.id, t.width_nm, preset.track_width_min_nm
+                    t.id, t.width_nm, rule.value
                 ),
-                json!({"width_nm": t.width_nm, "rule_nm": preset.track_width_min_nm}),
-            )
+                details,
+            ))
         })
         .collect()
 }
@@ -875,33 +932,37 @@ pub fn hole_spacing(s: &BoardShapes, board: &str, preset: &Preset) -> Vec<Findin
 
 /// Copper and holes closer to the outline or a cutout than the rule, or
 /// outside the board: once per item (pads and vias on both layers once).
-pub fn edges(c: &Connectivity, s: &BoardShapes, preset: &Preset) -> Vec<Finding> {
+pub fn edges(c: &Connectivity, s: &BoardShapes, rules: &Rules) -> Vec<Finding> {
     let board = c.built.board.as_str();
-    let rule = preset.edge_clearance_nm;
     let opts = BodyOptions::default();
     let edge = Body::of_shape(&s.edges, &opts);
     let inside = Body::of_shape(&s.outline, &opts);
     if edge.is_empty() {
         return Vec::new();
     }
-    let mut things: BTreeMap<String, Body> = BTreeMap::new();
-    for (k, _) in c.copper.items() {
+    // Each thing with its rule: its net's edge clearance (a hole's is the
+    // board's).
+    let mut things: BTreeMap<String, (Body, Nm)> = BTreeMap::new();
+    for (k, it) in c.copper.items() {
         if let Some(b) = c.copper.bodies().body(k) {
+            let rule = rules.edge_clearance(it.net.as_deref()).value;
             things
                 .entry(c.built.reference(k))
-                .or_insert_with(|| b.clone());
+                .or_insert_with(|| (b.clone(), rule));
         }
     }
+    let hole_rule = rules.edge_clearance(None).value;
     for h in &s.holes {
         // A through pad's drill shares its pad's reference: `#hole` keeps
         // the two findings' IDs apart.
         things
             .entry(format!("{}#hole", h.owner))
-            .or_insert_with(|| h.shape.body());
+            .or_insert_with(|| (h.shape.body(), hole_rule));
     }
     things
         .par_iter()
-        .filter_map(|(r, b)| {
+        .filter_map(|(r, (b, rule))| {
+            let rule = *rule;
             let v = measure::closer(b, &edge, rule);
             let outside = v == Verdict::No
                 && !b.solids.first().is_some_and(|x| measure::contains(&inside, x.probe()).is_yes());
@@ -927,7 +988,8 @@ pub fn edges(c: &Connectivity, s: &BoardShapes, preset: &Preset) -> Vec<Finding>
 }
 
 /// Courtyards touching, and courtyards judged by their box.
-pub fn courtyards(s: &BoardShapes, board: &str) -> Vec<Finding> {
+pub fn courtyards(s: &BoardShapes, board: &str, rules: &Rules) -> Vec<Finding> {
+    let gap = rules.courtyard_clearance().value;
     let opts = BodyOptions::default();
     let mut out: Vec<Finding> = s
         .courtyards
@@ -959,14 +1021,18 @@ pub fn courtyards(s: &BoardShapes, board: &str) -> Vec<Finding> {
         opts,
     );
     let found: Vec<Finding> = index
-        .pairs(0, 0)
+        .pairs(0, gap)
         .into_par_iter()
         .filter_map(|p| {
             // Courtyards only meet on one side.
             if s.courtyards[p.a].bottom != s.courtyards[p.b].bottom {
                 return None;
             }
-            let v = measure::touches(&bodies[p.a], &bodies[p.b]);
+            let v = if gap == 0 {
+                measure::touches(&bodies[p.a], &bodies[p.b])
+            } else {
+                measure::closer(&bodies[p.a], &bodies[p.b], gap)
+            };
             if v == Verdict::No {
                 return None;
             }
@@ -976,8 +1042,19 @@ pub fn courtyards(s: &BoardShapes, board: &str) -> Vec<Finding> {
                 Severity::Error,
                 board,
                 vec![a.owner.clone(), b.owner.clone()],
-                format!("{} and {}'s courtyards touch", a.owner, b.owner),
-                json!({"uncertain": v == Verdict::Uncertain}),
+                if gap == 0 {
+                    format!("{} and {}'s courtyards touch", a.owner, b.owner)
+                } else {
+                    format!(
+                        "{} and {}'s courtyards are closer than {gap} nm",
+                        a.owner, b.owner
+                    )
+                },
+                if gap == 0 {
+                    json!({"uncertain": v == Verdict::Uncertain})
+                } else {
+                    json!({"uncertain": v == Verdict::Uncertain, "rule_nm": gap})
+                },
             ))
         })
         .collect();
@@ -990,7 +1067,9 @@ pub fn courtyards(s: &BoardShapes, board: &str) -> Vec<Finding> {
 pub struct BoardCheck {
     pub shapes: Arc<BoardShapes>,
     pub conn: Connectivity,
-    pub preset: &'static Preset,
+    pub preset: Arc<Preset>,
+    /// The board's rules, resolved (design 924).
+    pub rules: Rules,
     pub findings: Vec<Finding>,
     pub incomplete: bool,
 }
@@ -1001,7 +1080,15 @@ impl BoardCheck {
     }
 
     pub fn warnings(&self) -> usize {
-        self.findings.len() - self.errors()
+        self.findings
+            .iter()
+            .filter(|f| f.severity == Severity::Warning)
+            .count()
+    }
+
+    /// Errors a waiver holds.
+    pub fn waived(&self) -> usize {
+        self.findings.iter().filter(|f| f.waived.is_some()).count()
     }
 }
 
@@ -1011,41 +1098,95 @@ impl BoardCheck {
 /// named and every layer listed. A hole's own pad or via is never a
 /// finding; nor, for a plated hole, is copper of the hole's own single
 /// net (two islands of one net: its `net_open`).
-pub fn hole_clearance(c: &Connectivity, s: &BoardShapes, preset: &Preset) -> Vec<Finding> {
+pub fn hole_clearance(c: &Connectivity, s: &BoardShapes, rules: &Rules) -> Vec<Finding> {
     let board = c.built.board.as_str();
+    let preset: &Preset = &rules.preset;
     let plated_pad = |occ: &str, pad: &str| {
         s.holes.iter().any(|h| {
             h.plated
                 && matches!(&h.of, super::shapes::HoleOf::Pad { occ: o, pad: p } if o == occ && p == pad)
         })
     };
-    let rule_of = |k: &Key| match k {
-        Key::ViaDrill(_) => preset.via_hole_clearance_nm,
-        Key::PadDrill { occ, pad } if plated_pad(occ, pad) => preset.pth_hole_clearance_nm,
-        _ => preset.npth_hole_clearance_nm,
+    let n = c.built.layout.layers.len();
+    // The rule of a hole on a layer: its kind's, inner or outer.
+    let rule_of = |k: &Key, layer: usize| {
+        let inner = layer != 0 && layer + 1 != n;
+        let kind = match k {
+            Key::ViaDrill(_) => HoleKind::Via,
+            Key::PadDrill { occ, pad } if plated_pad(occ, pad) => HoleKind::Pth,
+            _ => HoleKind::Npth,
+        };
+        preset.hole_clearance(kind, inner)
     };
     let own = |hole: &Key, item: &Key| match (hole, item) {
         (Key::ViaDrill(a), Key::Via(b, _)) => a == b,
         (Key::PadDrill { occ: a, pad: b }, Key::Pad { occ: x, pad: y, .. }) => a == x && b == y,
         _ => false,
     };
-    let mut rules = vec![
-        preset.via_hole_clearance_nm,
-        preset.pth_hole_clearance_nm,
-        preset.npth_hole_clearance_nm,
-    ];
-    rules.sort_unstable();
-    rules.dedup();
     let nets = island_nets(c);
-    type Best = (ryu_copper::connect::HoleGap<Key>, Nm);
+    type Best = (
+        ryu_copper::connect::HoleGap<Key>,
+        super::rules::Resolved,
+        Verdict,
+    );
     let mut best: BTreeMap<(String, String), Best> = BTreeMap::new();
     let mut layers: BTreeMap<(String, String), BTreeSet<usize>> = BTreeMap::new();
-    for layer in 0..c.built.layout.layers.len() {
-        // Each rule judged at its own distance: every gap the engine
-        // returns for `r` is under `r`, or uncertain.
-        for &r in &rules {
+    for layer in 0..n {
+        let inner = layer != 0 && layer + 1 != n;
+        let mut floors: Vec<Nm> = [HoleKind::Via, HoleKind::Pth, HoleKind::Npth]
+            .into_iter()
+            .map(|k| preset.hole_clearance(k, inner))
+            .collect();
+        floors.sort_unstable();
+        floors.dedup();
+        // With hole rules of the board's, the engine is asked the widest
+        // and each gap judged at its own need; without, each kind's rule at
+        // its own distance, as 7.A.
+        let ruled = rules.has_hole_rules();
+        let widest = if ruled {
+            let board_max = std::iter::once(&rules.file.defaults)
+                .chain(rules.file.classes.values())
+                .filter_map(|x| x.hole_clearance_nm)
+                .max()
+                .unwrap_or(0);
+            vec![floors.iter().copied().max().unwrap_or(0).max(board_max)]
+        } else {
+            floors.clone()
+        };
+        let net_rule = |id: &IslandId<Key>| -> Option<super::rules::Resolved> {
+            nets.get(id)?
+                .iter()
+                .filter_map(|n| rules.hole_clearance(Some(n)))
+                .max_by_key(|r| r.value)
+        };
+        for &r in &widest {
             for g in c.copper.hole_clearance(layer, r) {
-                if rule_of(&g.hole) != r || own(&g.hole, &g.piece.0) {
+                if own(&g.hole, &g.piece.0) {
+                    continue;
+                }
+                let floor = rule_of(&g.hole, layer);
+                if !ruled && floor != r {
+                    continue;
+                }
+                let mut need = super::rules::Resolved {
+                    value: floor,
+                    source: format!("preset:{}", preset.name),
+                };
+                if ruled {
+                    for x in [Some(&g.island), g.joined.as_ref()].into_iter().flatten() {
+                        if let Some(n) = net_rule(x)
+                            && n.value > need.value
+                        {
+                            need = n;
+                        }
+                    }
+                }
+                let verdict = if need.value == r {
+                    g.verdict
+                } else {
+                    under(&g.distance, need.value)
+                };
+                if verdict == Verdict::No {
                     continue;
                 }
                 if let Some(j) = &g.joined
@@ -1062,15 +1203,16 @@ pub fn hole_clearance(c: &Connectivity, s: &BoardShapes, preset: &Preset) -> Vec
                 layers.entry(key.clone()).or_default().insert(layer);
                 if best
                     .get(&key)
-                    .is_none_or(|(x, _)| g.distance.nm < x.distance.nm)
+                    .is_none_or(|(x, _, _)| g.distance.nm < x.distance.nm)
                 {
-                    best.insert(key, (g, r));
+                    best.insert(key, (g, need, verdict));
                 }
             }
         }
     }
     best.into_iter()
-        .map(|((hole, item), (g, rule))| {
+        .map(|((hole, item), (g, need, verdict))| {
+            let rule = need.value;
             let on: Vec<&str> = layers[&(hole.clone(), item.clone())]
                 .iter()
                 .map(|l| c.built.layer_name(*l))
@@ -1091,16 +1233,22 @@ pub fn hole_clearance(c: &Connectivity, s: &BoardShapes, preset: &Preset) -> Vec
                     g.distance.nm,
                     c.built.layer_name(g.layer)
                 ),
-                json!({
-                    "layer": c.built.layer_name(g.layer),
-                    "layers": on,
-                    "distance_nm": g.distance.nm,
-                    "exact": g.distance.exact,
-                    "bound_nm": g.distance.bound,
-                    "uncertain": g.verdict == Verdict::Uncertain,
-                    "plated": plated,
-                    "rule_nm": rule,
-                }),
+                {
+                    let mut d = json!({
+                        "layer": c.built.layer_name(g.layer),
+                        "layers": on,
+                        "distance_nm": g.distance.nm,
+                        "exact": g.distance.exact,
+                        "bound_nm": g.distance.bound,
+                        "uncertain": verdict == Verdict::Uncertain,
+                        "plated": plated,
+                        "rule_nm": rule,
+                    });
+                    if rules.has_hole_rules() {
+                        d["rule"] = json!(need.source);
+                    }
+                    d
+                },
             )
         })
         .collect()
@@ -1143,32 +1291,41 @@ struct Ctx<'a> {
     shapes: &'a BoardShapes,
     conn: &'a Connectivity,
     preset: &'a Preset,
+    rules: &'a Rules,
     incomplete: bool,
 }
 
 type Rule = fn(&Ctx) -> Vec<Finding>;
 
-const RULES: [Rule; 12] = [
+const RULES: [Rule; 14] = [
     |c| placements(c.board, c.files, c.occs, c.shapes),
     |c| copper(c.conn, c.incomplete),
-    |c| clearance(c.conn, c.preset),
+    |c| clearance(c.conn, c.rules),
     |c| mask_clearance(c.conn, c.shapes, c.preset),
-    |c| widths(c.shapes, c.board, c.preset),
+    |c| widths(c.shapes, c.board, c.rules),
     |c| drills(c.shapes, c.board, c.preset),
     |c| via_spans(c.shapes, c.board, c.preset),
     |c| rings(c.conn, c.shapes, c.preset),
     |c| hole_spacing(c.shapes, c.board, c.preset),
-    |c| hole_clearance(c.conn, c.shapes, c.preset),
-    |c| edges(c.conn, c.shapes, c.preset),
-    |c| courtyards(c.shapes, c.board),
+    |c| hole_clearance(c.conn, c.shapes, c.rules),
+    |c| edges(c.conn, c.shapes, c.rules),
+    |c| courtyards(c.shapes, c.board, c.rules),
+    |c| super::place::constraints(c.board, c.files, c.occs, c.shapes),
+    |c| super::keepout::check(c.shapes, c.board),
 ];
 
 /// A board checked from shapes already built. A design that doesn't
 /// flatten refuses with its faults.
 pub fn check_shapes(p: &Project, b: &BoardFiles, shapes: Arc<BoardShapes>) -> Result<BoardCheck> {
     let file = b.board.item.as_ref().map_err(Clone::clone)?;
-    let preset = preset::by_name(&file.preset).unwrap_or(preset::DEFAULT);
-    let (_, occs) = occ::occurrences(p, &file.design)?;
+    let preset =
+        preset::resolve(p, &file.preset).unwrap_or_else(|| Arc::new(preset::DEFAULT.clone()));
+    let (netlist, occs) = occ::occurrences(p, &file.design)?;
+    let rules = Rules::new(
+        preset.clone(),
+        b.rules.as_ref().and_then(|l| l.item.as_ref().ok()),
+        &netlist,
+    );
     let board = b.id.to_string();
     let conn = connect::connect(&board, &shapes);
     let incomplete = shapes
@@ -1181,16 +1338,21 @@ pub fn check_shapes(p: &Project, b: &BoardFiles, shapes: Arc<BoardShapes>) -> Re
         occs: &occs,
         shapes: &shapes,
         conn: &conn,
-        preset,
+        preset: &preset,
+        rules: &rules,
         incomplete,
     };
     let mut findings: Vec<Finding> = RULES.par_iter().flat_map_iter(|r| r(&ctx)).collect();
     sort(&mut findings);
-    let findings = unique(findings);
+    let mut findings = unique(findings);
+    let unused = super::rules::apply_waivers(&mut findings, &rules.file.waivers, &board);
+    findings.extend(unused);
+    sort(&mut findings);
     Ok(BoardCheck {
         shapes: shapes.clone(),
         conn,
         preset,
+        rules,
         findings,
         incomplete,
     })
@@ -1239,13 +1401,19 @@ pub fn section(p: &Project) -> Vec<Value> {
     p.boards
         .iter()
         .map(|(id, b)| match check(p, b) {
-            Ok(c) => json!({
-                "board": format!("board/{id}"),
-                "revision": b.revision,
-                "findings": c.findings,
-                "errors": c.errors(),
-                "warnings": c.warnings(),
-            }),
+            Ok(c) => {
+                let mut v = json!({
+                    "board": format!("board/{id}"),
+                    "revision": b.revision,
+                    "findings": c.findings,
+                    "errors": c.errors(),
+                    "warnings": c.warnings(),
+                });
+                if c.waived() > 0 {
+                    v["waived"] = json!(c.waived());
+                }
+                v
+            }
             Err(e) => json!({"board": format!("board/{id}"), "error": e}),
         })
         .collect()
@@ -1345,17 +1513,17 @@ mod tests {
         let mut s = board(20 * MM, 10 * MM);
         s.courtyard("u1", (5 * MM, 5 * MM), (4 * MM, 4 * MM), false)
             .courtyard("u2", (6 * MM, 5 * MM), (4 * MM, 4 * MM), false);
-        assert_eq!(courtyards(&s, "b").len(), 1);
+        assert_eq!(courtyards(&s, "b", &Rules::plain(P)).len(), 1);
         s.courtyards[1].bottom = true;
-        assert!(courtyards(&s, "b").is_empty());
+        assert!(courtyards(&s, "b", &Rules::plain(P)).is_empty());
         s.courtyards[0].bottom = true;
-        assert_eq!(courtyards(&s, "b").len(), 1);
+        assert_eq!(courtyards(&s, "b", &Rules::plain(P)).len(), 1);
     }
 
     #[test]
     fn copper_near_a_hole_it_isnt_joined_to() {
         let p = preset::JLC_2L;
-        let run = |s: &BoardShapes| hole_clearance(&connect::connect("b", s), s, &p);
+        let run = |s: &BoardShapes| hole_clearance(&connect::connect("b", s), s, &Rules::plain(&p));
         // A track of another net passing a via's barrel on an inner layer,
         // a nanometre inside the rule and exactly at it.
         for (gap, found) in [
@@ -1420,6 +1588,164 @@ mod tests {
             &[(2 * MM, 5 * MM), (10 * MM, 5 * MM)],
         );
         assert!(run(&s).is_empty(), "{:?}", run(&s));
+    }
+
+    #[test]
+    fn inner_layers_take_the_inner_pth_hole_clearance() {
+        // A through pad (1.1 mm, 1.0 mm drill) on four layers, and tracks of
+        // another net 290 µm from its wall on in1 and on top.
+        let at = (10 * MM, 5 * MM);
+        let y = at.1 + 500 * UM + 290 * UM + 125 * UM;
+        let mut s = board(20 * MM, 10 * MM);
+        s.through("j1", "1", at, 1100 * UM, 1000 * UM, Some("a"))
+            .layers(4);
+        s.track(
+            "ti",
+            "b",
+            CopperLayer::Inner(1),
+            250 * UM,
+            &[(2 * MM, y), (18 * MM, y)],
+        )
+        .track(
+            "tt",
+            "c",
+            CopperLayer::Top,
+            250 * UM,
+            &[(2 * MM, y), (18 * MM, y)],
+        );
+        let conn = connect::connect("b", &s);
+        let f = hole_clearance(&conn, &s, &Rules::plain(&preset::JLC_4L));
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(f[0].refs, ["b:j1/1#hole", "b:track/ti"]);
+        assert_eq!(f[0].details["rule_nm"], 300 * UM);
+        assert!(hole_clearance(&conn, &s, &Rules::plain(&preset::JLC_2L)).is_empty());
+    }
+
+    fn rules_with(f: super::super::rules::RulesFile, class_of: &[(&str, &str)]) -> Rules {
+        Rules::from_parts(
+            Arc::new(preset::JLC_2L),
+            Some(f),
+            class_of
+                .iter()
+                .map(|(n, c)| ((*n).to_owned(), crate::id::Id::parse(c, "class").unwrap()))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn a_class_clearance_judges_its_pairs_and_no_others() {
+        // Two pairs of tracks, each 150 µm apart edge to edge: a-b (b of
+        // class power, 200 µm) and c-d (no class: the preset's 100 µm).
+        let mut s = board(20 * MM, 10 * MM);
+        let y = |k: i64| 2 * MM + k * (250 * UM + 150 * UM);
+        s.track(
+            "ta",
+            "a",
+            CopperLayer::Top,
+            250 * UM,
+            &[(2 * MM, y(0)), (18 * MM, y(0))],
+        )
+        .track(
+            "tb",
+            "b",
+            CopperLayer::Top,
+            250 * UM,
+            &[(2 * MM, y(1)), (18 * MM, y(1))],
+        )
+        .track(
+            "tc",
+            "c",
+            CopperLayer::Top,
+            250 * UM,
+            &[(2 * MM, y(4)), (18 * MM, y(4))],
+        )
+        .track(
+            "td",
+            "d",
+            CopperLayer::Top,
+            250 * UM,
+            &[(2 * MM, y(5)), (18 * MM, y(5))],
+        );
+        let conn = connect::connect("b", &s);
+        let mut f = super::super::rules::RulesFile::default();
+        f.classes.insert(
+            crate::id::Id::parse("power", "class").unwrap(),
+            super::super::rules::RuleSet {
+                clearance_nm: Some(200 * UM),
+                ..Default::default()
+            },
+        );
+        let r = rules_with(f, &[("b", "power")]);
+        let got = clearance(&conn, &r);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].refs, ["b:track/ta", "b:track/tb"]);
+        assert_eq!(got[0].details["rule_nm"], 200 * UM);
+        assert_eq!(got[0].details["rule"], "class:power");
+        // Without rules: nothing (150 µm clears 100 µm), as stage 5.
+        let plain = rules_with(super::super::rules::RulesFile::default(), &[]);
+        assert!(clearance(&conn, &plain).is_empty());
+    }
+
+    #[test]
+    fn a_board_width_rule_and_a_courtyard_clearance() {
+        let mut s = board(20 * MM, 10 * MM);
+        s.track(
+            "t1",
+            "a",
+            CopperLayer::Top,
+            150 * UM,
+            &[(2 * MM, 2 * MM), (18 * MM, 2 * MM)],
+        )
+        .courtyard("u1", (5 * MM, 7 * MM), (2 * MM, 2 * MM), false)
+        .courtyard("u2", (7 * MM + 100 * UM, 7 * MM), (2 * MM, 2 * MM), false);
+        let mut f = super::super::rules::RulesFile::default();
+        f.defaults.track_width_nm = Some(200 * UM);
+        f.defaults.courtyard_clearance_nm = Some(150 * UM);
+        let r = rules_with(f, &[]);
+        let w = widths(&s, "b", &r);
+        assert_eq!(w.len(), 1);
+        assert_eq!(w[0].details["rule_nm"], 200 * UM);
+        let c = courtyards(&s, "b", &r);
+        assert_eq!(
+            c.iter()
+                .filter(|x| x.code == Code::DrcCourtyardOverlap)
+                .count(),
+            1,
+            "{c:?}"
+        );
+        // 100 µm apart and no rule: no overlap, as today.
+        assert!(
+            courtyards(
+                &s,
+                "b",
+                &rules_with(super::super::rules::RulesFile::default(), &[])
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_board_hole_clearance_raises_the_floor() {
+        // A via of a and a track of b 250 µm from its wall on in1.
+        let mut s = board(20 * MM, 10 * MM);
+        s.layers(4);
+        s.via("v1", "a", (10 * MM, 5 * MM), 300 * UM, 320 * UM);
+        let y = 5 * MM + 150 * UM + 250 * UM + 125 * UM;
+        s.track(
+            "t1",
+            "b",
+            CopperLayer::Inner(1),
+            250 * UM,
+            &[(2 * MM, y), (18 * MM, y)],
+        );
+        let conn = connect::connect("b", &s);
+        let mut f = super::super::rules::RulesFile::default();
+        f.defaults.hole_clearance_nm = Some(300 * UM);
+        let got = hole_clearance(&conn, &s, &rules_with(f, &[]));
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].details["rule_nm"], 300 * UM);
+        assert_eq!(got[0].details["rule"], "board");
+        assert!(hole_clearance(&conn, &s, &Rules::plain(&preset::JLC_2L)).is_empty());
     }
 
     #[test]
@@ -1539,7 +1865,8 @@ mod tests {
 
     #[test]
     fn clearance_fires_a_nanometre_under_the_rule() {
-        let at = |gap, net: &str| clearance(&connect::connect("b", &apart(gap, net)), P);
+        let at =
+            |gap, net: &str| clearance(&connect::connect("b", &apart(gap, net)), &Rules::plain(P));
         assert!(at(P.clearance_nm, "b").is_empty());
         let f = at(P.clearance_nm - 1, "b");
         assert_eq!(codes(&f), [Code::DrcClearance]);
@@ -1599,7 +1926,7 @@ mod tests {
                 width,
                 &[(2 * MM, 5 * MM), (8 * MM, 5 * MM)],
             );
-            widths(&s, "b", P)
+            widths(&s, "b", &Rules::plain(P))
         };
         assert!(w(P.track_width_min_nm).is_empty());
         assert_eq!(codes(&w(P.track_width_min_nm - 1)), [Code::DrcTrackWidth]);
@@ -1693,7 +2020,7 @@ mod tests {
         let at = |x| {
             let mut s = board(20 * MM, 10 * MM);
             s.smd("r1", "1", (x, 5 * MM), (600 * UM, 600 * UM), None);
-            edges(&connect::connect("b", &s), &s, P)
+            edges(&connect::connect("b", &s), &s, &Rules::plain(P))
         };
         assert!(at(300 * UM + P.edge_clearance_nm).is_empty());
         let f = at(300 * UM + P.edge_clearance_nm - 1);
@@ -1708,7 +2035,7 @@ mod tests {
             (500 * UM + P.edge_clearance_nm - 1, 5 * MM),
             1000 * UM,
         );
-        let f = edges(&connect::connect("b", &s), &s, P);
+        let f = edges(&connect::connect("b", &s), &s, &Rules::plain(P));
         assert_eq!(codes(&f), [Code::DrcEdgeClearance]);
         assert_eq!(f[0].refs, ["b:hole/h1#hole"]);
     }
@@ -1719,7 +2046,7 @@ mod tests {
             let mut s = board(20 * MM, 10 * MM);
             s.courtyard("r1", (5 * MM, 5 * MM), (2 * MM, MM), false)
                 .courtyard("r2", (7 * MM + gap, 5 * MM), (2 * MM, MM), false);
-            courtyards(&s, "b")
+            courtyards(&s, "b", &Rules::plain(P))
         };
         assert!(two(1).is_empty());
         let f = two(0);
@@ -1727,7 +2054,7 @@ mod tests {
         assert_eq!(f[0].refs, ["b:r1", "b:r2"]);
         let mut s = board(20 * MM, 10 * MM);
         s.courtyard("r1", (5 * MM, 5 * MM), (2 * MM, MM), true);
-        let f = courtyards(&s, "b");
+        let f = courtyards(&s, "b", &Rules::plain(P));
         assert_eq!(codes(&f), [Code::DrcCourtyardOpen]);
         assert_eq!(f[0].severity, Severity::Warning);
     }
@@ -1838,7 +2165,7 @@ mod tests {
         let x = 5 * MM + 850 * UM + 300 * UM + P.clearance_nm - UM;
         s.through("j1", "1", (5 * MM, 5 * MM), 1700 * UM, 1000 * UM, Some("a"))
             .via("v1", "b", (x, 5 * MM), 300 * UM, 600 * UM);
-        let f = clearance(&connect::connect("b", &s), P);
+        let f = clearance(&connect::connect("b", &s), &Rules::plain(P));
         assert_eq!(codes(&f), [Code::DrcClearance], "{f:?}");
         assert_eq!(
             f[0].details["layers"],

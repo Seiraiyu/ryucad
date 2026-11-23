@@ -106,6 +106,9 @@ impl Remote {
         let body = o.timeout.max(Duration::from_secs(60));
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .http_status_as_error(false)
+            // A host name's lookup too: unbounded, a resolver that can't
+            // answer took 4.7 s a request (#971).
+            .timeout_resolve(Some(o.timeout))
             .timeout_connect(Some(o.timeout))
             .timeout_recv_response(Some(o.timeout))
             .timeout_send_body(Some(body))

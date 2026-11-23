@@ -581,7 +581,34 @@ pub enum Request {
     },
     #[serde(rename = "design.list")]
     DesignList {},
-    /// A board for a design (design 732), with the `jlc-2l` preset.
+    #[serde(rename = "preset.list")]
+    PresetList {},
+    #[serde(rename = "preset.show")]
+    PresetShow { name: String },
+    /// A project preset copied from another (`presets/<name>.json`).
+    #[serde(rename = "preset.create")]
+    PresetCreate {
+        name: String,
+        from: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// `key=value` pairs set on a project preset.
+    #[serde(rename = "preset.edit")]
+    PresetEdit {
+        name: String,
+        set: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "preset.delete")]
+    PresetDelete {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// A board for a design (design 732), with the `jlc-2l` preset unless
+    /// another is named.
     #[serde(rename = "board.create")]
     BoardCreate {
         name: String,
@@ -596,6 +623,10 @@ pub enum Request {
         /// Copper layers: 2 (the default) or an even stackup of `n`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         layers: Option<u32>,
+        /// The fab preset: built in (`jlc-2l`, the default; `jlc-4l`) or
+        /// the project's own.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preset: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         id: Option<String>,
         /// The project's revision.
@@ -645,7 +676,40 @@ pub enum Request {
         /// `top` (the default) or `bottom`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         side: Option<String>,
-        /// `[{ref, at: [x, y], rotation?, side?}]`.
+        /// A pad or part to be within `within` of; the legaliser places
+        /// the part when `at` is absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        near: Option<String>,
+        /// left, right, top, bottom or any: a side of the outline to be
+        /// within `within` of.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        edge: Option<String>,
+        /// The constraint's distance, a length.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        within: Option<String>,
+        /// Add a constraint keeping the part on its side.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        hold_side: bool,
+        /// Remove every constraint.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        unconstrain: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        ungroup: bool,
+        /// The designator's place relative to the part, `[dx, dy]` lengths.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ref_at: Option<[String; 2]>,
+        /// The designator's rotation, degrees.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ref_rotation: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        ref_hide: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        ref_show: bool,
+        /// `[{ref, at?, rotation?, side?, near?, edge?, within?, hold_side?,
+        /// unconstrain?, group?, ungroup?, ref_at?, ref_rotation?,
+        /// ref_hide?, ref_show?, constraints?, fields?}]`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         ops: Option<Value>,
         /// The board's revision.
@@ -801,6 +865,167 @@ pub enum Request {
         /// Only findings of these codes.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         codes: Vec<String>,
+    },
+    #[serde(rename = "board.rules.show")]
+    BoardRulesShow { board: String },
+    /// `key=value` rules set on the board's defaults, or on a class.
+    #[serde(rename = "board.rules.set")]
+    BoardRulesSet {
+        board: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        class: Option<String>,
+        set: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "board.rules.unset")]
+    BoardRulesUnset {
+        board: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        class: Option<String>,
+        keys: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "board.rules.explain")]
+    BoardRulesExplain { board: String, refs: Vec<String> },
+    /// Text on a non-copper layer, centred on `at`, mirrored on a bottom layer.
+    #[serde(rename = "board.text.add")]
+    BoardTextAdd {
+        board: String,
+        layer: String,
+        at: [String; 2],
+        text: String,
+        /// Its character height and width (1 mm by default).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        size: Option<String>,
+        /// Its stroke (a seventh of the size by default, at least 0.1 mm).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thickness: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rotation: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// Drawings: `ops` is a list of `{layer, type, …}` as a footprint's graphics.
+    #[serde(rename = "board.drawing.add")]
+    BoardDrawingAdd {
+        board: String,
+        ops: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// A drawing's keys changed: `ops` an object of them.
+    #[serde(rename = "board.drawing.edit")]
+    BoardDrawingEdit {
+        board: String,
+        drawing: String,
+        ops: Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "board.drawing.delete")]
+    BoardDrawingDelete {
+        board: String,
+        drawings: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// A keepout: an area on copper layers keeping kinds of item out.
+    #[serde(rename = "board.keepout.add")]
+    BoardKeepoutAdd {
+        board: String,
+        /// `{start, edges}` as an outline is written.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        contour: Option<Value>,
+        /// `[x0, y0, x1, y1]` lengths.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rect: Option<Vec<String>>,
+        /// top, in1 …, bottom, all; all when empty.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        layer: Vec<String>,
+        /// copper, tracks, vias, pads, pours, placements, holes.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        keep: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        /// `[{contour | rect, layer?, keep, id?}]`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ops: Option<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// A keepout's contour, layers or kinds replaced.
+    #[serde(rename = "board.keepout.edit")]
+    BoardKeepoutEdit {
+        board: String,
+        keepout: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        contour: Option<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rect: Option<Vec<String>>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        layer: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        keep: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "board.keepout.delete")]
+    BoardKeepoutDelete {
+        board: String,
+        keepouts: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// Each group of a board and its members.
+    #[serde(rename = "board.group.list")]
+    BoardGroupList { board: String },
+    /// A group's members moved `by` [dx, dy], or turned `rotate` degrees
+    /// about `about` (the members' box's centre when absent).
+    #[serde(rename = "board.group.move")]
+    BoardGroupMove {
+        board: String,
+        group: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<[String; 2]>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rotate: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        about: Option<[String; 2]>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// A group's members turned over about its box's vertical centre line.
+    #[serde(rename = "board.group.flip")]
+    BoardGroupFlip {
+        board: String,
+        group: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// The exact distance between two items of a board, per copper layer.
+    #[serde(rename = "board.measure")]
+    BoardMeasure {
+        board: String,
+        a: String,
+        b: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        layer: Option<String>,
+    },
+    /// A finding waived with a reason, or (`remove`) its waiver removed.
+    #[serde(rename = "board.waive")]
+    BoardWaive {
+        board: String,
+        finding: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        remove: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
     },
     /// A board's counts: parts placed, nets routed and open, findings.
     #[serde(rename = "board.status")]
@@ -1629,7 +1854,22 @@ impl Request {
                 | Request::DesignCreate { .. }
                 | Request::DesignEdit { .. }
                 | Request::DesignDelete { .. }
+                | Request::PresetCreate { .. }
+                | Request::PresetEdit { .. }
+                | Request::PresetDelete { .. }
                 | Request::BoardCreate { .. }
+                | Request::BoardRulesSet { .. }
+                | Request::BoardRulesUnset { .. }
+                | Request::BoardWaive { .. }
+                | Request::BoardGroupMove { .. }
+                | Request::BoardKeepoutAdd { .. }
+                | Request::BoardTextAdd { .. }
+                | Request::BoardDrawingAdd { .. }
+                | Request::BoardDrawingEdit { .. }
+                | Request::BoardDrawingDelete { .. }
+                | Request::BoardKeepoutEdit { .. }
+                | Request::BoardKeepoutDelete { .. }
+                | Request::BoardGroupFlip { .. }
                 | Request::BoardEdit { .. }
                 | Request::BoardDelete { .. }
                 | Request::BoardPlace { .. }
@@ -1743,6 +1983,7 @@ mod tests {
                 rect: Some(["30 mm".into(), "20 mm".into()]),
                 outline: None,
                 layers: Some(4),
+                preset: None,
                 id: Some("main".into()),
                 expected_revision: None,
             },

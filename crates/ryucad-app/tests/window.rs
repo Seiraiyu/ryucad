@@ -139,7 +139,8 @@ fn show_tab(h: &mut Harness<'static, App>, id: &str) {
     h.run_steps(2);
 }
 
-/// Runs frames until `done` holds.
+/// Runs frames until `done` holds. A timeout names the line that waited.
+#[track_caller]
 fn frames(h: &mut Harness<'static, App>, done: impl Fn(&App) -> bool) {
     let t = Instant::now();
     loop {
@@ -819,6 +820,51 @@ fn the_window_follows_an_agent_until_the_human_navigates() {
     assert_ne!(h.state().opened().view.nav.camera, agent);
 }
 
+/// #1027: showing another part leaves the Properties tile empty, not on
+/// the chosen feature of the part no longer shown; showing it again puts
+/// the feature back.
+#[test]
+fn the_property_panel_follows_the_shown_part() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    p.ok(&["part", "create", "q"]);
+    p.ok(&[
+        "feature", "add", "q", "box", "--id", "b", "--param", "x=5", "--param", "y=5", "--param",
+        "z=5",
+    ]);
+    let mut h = window(&p);
+    frames(&mut h, |a| {
+        matches!(a.screen, ryucad_app::ui::app::Screen::Opened(_))
+            && a.opened().ws.idle()
+            && a.opened().ws.model.parts.len() == 2
+    });
+    p.ok(&["focus", "p"]);
+    frames(&mut h, |a| {
+        a.opened().ws.idle() && a.opened().ws.model.focus.as_deref() == Some("p")
+    });
+    h.run_steps(2);
+    h.get_by_label("boss (cylinder)").click();
+    frames(&mut h, |a| a.opened().ws.forms.form.is_some());
+    h.run_steps(2);
+    h.get_by_label("cylinder in part p");
+    p.ok(&["focus", "q"]);
+    frames(&mut h, |a| {
+        a.opened().ws.idle() && a.opened().ws.model.focus.as_deref() == Some("q")
+    });
+    h.run_steps(2);
+    assert!(h.query_by_label("cylinder in part p").is_none());
+    h.get_by_label("Choose a feature in the tree to see and edit it");
+    p.ok(&["focus", "p"]);
+    frames(&mut h, |a| {
+        a.opened().ws.idle() && a.opened().ws.model.focus.as_deref() == Some("p")
+    });
+    h.run_steps(2);
+    h.get_by_label("cylinder in part p");
+}
+
 #[test]
 fn the_window_follows_agents_work_and_an_agent_s_ask() {
     let _one = one_at_a_time();
@@ -1153,18 +1199,31 @@ fn preferences_change_the_window_whoever_sets_them() {
         a.opened().dialogs.preferences && !a.opened().ws.session.settings.all.is_empty()
     });
     h.step();
-    // It says what the disk cache holds, and clears it.
-    frames(&mut h, |a| a.opened().ws.session.cache.is_some());
-    h.step();
-    h.get_by_role_and_label(egui::accesskit::Role::Button, "Clear cache")
-        .click();
+    // It says what the disk cache holds, and clears it: the button is
+    // enabled only once the cache says it is (a click before that is
+    // lost, #971).
     frames(&mut h, |a| {
         a.opened()
             .ws
             .session
             .cache
             .as_ref()
-            .is_some_and(|c| c["removed"].is_object())
+            .is_some_and(|c| c["enabled"] == true)
+    });
+    h.step();
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "Clear cache")
+        .click();
+    // Cleared: the clear's answer says what it removed, but the dialog
+    // reads the cache again every two seconds and a read queued behind the
+    // clear replaces that answer at once, so its entries at 0 count too
+    // (#971: the wait timed out for good, 120 s or 30).
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .session
+            .cache
+            .as_ref()
+            .is_some_and(|c| c["removed"].is_object() || c["entries"] == 0)
     });
     assert_eq!(p.ok(&["cache", "stats"])["entries"], 0);
     let edges = h.state().opened().view.edges;
@@ -1191,7 +1250,8 @@ fn preferences_change_the_window_whoever_sets_them() {
     );
     // The shared cache: a server, and a token kept apart from the
     // preferences.
-    let url = "https://cache.example.com";
+    // A server that refuses at once: no name to look up, no network (#971).
+    let url = "http://127.0.0.1:1";
     type_into(&mut h, "Shared cache server", url);
     h.key_press(egui::Key::Enter);
     frames(&mut h, |a| {
@@ -4474,6 +4534,15 @@ fn view_show_scrolls_to_every_part() {
             .find(|r| !tree.contains(r))
             .unwrap_or_else(|| panic!("{id} isn't in the menu"))
     };
+    // View flows into columns here (#728): Show's submenu opens beside
+    // its column, clear of the column's wider items, whose clicks would
+    // otherwise take the rows over them (#974).
+    let wide = h
+        .query_all_by_label_contains("Compare with")
+        .map(|n| n.rect().right())
+        .fold(0.0_f32, f32::max);
+    let rows = in_menu(&h, "p00", &first);
+    assert!(wide > 0.0 && rows.left() >= wide, "{rows:?} over x {wide}");
     let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 1000.0));
     // The wheel over the list scrolls it until the last part shows.
     h.event(egui::Event::PointerMoved(
@@ -5426,6 +5495,46 @@ fn an_explode_is_chosen_and_played_from_its_tile() {
             .origin[2]
             == before
     });
+}
+
+/// #1027: the Motion list follows the shown part: an assembly's motions,
+/// then, a plain part shown, none, never the assembly it listed last.
+#[test]
+fn the_motion_list_follows_the_shown_part() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = two_bolts();
+    p.ok(&[
+        "motion",
+        "save",
+        "frame",
+        "slam",
+        "--steps",
+        "11",
+        "--drives",
+        r#"[{"instances": ["b2"], "translate": {"direction": [-1, 0, 0], "from": "0 mm", "to": "40 mm"}}]"#,
+    ]);
+    let mut h = window(&p);
+    both_bolts(&mut h);
+    menu(&mut h, "View", "Motion");
+    frames(&mut h, |a| a.opened().ws.assembly.motions.list.len() == 1);
+    shown(&mut h, "Motions of frame");
+    p.ok(&["focus", "bolt"]);
+    frames(&mut h, |a| {
+        a.opened().ws.idle() && a.opened().ws.model.focus.as_deref() == Some("bolt")
+    });
+    shown(
+        &mut h,
+        "Show an assembly to play its motions (View > Show).",
+    );
+    assert!(h.query_by_label("Motions of frame").is_none());
+    p.ok(&["focus", "frame"]);
+    frames(&mut h, |a| {
+        a.opened().ws.idle() && a.opened().ws.model.focus.as_deref() == Some("frame")
+    });
+    shown(&mut h, "Motions of frame");
 }
 
 #[test]
@@ -7824,6 +7933,71 @@ fn on_sheet(h: &Harness<'static, App>, at: [f64; 2]) -> egui::Pos2 {
     let px = [f64::from(rect.width()), f64::from(rect.height())];
     let q = cam.to_screen(at, px);
     rect.left_top() + egui::vec2(q[0] as f32, q[1] as f32)
+}
+
+/// Whether `id`'s tile is drawn: open and its group's active tab.
+fn tile_in_front(h: &Harness<'static, App>, id: &str) -> bool {
+    let tiles = &h.state().opened().tiles;
+    let Some(t) = ryucad_app::ui::shell::find(tiles, id) else {
+        return false;
+    };
+    tiles.active_tiles().contains(&t)
+}
+
+/// #867: Show in model in the Drawings tile selects the entity and brings
+/// the viewport forward (Drawings opens in its tab group), so something
+/// visibly happens.
+#[test]
+fn show_in_model_brings_the_viewport_forward() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_drawing();
+    let mut h = window(&p);
+    frames(&mut h, |a| a.opened().ws.idle());
+    shown(&mut h, "d (drawing: Block)");
+    h.get_by_label("d (drawing: Block)").click();
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .drawings
+            .sheet
+            .as_ref()
+            .is_some_and(|s| !s.entities.is_empty())
+    });
+    h.run_steps(2);
+    assert!(tile_in_front(&h, "drawings"));
+    assert!(
+        !tile_in_front(&h, "viewport"),
+        "the viewport is in front already"
+    );
+    // A curve of the view, chosen as the tile's own click would.
+    let entity = {
+        let sheet = h.state().opened().ws.drawings.sheet.clone().unwrap();
+        sheet.entities.values().next().unwrap().clone()
+    };
+    h.state_mut().opened_mut().ws.drawings.selected =
+        Some(ryucad_app::core::drawings::Pick::Entity {
+            entity: entity.clone(),
+            view: "v1".into(),
+        });
+    h.run_steps(2);
+    h.get_by_label("Show in model").click();
+    h.run_steps(2);
+    assert!(
+        tile_in_front(&h, "viewport"),
+        "the viewport is behind another tab"
+    );
+    assert!(
+        h.state()
+            .opened()
+            .ws
+            .myself()
+            .unwrap()
+            .selection
+            .contains(&entity)
+    );
 }
 
 #[test]

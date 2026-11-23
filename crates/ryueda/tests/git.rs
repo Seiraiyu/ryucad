@@ -1152,3 +1152,196 @@ fn stackups_and_inner_routes_merge() {
     assert_eq!(c.keys().collect::<Vec<_>>(), ["/stackup"], "{b}");
     assert_eq!(c["/stackup"]["kind"], "value", "{b}");
 }
+
+/// Rules from two branches (ryueda 7.B): different classes and waivers
+/// merge; one default set two ways conflicts at that value alone.
+#[test]
+fn rules_from_two_branches_merge_by_value() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = dir.path().join("run");
+    let top = dir.path().join("repo");
+    std::fs::create_dir_all(&top).unwrap();
+    let board = breakout_in_git(&top, &run);
+    let ok = |args: &[&str]| -> Value {
+        let (c, v) = ryueda(&board, &run, false, args);
+        assert_eq!(c, 0, "{args:?}: {v}");
+        v
+    };
+    ok(&[
+        "board", "create", "Main", "--design", "board", "--rect", "30,20", "--id", "main",
+    ]);
+    ok(&["class", "add", "Power", "--id", "power"]);
+    ok(&["class", "add", "Signal", "--id", "signal"]);
+    ok(&["board", "rules", "set", "main", "clearance=0.15mm"]);
+    git(&top, &["add", "-A"]);
+    git(&top, &["commit", "-qm", "rules"]);
+    git(&top, &["branch", "theirs"]);
+    ok(&[
+        "board",
+        "rules",
+        "set",
+        "main",
+        "--class",
+        "power",
+        "track_width=0.4mm",
+    ]);
+    git(&top, &["add", "-A"]);
+    git(&top, &["commit", "-qm", "ours"]);
+    git(&top, &["checkout", "-q", "theirs"]);
+    ok(&[
+        "board",
+        "rules",
+        "set",
+        "main",
+        "--class",
+        "signal",
+        "clearance=0.2mm",
+    ]);
+    git(&top, &["add", "-A"]);
+    git(&top, &["commit", "-qm", "theirs"]);
+    git(&top, &["checkout", "-q", "main"]);
+    let (merged, err) = git_try(&top, &[], &["merge", "-q", "--no-edit", "theirs"]);
+    assert!(merged, "{err}");
+    let r: Value = serde_json::from_str(
+        &std::fs::read_to_string(board.join("boards/main/rules.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(r["classes"]["power"]["track_width_nm"], 400_000);
+    assert_eq!(r["classes"]["signal"]["clearance_nm"], 200_000);
+    git(&top, &["branch", "-f", "theirs"]);
+    ok(&["board", "rules", "set", "main", "clearance=0.2mm"]);
+    git(&top, &["add", "-A"]);
+    git(&top, &["commit", "-qm", "ours 2"]);
+    git(&top, &["checkout", "-q", "theirs"]);
+    ok(&["board", "rules", "set", "main", "clearance=0.3mm"]);
+    git(&top, &["add", "-A"]);
+    git(&top, &["commit", "-qm", "theirs 2"]);
+    git(&top, &["checkout", "-q", "main"]);
+    let (merged, _) = git_try(&top, &[], &["merge", "-q", "--no-edit", "theirs"]);
+    assert!(!merged);
+    let r: Value = serde_json::from_str(
+        &std::fs::read_to_string(board.join("boards/main/rules.json")).unwrap(),
+    )
+    .unwrap();
+    let c = r["conflicts"].as_object().unwrap();
+    assert_eq!(
+        c.keys().collect::<Vec<_>>(),
+        ["/defaults/clearance_nm"],
+        "{r}"
+    );
+}
+
+/// A project preset edited two ways in different fields merges clean
+/// (ryueda 7.B).
+#[test]
+fn a_project_preset_merges_by_value() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = dir.path().join("run");
+    let top = dir.path().join("repo");
+    std::fs::create_dir_all(&top).unwrap();
+    let board = breakout_in_git(&top, &run);
+    let ok = |args: &[&str]| -> Value {
+        let (c, v) = ryueda(&board, &run, false, args);
+        assert_eq!(c, 0, "{args:?}: {v}");
+        v
+    };
+    ok(&["preset", "create", "acme-2l", "--from", "jlc-2l"]);
+    git(&top, &["add", "-A"]);
+    git(&top, &["commit", "-qm", "preset"]);
+    git(&top, &["branch", "theirs"]);
+    ok(&["preset", "edit", "acme-2l", "clearance_nm=0.12mm"]);
+    git(&top, &["add", "-A"]);
+    git(&top, &["commit", "-qm", "ours"]);
+    git(&top, &["checkout", "-q", "theirs"]);
+    ok(&["preset", "edit", "acme-2l", "edge_clearance_nm=0.3mm"]);
+    git(&top, &["add", "-A"]);
+    git(&top, &["commit", "-qm", "theirs"]);
+    git(&top, &["checkout", "-q", "main"]);
+    let (merged, err) = git_try(&top, &[], &["merge", "-q", "--no-edit", "theirs"]);
+    assert!(merged, "{err}");
+    let p: Value =
+        serde_json::from_str(&std::fs::read_to_string(board.join("presets/acme-2l.json")).unwrap())
+            .unwrap();
+    assert_eq!(p["clearance_nm"], 120_000);
+    assert_eq!(p["edge_clearance_nm"], 300_000);
+}
+
+/// Placement intent from two branches (ryueda 7.C): a constraint on one
+/// side and a group on the other merge into one file; two constraint
+/// lists for one part conflict whole, at `/constraints`.
+#[test]
+fn constraints_and_groups_merge_by_value() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = dir.path().join("run");
+    let top = dir.path().join("repo");
+    std::fs::create_dir_all(&top).unwrap();
+    let board = breakout_in_git(&top, &run);
+    let ok = |args: &[&str]| -> Value {
+        let (c, v) = ryueda(&board, &run, false, args);
+        assert_eq!(c, 0, "{args:?}: {v}");
+        v
+    };
+    ok(&[
+        "board", "create", "Main", "--design", "board", "--rect", "30,20", "--id", "main",
+    ]);
+    ok(&["board", "place", "main", "R1", "--at", "10,10"]);
+    ok(&["board", "place", "main", "R2", "--at", "14,10"]);
+    git(&top, &["add", "-A"]);
+    git(&top, &["commit", "-qm", "placed"]);
+    git(&top, &["branch", "theirs"]);
+    ok(&[
+        "board", "place", "main", "R2", "--near", "R1/2", "--within", "5mm", "--at", "14,10",
+    ]);
+    git(&top, &["add", "-A"]);
+    git(&top, &["commit", "-qm", "ours"]);
+    git(&top, &["checkout", "-q", "theirs"]);
+    ok(&["board", "place", "main", "R2", "--group", "pullups"]);
+    git(&top, &["add", "-A"]);
+    git(&top, &["commit", "-qm", "theirs"]);
+    git(&top, &["checkout", "-q", "main"]);
+    let (merged, err) = git_try(&top, &[], &["merge", "-q", "--no-edit", "theirs"]);
+    assert!(merged, "{err}");
+    let shown = ok(&["board", "show", "main"]);
+    let r2 = shown["result"]["occurrences"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["refdes"] == "R2")
+        .unwrap()["placement"]
+        .clone();
+    assert_eq!(r2["group"], "pullups", "{r2}");
+    assert_eq!(r2["constraints"][0]["near"], "R1/2", "{r2}");
+    // Two constraint lists made two ways: one conflict, the whole list.
+    git(&top, &["branch", "-f", "theirs"]);
+    ok(&[
+        "board", "place", "main", "R2", "--edge", "left", "--within", "20mm", "--at", "14,10",
+    ]);
+    git(&top, &["add", "-A"]);
+    git(&top, &["commit", "-qm", "edge"]);
+    git(&top, &["checkout", "-q", "theirs"]);
+    ok(&[
+        "board", "place", "main", "R2", "--near", "R1/1", "--within", "6mm", "--at", "14,10",
+    ]);
+    git(&top, &["add", "-A"]);
+    git(&top, &["commit", "-qm", "near"]);
+    git(&top, &["checkout", "-q", "main"]);
+    let (merged, _) = git_try(&top, &[], &["merge", "-q", "--no-edit", "theirs"]);
+    assert!(!merged, "two constraint lists conflict");
+    let path = board.join("boards/main/placements");
+    let file = std::fs::read_dir(&path)
+        .unwrap()
+        .flatten()
+        .map(|e| std::fs::read_to_string(e.path()).unwrap())
+        .find(|t| t.contains("conflicts"))
+        .unwrap();
+    let v: Value = serde_json::from_str(&file).unwrap();
+    assert_eq!(
+        v["conflicts"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .collect::<Vec<_>>(),
+        ["/constraints"],
+        "{v}"
+    );
+}

@@ -267,3 +267,44 @@ fn writes_wait_while_the_revision_is_drawn() {
     ws.swap_compare();
     assert_eq!(ws.control("feature.edit"), Gate::Send);
 }
+
+/// #1021: swapped to a revision that lacks the shown part (one added
+/// since), the window shows that revision with nothing of the part in it:
+/// no error card, and the part isn't broken.
+#[test]
+fn swapped_to_a_revision_without_the_shown_part() {
+    let p = Project::new().with_part().committed();
+    p.ok(&["part", "create", "de"]);
+    p.ok(&[
+        "feature", "add", "de", "box", "--id", "b", "--param", "x=40", "--param", "y=30",
+        "--param", "z=20",
+    ]);
+    let mut ws = open(&p);
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.model.parts.contains_key("de")));
+    ws.set_focus(Some("de".to_owned()));
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.idle() && ws.model.focus.as_deref() == Some("de")
+    }));
+    p.ok(&["compare", "HEAD"]);
+    assert!(ws.wait_until(WAIT, ghosted));
+    ws.swap_compare();
+    assert!(ws.wait_until(WAIT, |ws| {
+        ghosted(ws)
+            && ws
+                .comparing
+                .compare
+                .as_ref()
+                .is_some_and(|c| c.swapped.as_deref() == Some("HEAD"))
+    }));
+    // Every read at HEAD has answered.
+    assert!(ws.wait_until(WAIT, |ws| ws.idle()));
+    assert!(ws.errors.is_empty(), "{:?}", ws.errors);
+    assert_eq!(ws.model.parts["de"].error, None);
+    // Back: the working files' part, as before.
+    ws.swap_compare();
+    assert!(ws.wait_until(WAIT, |ws| ws.idle() && ws.model_rev().is_none()));
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.idle() && ws.model.parts["de"].features.len() == 1
+    }));
+    assert!(ws.errors.is_empty(), "{:?}", ws.errors);
+}

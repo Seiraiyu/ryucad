@@ -14,8 +14,10 @@ use std::path::Path;
 
 pub const UM: i64 = 1_000;
 pub const MM: i64 = 1_000_000;
-const PAD: i64 = 480 * UM;
-const MARGIN: i64 = 3 * MM;
+/// A part's pads' offset from its centre.
+pub const PAD: i64 = 480 * UM;
+/// The outline's margin round the parts' centres.
+pub const MARGIN: i64 = 3 * MM;
 const VIA_OFFSET: i64 = 1_200 * UM;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,6 +44,9 @@ pub enum Fault {
     /// [`Fault::InnerBlind`] with the `in1` leg moved to `in2`, below the
     /// vias' spans: it meets neither, so its net opens (ryueda 7.A).
     InnerMove(usize),
+    /// Connection `n`'s top-layer legs moved a nanometre towards the row
+    /// above, still on their pads (ryueda 7.B: a waiver's limit exceeded).
+    Nudge(usize),
 }
 
 #[derive(Clone, Debug)]
@@ -62,6 +67,14 @@ pub struct Spec {
     /// Every n-th part on the bottom, its connections there too; 0 for
     /// none (ryueda 7.A).
     pub bottom_every: usize,
+    /// The board's `rules.json`, when it has one (ryueda 7.B).
+    pub rules: Option<Value>,
+    /// Keepout files' bodies, written as `keepouts/k<i>.json` (ryueda 7.C).
+    pub keepouts: Vec<Value>,
+    /// Constraints added to part `n`'s placement (ryueda 7.C).
+    pub constraints: Vec<(usize, Value)>,
+    /// Drawing files' bodies, written as `drawings/d<i>.json` (ryueda 7.C).
+    pub drawings: Vec<Value>,
 }
 
 impl Spec {
@@ -79,6 +92,25 @@ impl Spec {
             fault: None,
             layers: 2,
             bottom_every: 0,
+            rules: None,
+            keepouts: Vec::new(),
+            constraints: Vec::new(),
+            drawings: Vec::new(),
+        }
+    }
+
+    /// Part `n`'s occurrence (`c<k>/r<i>`).
+    pub fn occurrence(&self, n: usize) -> String {
+        format!("c{}/r{}", n / self.parts, n % self.parts)
+    }
+
+    /// Whether part `n` sits at the left of its row.
+    pub fn leftmost(&self, n: usize) -> bool {
+        let (row, col) = (n / self.cols, n % self.cols);
+        if row % 2 == 0 {
+            col == 0
+        } else {
+            col == self.cols - 1
         }
     }
 
@@ -113,11 +145,21 @@ impl Spec {
     /// further half turn so its pads stay where the top part's were.
     fn placement(&self, n: usize) -> Value {
         let (at, rot) = self.place(n);
-        if self.bottom(n) || self.fault == Some(Fault::Flip(n)) {
+        let mut v = if self.bottom(n) || self.fault == Some(Fault::Flip(n)) {
             json!({"at": [at.0, at.1], "rotation_mdeg": (rot + 180_000) % 360_000, "side": "bottom"})
         } else {
             json!({"at": [at.0, at.1], "rotation_mdeg": rot})
+        };
+        let mine: Vec<&Value> = self
+            .constraints
+            .iter()
+            .filter(|(k, _)| *k == n)
+            .map(|(_, c)| c)
+            .collect();
+        if !mine.is_empty() {
+            v["constraints"] = json!(mine);
         }
+        v
     }
 
     /// Part `n`'s pad (1 or 2) centre.
@@ -205,6 +247,30 @@ pub fn write(dir: &Path, s: &Spec) {
         board["stackup"] = serde_json::to_value(st).unwrap();
     }
     put(dir, "boards/main/board.json", "ryueda.board", board);
+    for (i, k) in s.keepouts.iter().enumerate() {
+        put(
+            dir,
+            &format!("boards/main/keepouts/k{i}.json"),
+            "ryueda.keepout",
+            k.clone(),
+        );
+    }
+    for (i, d) in s.drawings.iter().enumerate() {
+        put(
+            dir,
+            &format!("boards/main/drawings/d{i}.json"),
+            "ryueda.board-drawing",
+            d.clone(),
+        );
+    }
+    if let Some(r) = &s.rules {
+        put(
+            dir,
+            "boards/main/rules.json",
+            "ryueda.board-rules",
+            r.clone(),
+        );
+    }
     for n in 0..s.count() {
         put(
             dir,
@@ -215,6 +281,13 @@ pub fn write(dir: &Path, s: &Spec) {
     }
     let preset = ryueda::board::preset::JLC_2L;
     let track = |id: String, net: &str, layer: &str, a: (i64, i64), b: (i64, i64)| {
+        let nudged = matches!(s.fault, Some(Fault::Nudge(f)) if id.starts_with(&format!("t{f}_")))
+            && layer == "top";
+        let (a, b) = if nudged {
+            ((a.0, a.1 - 1), (b.0, b.1 - 1))
+        } else {
+            (a, b)
+        };
         put(
             dir,
             &format!("boards/main/tracks/{id}.json"),
@@ -335,6 +408,10 @@ pub fn seeded(seed: u64) -> Spec {
         fault: None,
         layers: 2,
         bottom_every: 0,
+        rules: None,
+        keepouts: Vec::new(),
+        constraints: Vec::new(),
+        drawings: Vec::new(),
     }
 }
 

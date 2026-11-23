@@ -76,6 +76,7 @@ class Code(str, Enum):
     NOTHING_TO_RELEASE = "nothing_to_release"
     RELEASE_PENDING = "release_pending"
     RELEASE_FOLDER_UNSAFE = "release_folder_unsafe"
+    RELEASE_TAG_CLASH = "release_tag_clash"
     REVIEW_UNAUTHENTICATED = "review_unauthenticated"
     REVIEW_NO_REMOTE = "review_no_remote"
     REVIEW_UNREACHABLE = "review_unreachable"
@@ -395,6 +396,17 @@ class Code(str, Enum):
     BOARD_LAYER_NOT_FOUND = "board_layer_not_found"
     DRC_VIA_SPAN = "drc_via_span"
     DRC_HOLE_CLEARANCE = "drc_hole_clearance"
+    BOARD_CLASS_NOT_FOUND = "board_class_not_found"
+    BOARD_PRESET_NOT_FOUND = "board_preset_not_found"
+    RULE_BELOW_PRESET = "rule_below_preset"
+    WAIVER_EXCEEDED = "waiver_exceeded"
+    FINDING_NOT_FOUND = "finding_not_found"
+    FINDING_NOT_WAIVABLE = "finding_not_waivable"
+    PRESET_IN_USE = "preset_in_use"
+    PLACEMENT_CONSTRAINT_UNMET = "placement_constraint_unmet"
+    PLACEMENT_NO_ROOM = "placement_no_room"
+    DRC_KEEPOUT = "drc_keepout"
+    BOARD_CONTOUR_INVALID = "board_contour_invalid"
     DRC_FAILED = "drc_failed"
     ITEM_NOT_FOUND = "item_not_found"
     ITEM_CLASS_UNKNOWN = "item_class_unknown"
@@ -481,6 +493,7 @@ EXIT: dict[Code, int] = {
     Code.NOTHING_TO_RELEASE: 1,
     Code.RELEASE_PENDING: 1,
     Code.RELEASE_FOLDER_UNSAFE: 1,
+    Code.RELEASE_TAG_CLASH: 1,
     Code.REVIEW_UNAUTHENTICATED: 1,
     Code.REVIEW_NO_REMOTE: 1,
     Code.REVIEW_UNREACHABLE: 4,
@@ -800,6 +813,17 @@ EXIT: dict[Code, int] = {
     Code.BOARD_LAYER_NOT_FOUND: 1,
     Code.DRC_VIA_SPAN: 1,
     Code.DRC_HOLE_CLEARANCE: 1,
+    Code.BOARD_CLASS_NOT_FOUND: 1,
+    Code.BOARD_PRESET_NOT_FOUND: 1,
+    Code.RULE_BELOW_PRESET: 1,
+    Code.WAIVER_EXCEEDED: 1,
+    Code.FINDING_NOT_FOUND: 1,
+    Code.FINDING_NOT_WAIVABLE: 1,
+    Code.PRESET_IN_USE: 1,
+    Code.PLACEMENT_CONSTRAINT_UNMET: 1,
+    Code.PLACEMENT_NO_ROOM: 1,
+    Code.DRC_KEEPOUT: 1,
+    Code.BOARD_CONTOUR_INVALID: 1,
     Code.DRC_FAILED: 1,
     Code.ITEM_NOT_FOUND: 1,
     Code.ITEM_CLASS_UNKNOWN: 1,

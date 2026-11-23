@@ -182,6 +182,77 @@ fn layouts_merge_at_status_time_and_relayout_settles_them() {
     }
 }
 
+/// #858: both sides add the same capacitor and each says where it goes
+/// (`near` on one, `beside … above` on the other). Its area settles by
+/// either side, and by laying it out again, each on its own copy of the
+/// merge: none is refused as an instruction conflict.
+#[test]
+fn an_area_whose_sides_place_one_part_apart_settles_every_way() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = dir.path().join("run");
+    let top = dir.path().join("repo");
+    std::fs::create_dir_all(&top).unwrap();
+    let board = breakout_in_git(&top, &run);
+    ok(&board, &run, false, &["layout"]);
+    commit_all(&top, "laid out");
+    let add = |board: &Path| {
+        for args in [
+            vec![
+                "component",
+                "add",
+                "breakout",
+                "--of",
+                "c_100n",
+                "--id",
+                "c99",
+                "--refdes",
+                "C99",
+            ],
+            vec!["connect", "breakout/c99/1", "SCL"],
+        ] {
+            ok(board, &run, false, &args);
+        }
+    };
+    git(&top, &["checkout", "-q", "-b", "theirs"]);
+    add(&board);
+    ok(
+        &board,
+        &run,
+        false,
+        &["place", "breakout", "beside C99 R2 above"],
+    );
+    commit_all(&top, "theirs");
+    git(&top, &["checkout", "-q", "main"]);
+    add(&board);
+    ok(&board, &run, false, &["place", "breakout", "near C99 R1.1"]);
+    commit_all(&top, "ours");
+    let (merged, _) = git_try(&top, &[], &["merge", "-q", "theirs"]);
+    assert!(!merged, "both sides changed the layout");
+    for repair in [&["--ours"][..], &["--theirs"], &["--repair", "relayout"]] {
+        let copy = dir.path().join(format!("copy{}", repair.join("")));
+        let status = std::process::Command::new("cp")
+            .args(["-a"])
+            .arg(&top)
+            .arg(&copy)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let board = copy.join(board.strip_prefix(&top).unwrap());
+        let run = dir.path().join(format!("run{}", repair.join("")));
+        let areas: Vec<String> = items(&board, &run, false)
+            .iter()
+            .filter(|c| c["kind"] == "layout_conflict")
+            .map(|c| c["id"].as_str().unwrap().to_owned())
+            .collect();
+        assert!(!areas.is_empty(), "{repair:?}: C99 placed apart");
+        let mut args = vec!["merge", "resolve"];
+        args.extend(areas.iter().map(String::as_str));
+        args.extend(repair.iter().copied());
+        let (code, v) = ryueda(&board, &run, false, &args);
+        assert_eq!(code, 0, "{repair:?}: {v}");
+    }
+}
+
 /// The breakout committed on `main`, then `theirs` setting R1 to 47k and
 /// tagging it, and `main` setting it to 10k and adding a net: R1's value
 /// is the one conflict.

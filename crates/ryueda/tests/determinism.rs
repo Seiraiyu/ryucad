@@ -521,6 +521,222 @@ fn four_layers(golden: &mut Golden, at: &Path) {
     }
 }
 
+/// Board rules (ryueda 7.B): the round's board with a power class, a
+/// board-wide clearance of 0.3 mm (which some of its gaps don't meet) and
+/// a wider track for the class, each error then waived with a fixed
+/// reason: the rules shown, DRC, a measure and the export's manifest,
+/// alike on one thread and eight. Every ID is pinned.
+fn rules(golden: &mut Golden, at: &Path) {
+    let id = breakout_board::BOARD;
+    let mut first: Option<(Value, Value, Value, String)> = None;
+    for threads in [1, 8] {
+        let board = at.join(format!("t{threads}")).join("board");
+        std::fs::create_dir_all(&board).unwrap();
+        ryueda(&board, 1, &["init"]);
+        breakout_at(&board);
+        for args in breakout_board::script() {
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            ryueda(&board, threads, &args);
+        }
+        for args in [
+            &["class", "add", "Power", "--id", "power"][..],
+            &["rail", "edit", "v3v3", "--class", "power"],
+            &["board", "rules", "set", id, "clearance=0.3mm"],
+            &[
+                "board",
+                "rules",
+                "set",
+                id,
+                "--class",
+                "power",
+                "track_width=0.3mm",
+            ],
+        ] {
+            ryueda(&board, threads, args);
+        }
+        let report = ryueda_out(&board, threads, &["board", "drc", id], &[]);
+        let errors: Vec<String> = report["error"]["details"]["report"]["findings"]
+            .as_array()
+            .unwrap_or_else(|| panic!("errors under the rules: {report}"))
+            .iter()
+            .filter(|f| f["severity"] == "error")
+            .map(|f| f["id"].as_str().unwrap().to_owned())
+            .collect();
+        assert!(!errors.is_empty());
+        for f in &errors {
+            ryueda(
+                &board,
+                threads,
+                &["board", "waive", id, f, "--reason", "checked by hand"],
+            );
+        }
+        let strip = |mut v: Value| {
+            if let Some(o) = v.as_object_mut() {
+                o.remove("revision");
+            }
+            v
+        };
+        let show = strip(ryueda(&board, threads, &["board", "rules", "show", id]));
+        let drc = strip(ryueda(&board, threads, &["board", "drc", id]));
+        assert_eq!(drc["errors"], 0, "{drc}");
+        let measure = strip(ryueda(
+            &board,
+            threads,
+            &["board", "measure", id, "R1/1", "R1/2"],
+        ));
+        ryueda(&board, threads, &["board", "export", id, "--out", "fab"]);
+        let manifest = export_hash(
+            "manifest.json",
+            &std::fs::read(board.join("fab").join("manifest.json")).unwrap(),
+        );
+        let got = (show, drc, measure, manifest);
+        match &first {
+            None => first = Some(got),
+            Some(one) => assert_eq!(&got, one, "one thread and eight"),
+        }
+    }
+    let (show, drc, measure, manifest) = first.unwrap();
+    golden.json("board.rules.show", &show);
+    golden.json("board.rules.drc", &drc);
+    golden.json("board.rules.measure", &measure);
+    golden
+        .got
+        .insert("board.rules.export.manifest.json".into(), manifest);
+}
+
+/// Placement, keepouts and drawings (ryueda 7.C): the round's board with
+/// R2 placed by the legaliser near R1/2 (grouped, its designator moved),
+/// a keepout in a corner, text on the bottom silk and a fab line: the
+/// place answer, DRC, the pads, a render of the bottom silk and every
+/// exported file, alike on one thread and eight. Every ID is pinned.
+fn placed(golden: &mut Golden, at: &Path) {
+    type Got = (Value, Value, Value, String, BTreeMap<String, String>);
+    let id = breakout_board::BOARD;
+    let mut first: Option<Got> = None;
+    for threads in [1, 8] {
+        let board = at.join(format!("t{threads}")).join("board");
+        std::fs::create_dir_all(&board).unwrap();
+        ryueda(&board, 1, &["init"]);
+        breakout_at(&board);
+        for args in breakout_board::script() {
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            ryueda(&board, threads, &args);
+        }
+        let strip = |mut v: Value| {
+            if let Some(o) = v.as_object_mut() {
+                o.remove("revision");
+                o.remove("schema");
+            }
+            v
+        };
+        let legalised = strip(ryueda(
+            &board,
+            threads,
+            &[
+                "board", "place", id, "R2", "--near", "R1/2", "--within", "3mm", "--group", "pull",
+                "--ref-at", "0,1.2",
+            ],
+        ));
+        ryueda(
+            &board,
+            threads,
+            &[
+                "board",
+                "keepout",
+                "add",
+                id,
+                "--rect",
+                "15.5,0.2,16.3,1",
+                "--keep",
+                "vias",
+                "--id",
+                "k1",
+            ],
+        );
+        ryueda(
+            &board,
+            threads,
+            &[
+                "board",
+                "text",
+                "add",
+                id,
+                "--layer",
+                "silk.bottom",
+                "--at",
+                "8,1",
+                "--text",
+                "BACK",
+                "--id",
+                "back",
+            ],
+        );
+        let line = serde_json::json!([{"layer": "fab.top", "type": "line", "start": ["1", "10"],
+            "end": ["3", "10"], "width_nm": 100_000, "id": "f1"}])
+        .to_string();
+        ryueda(
+            &board,
+            threads,
+            &["board", "drawing", "add", id, "--ops", &line],
+        );
+        let mut drc = ryueda_out(&board, threads, &["board", "drc", id], &[]);
+        if let Some(o) = drc["result"].as_object_mut() {
+            o.remove("revision");
+        }
+        if let Some(o) = drc["error"]["details"]["report"].as_object_mut() {
+            o.remove("revision");
+        }
+        let show = strip(ryueda(&board, threads, &["board", "show", id, "--pads"]));
+        ryueda(
+            &board,
+            threads,
+            &[
+                "board",
+                "render",
+                id,
+                "--out",
+                "back.svg",
+                "--layer",
+                "silk.bottom",
+                "--layer",
+                "outline",
+                "--side",
+                "bottom",
+            ],
+        );
+        let svg =
+            blake3::hash(&std::fs::read(board.join("back.svg")).unwrap()).to_hex()[..32].to_owned();
+        ryueda(
+            &board,
+            threads,
+            &["board", "export", id, "--out", "fab", "--allow-errors"],
+        );
+        let mut exported = BTreeMap::new();
+        for e in std::fs::read_dir(board.join("fab")).unwrap().flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            exported.insert(
+                name.clone(),
+                export_hash(&name, &std::fs::read(e.path()).unwrap()),
+            );
+        }
+        let got = (legalised, drc, show, svg, exported);
+        match &first {
+            None => first = Some(got),
+            Some(one) => assert_eq!(&got, one, "one thread and eight"),
+        }
+    }
+    let (legalised, drc, show, svg, exported) = first.unwrap();
+    golden.json("board.place.legalised", &legalised);
+    golden.json("board.place.drc", &drc);
+    golden.json("board.place.show", &show);
+    golden.got.insert("board.place.silk.bottom.svg".into(), svg);
+    for (name, hash) in exported {
+        golden
+            .got
+            .insert(format!("board.place.export.{name}"), hash);
+    }
+}
+
 /// What makes the breakout's board four layers: the stackup, and a track
 /// on `in1` between two of its ground vias.
 const FOUR: &[&[&str]] = &[
@@ -818,6 +1034,8 @@ fn netlists_and_erc_are_bit_exact() {
     golden.json("symbols.lint", &one);
     boards(&mut golden, &dir.path().join("boards"));
     four_layers(&mut golden, &dir.path().join("four"));
+    rules(&mut golden, &dir.path().join("rules"));
+    placed(&mut golden, &dir.path().join("place"));
     golden.finish();
 }
 

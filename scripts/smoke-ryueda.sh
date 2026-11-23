@@ -167,6 +167,34 @@ grep -q '^R3,.*,bottom$' fabb/main-pos.csv || { echo "FAIL R3's row isn't bottom
 run board place main R3 --at 4.5,6
 run board status main
 has '"open":0' "R3 on top again, every net is routed"
+# Rules (ryueda 7.B): a board default over the preset, refused under it,
+# shown with its source, then removed; a measurement between two pads.
+run board rules set main clearance=0.12mm
+has '"clearance_nm":120000' "a board clearance"
+out=$("$exe" board rules set main clearance=0.01mm) && { echo "FAIL a rule under the preset was taken: $out"; exit 1; }
+case "$out" in *rule_below_preset*) echo "ok   ryueda board rules set under the preset is refused" ;; *) echo "FAIL $out"; exit 1 ;; esac
+run board rules show main
+has '"source":"board"' "the rule's source is the board"
+run board measure main R1/1 R2/1
+has '"distance_nm"' "a measurement"
+run board rules unset main clearance
+run preset show jlc-4l
+has '"kind":"ryueda.fab-preset"' "a built-in preset as a document"
+# Placement by constraint and keepouts (ryueda 7.C): R3 placed by the
+# legaliser near R1's pad and grouped; back where its tracks are, the
+# constraint kept and met; a keepout and a text drawn, DRC clean.
+run board unplace main R3
+run board place main R3 --near R1/1 --within 3mm --group pair
+has '"legalised"' "the legaliser placed R3"
+run board group list main
+has '"group":"pair"' "R3 is in its group"
+run board place main R3 --at 4.5,6
+run board show main
+has '"near":"R1/1"' "re-placing kept the constraint"
+run board keepout add main --rect 0,0,1,1 --keep vias --id k1
+run board text add main --layer silk.top --at 4.5,8.5 --text SMOKE
+run board drc main
+run board keepout delete main k1
 if [ -n "$app" ]; then
     out=$("$app" --smoke "$work/project") || true
     case "$out" in

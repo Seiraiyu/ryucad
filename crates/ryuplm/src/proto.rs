@@ -19,6 +19,10 @@ pub struct VersionInfo {
     pub commit: String,
     pub target: String,
     pub protocol: u32,
+    /// [`crate::OUTPUT_SCHEMA`]: the shape of the answers other tools
+    /// read (0 from a ryuplm before it was said).
+    #[serde(default)]
+    pub schema_outputs: u64,
 }
 
 impl VersionInfo {
@@ -29,6 +33,7 @@ impl VersionInfo {
             commit: env!("RYUPLM_COMMIT").to_owned(),
             target: env!("RYUPLM_TARGET").to_owned(),
             protocol: PROTOCOL_VERSION,
+            schema_outputs: crate::OUTPUT_SCHEMA,
         }
     }
 
@@ -69,8 +74,26 @@ pub enum Request {
         number: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         class: Option<String>,
+        /// Found in the number, a previous number, the name or the
+        /// description, whatever the case.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         text: Option<String>,
+        /// A lifecycle state: `in_work`, `released`, `modified`,
+        /// `obsolete`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        state: Option<String>,
+        /// `make` or `buy`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        make_buy: Option<String>,
+        /// `errors` or `warnings`: items with at least one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        faults: Option<String>,
+        /// `id` (the default), `number`, `name` or `class`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sort: Option<String>,
+        /// Rows skipped before the first returned.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset: Option<usize>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         limit: Option<usize>,
     },
@@ -178,6 +201,23 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         working: bool,
     },
+    #[serde(rename = "reps.list")]
+    RepsList {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+        /// Folders searched besides the work tree and `pdm.dependents`.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        within: Vec<String>,
+    },
+    #[serde(rename = "index")]
+    Index {
+        /// The file to write, an absolute path: the CLI makes it one.
+        out: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        within: Vec<String>,
+    },
     #[serde(rename = "import.guess")]
     ImportGuess {
         /// An absolute path: the CLI makes it one.
@@ -246,6 +286,11 @@ pub enum Request {
     Check {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         within: Vec<String>,
+        /// A Git revision to compare with: each fault says whether it is
+        /// `new` since then, and the report gains the items and BOM lines
+        /// changed (`against`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        against: Option<String>,
     },
     #[serde(rename = "release.propose")]
     ReleasePropose {
@@ -284,6 +329,13 @@ pub enum Request {
         from: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         to: Option<String>,
+    },
+    #[serde(rename = "resolve")]
+    Resolve {
+        /// `item/<id>` or `item/<id>/line/<line>`.
+        refs: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
     },
     #[serde(rename = "activity.log")]
     ActivityLog {
@@ -403,6 +455,21 @@ mod tests {
     }
 
     #[test]
+    fn a_version_from_before_the_contract_reads_as_schema_zero() {
+        let me = VersionInfo::current();
+        assert_eq!(me.schema_outputs, crate::OUTPUT_SCHEMA);
+        let old: VersionInfo = serde_json::from_value(
+            json!({"ryuplm": "0.1.0", "commit": "c", "target": "t", "protocol": 1}),
+        )
+        .unwrap();
+        assert_eq!(old.schema_outputs, 0);
+        // The contract's number is no part of being the same build.
+        let mut v = json!(me);
+        v["schema_outputs"] = json!(7);
+        assert!(me.same_build(&v));
+    }
+
+    #[test]
     fn requests_round_trip_through_rpc() {
         let reqs = [
             Request::ProjectInfo {},
@@ -428,7 +495,10 @@ mod tests {
                 },
                 expected_revision: None,
             },
-            Request::Check { within: vec![] },
+            Request::Check {
+                within: vec![],
+                against: None,
+            },
             Request::ReleasePropose {
                 items: vec!["A-1".into()],
                 all: false,
