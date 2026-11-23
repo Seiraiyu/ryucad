@@ -1,14 +1,19 @@
 //! A board's keepouts (design 924): `keepouts/<id>.json`, an area on
 //! copper layers keeping kinds of item out, judged by `drc_keepout`.
 
+use super::drc::{Finding, finding};
 use super::file::Contour;
+use super::shapes::BoardShapes;
 use crate::error::Code;
 use crate::fault::Fault;
+use crate::fault::Severity;
 pub use crate::footprint::Keep;
 use ryu_board::geom::{Place, Point, Region};
 use ryu_board::model::Polarity;
 use ryu_board::shape::Shape;
+use ryu_copper::measure::{self, Body, BodyOptions, Verdict};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 pub use super::file::{KEEPOUT_KIND, KEEPOUTS};
 
@@ -137,12 +142,123 @@ pub fn placed_footprint_keepout(
     (layers, shape)
 }
 
+fn keeps(k: &super::shapes::KeepoutInfo, what: Keep) -> bool {
+    k.keeps.contains(&what)
+        || (k.keeps.contains(&Keep::Copper)
+            && matches!(what, Keep::Tracks | Keep::Vias | Keep::Pads | Keep::Pours))
+}
+
+/// `drc_keepout`: each item of a kept kind meeting a keepout on one of its layers.
+pub fn check(s: &BoardShapes, board: &str) -> Vec<Finding> {
+    let n = s.n();
+    let opts = BodyOptions::default();
+    let mut out = Vec::new();
+    for k in &s.keepouts {
+        let area = Body::of_shape(&k.shape, &opts);
+        let on = |l: usize| k.layers.contains(&l);
+        let own = |occ: &str| k.part.as_deref() == Some(occ);
+        let mut meet = |reference: String, shape: &Shape| {
+            let v = measure::touches(&area, &Body::of_shape(shape, &opts));
+            if v != Verdict::No {
+                out.push(finding(
+                    Code::DrcKeepout,
+                    Severity::Error,
+                    board,
+                    vec![k.reference.clone(), reference.clone()],
+                    format!("{reference} is inside keepout {}", k.reference),
+                    json!({"uncertain": v == Verdict::Uncertain, "keeps": k.keeps}),
+                ));
+            }
+        };
+        if keeps(k, Keep::Tracks) {
+            for t in s.tracks.iter().filter(|t| t.layer.index(n).is_some_and(on)) {
+                meet(format!("{board}:track/{}", t.id), &t.shape);
+            }
+        }
+        if keeps(k, Keep::Vias) {
+            for v in s.vias.iter().filter(|v| (v.from..=v.to).any(on)) {
+                meet(format!("{board}:via/{}", v.id), &v.shape);
+            }
+        }
+        if keeps(k, Keep::Pads) {
+            for p in s
+                .pads
+                .iter()
+                .filter(|p| !own(&p.occurrence) && (0..n).any(|l| on(l) && p.on(l, n)))
+            {
+                meet(p.reference.clone(), &p.copper);
+            }
+        }
+        if keeps(k, Keep::Holes) {
+            for h in s.holes.iter().filter(|h| (h.span.0..=h.span.1).any(on)) {
+                if let super::shapes::HoleOf::Pad { occ, .. } = &h.of
+                    && own(occ)
+                {
+                    continue;
+                }
+                let shape = crate::board::render::hole_shape(&h.shape);
+                meet(format!("{}#hole", h.owner), &shape);
+            }
+        }
+        if keeps(k, Keep::Placements) {
+            for c in s.courtyards.iter().filter(|c| !own(&c.occurrence)) {
+                let outer = if c.bottom { n - 1 } else { 0 };
+                if on(outer) {
+                    meet(c.owner.clone(), &c.shape);
+                }
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::board::file::{Contour, Op};
+    use crate::board::shapes::KeepoutInfo;
+    use crate::board::testing::{MM, UM, board, rect};
     use crate::doc;
     use serde_json::json;
+
+    fn ko(keeps: Vec<Keep>, layers: Vec<usize>, part: Option<&str>) -> KeepoutInfo {
+        KeepoutInfo {
+            reference: "b:keepout/k1".into(),
+            part: part.map(Into::into),
+            layers,
+            keeps,
+            shape: rect(ryu_board::geom::Point::new(10 * MM, 5 * MM), 2 * MM, 2 * MM),
+        }
+    }
+
+    #[test]
+    fn kept_kinds_meeting_a_keepout_are_findings_and_others_arent() {
+        let mut s = board(20 * MM, 10 * MM);
+        s.via("v1", "a", (10 * MM, 5 * MM), 300 * UM, 600 * UM)
+            .smd("r1", "1", (12 * MM, 5 * MM), (MM, MM), Some("b"))
+            .courtyard("r1", (12 * MM, 5 * MM), (2 * MM, 2 * MM), false);
+        s.keepouts.push(ko(vec![Keep::Vias], vec![0], None));
+        let f = check(&s, "b");
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(f[0].code, Code::DrcKeepout);
+        assert_eq!(f[0].refs, ["b:keepout/k1", "b:via/v1"]);
+        // The pad's edge (11.5 mm) is clear of the keepout (to 11 mm):
+        // pads aren't kept, and the courtyard (from 11 mm) touches it.
+        s.keepouts[0] = ko(vec![Keep::Pads], vec![0], None);
+        assert!(check(&s, "b").is_empty());
+        s.keepouts[0] = ko(vec![Keep::Placements], vec![0], None);
+        assert_eq!(check(&s, "b")[0].refs, ["b:keepout/k1", "b:r1"]);
+        // On the bottom only: a top part and a top-only via are clear.
+        s.keepouts[0] = ko(vec![Keep::Placements, Keep::Tracks], vec![1], None);
+        assert!(check(&s, "b").is_empty());
+        // A part's own keepout leaves its own pads alone.
+        s.keepouts[0] = ko(vec![Keep::Copper], vec![0], Some("r1"));
+        let f = check(&s, "b");
+        assert_eq!(
+            f.iter().map(|x| x.refs[1].as_str()).collect::<Vec<_>>(),
+            ["b:via/v1"]
+        );
+    }
     #[test]
     fn a_footprints_keepout_is_placed_and_its_layers_swap_on_the_bottom() {
         let k = crate::footprint::Keepout {

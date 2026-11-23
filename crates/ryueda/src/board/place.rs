@@ -318,6 +318,14 @@ fn blocked(
             return Some(c.owner.clone());
         }
     }
+    let outer = if bottom { n - 1 } else { 0 };
+    for k in s.keepouts.iter().filter(|k| {
+        k.keeps.contains(&crate::footprint::Keep::Placements) && k.layers.contains(&outer)
+    }) {
+        if measure::touches(&b, &Body::of_shape(&k.shape, opts)) != Verdict::No {
+            return Some(k.reference.clone());
+        }
+    }
     for p in pads {
         let Some(pb) = p.copper.bounds() else {
             continue;
@@ -624,6 +632,59 @@ mod tests {
         );
         // Asked again, the same answer: the order is total.
         assert_eq!(legalise("b", &s, &rules(), &JLC_2L, &ask).unwrap(), v);
+    }
+
+    #[test]
+    fn the_legaliser_keeps_out_of_placement_keepouts() {
+        let fp = crate::footprint::tests::r0402();
+        let o = r(&fp);
+        let mut s = board(20 * MM, 10 * MM);
+        s.smd("u1", "7", (10 * MM, 5 * MM), (MM, MM), Some("a"))
+            .courtyard("u1", (10 * MM, 5 * MM), (2 * MM, 2 * MM), false);
+        let c = [Constraint::Near {
+            near: "u1/7".into(),
+            within_nm: MM,
+        }];
+        let ask = Ask {
+            occ: &o,
+            rotation_mdeg: 0,
+            side: PlacementSide::Top,
+            constraints: &c,
+            now: None,
+        };
+        let first = legalise("b", &s, &rules(), &JLC_2L, &ask).unwrap();
+        let x = first["at"][0].as_i64().unwrap();
+        let y = first["at"][1].as_i64().unwrap();
+        let keep = crate::board::testing::rect(ryu_board::geom::Point::new(x, y), MM / 2, MM / 2);
+        s.keepouts.push(crate::board::shapes::KeepoutInfo {
+            reference: "b:keepout/k1".into(),
+            part: None,
+            layers: vec![0],
+            keeps: vec![crate::footprint::Keep::Placements],
+            shape: keep.clone(),
+        });
+        let second = legalise("b", &s, &rules(), &JLC_2L, &ask).unwrap();
+        assert_ne!(second["at"], first["at"]);
+        let place = ryu_board::geom::Place {
+            at: ryu_board::geom::Point::new(
+                second["at"][0].as_i64().unwrap(),
+                second["at"][1].as_i64().unwrap(),
+            ),
+            ..Default::default()
+        };
+        let (_, court) =
+            super::super::shapes::part("b", &o, &fp, place, &JLC_2L, 2, &Default::default());
+        let opts = BodyOptions::default();
+        assert_eq!(
+            measure::touches(
+                &Body::of_shape(&court.unwrap().shape, &opts),
+                &Body::of_shape(&keep, &opts)
+            ),
+            Verdict::No
+        );
+        // A keepout on the bottom doesn't hold a top part off.
+        s.keepouts[0].layers = vec![1];
+        assert_eq!(legalise("b", &s, &rules(), &JLC_2L, &ask).unwrap(), first);
     }
 
     #[test]

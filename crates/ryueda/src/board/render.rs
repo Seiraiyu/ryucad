@@ -92,7 +92,7 @@ pub fn default_layers(bottom: bool) -> Vec<String> {
     ]
 }
 
-fn hole_shape(h: &ryu_copper::layout::HoleShape) -> Shape {
+pub(crate) fn hole_shape(h: &ryu_copper::layout::HoleShape) -> Shape {
     use ryu_copper::layout::HoleShape as H;
     let region = match h {
         H::Round { at, d } => ryu_board::shape::circle(*at, ryu_board::geom::half(*d))

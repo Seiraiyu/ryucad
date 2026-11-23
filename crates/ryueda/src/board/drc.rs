@@ -1297,7 +1297,7 @@ struct Ctx<'a> {
 
 type Rule = fn(&Ctx) -> Vec<Finding>;
 
-const RULES: [Rule; 13] = [
+const RULES: [Rule; 14] = [
     |c| placements(c.board, c.files, c.occs, c.shapes),
     |c| copper(c.conn, c.incomplete),
     |c| clearance(c.conn, c.rules),
@@ -1311,6 +1311,7 @@ const RULES: [Rule; 13] = [
     |c| edges(c.conn, c.shapes, c.rules),
     |c| courtyards(c.shapes, c.board, c.rules),
     |c| super::place::constraints(c.board, c.files, c.occs, c.shapes),
+    |c| super::keepout::check(c.shapes, c.board),
 ];
 
 /// A board checked from shapes already built. A design that doesn't
