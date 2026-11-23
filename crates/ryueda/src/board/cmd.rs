@@ -359,6 +359,22 @@ pub fn drc(session: &mut Session, board: &str, codes: &[String]) -> Result<Value
     Ok(v)
 }
 
+/// `board.measure`: two items' exact distance on each copper layer they
+/// share, with the clearance the board's rules ask of them.
+pub fn measure(
+    session: &mut Session,
+    board: &str,
+    a: &str,
+    b: &str,
+    layer: Option<&str>,
+) -> Result<Value> {
+    let id = find(session.project(), board)?.id.clone();
+    let c = session.board_check(&id)?;
+    let mut v = super::measure::measure(&c.conn, &c.shapes, &c.rules, a, b, layer)?;
+    v["revision"] = json!(session.project().boards[&id].revision);
+    Ok(v)
+}
+
 /// `board status`: placed and unplaced parts, nets routed and open, and
 /// findings by code.
 pub fn status(session: &mut Session, board: &str) -> Result<Value> {

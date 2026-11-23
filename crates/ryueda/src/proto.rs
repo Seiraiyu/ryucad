@@ -856,6 +856,15 @@ pub enum Request {
     },
     #[serde(rename = "board.rules.explain")]
     BoardRulesExplain { board: String, refs: Vec<String> },
+    /// The exact distance between two items of a board, per copper layer.
+    #[serde(rename = "board.measure")]
+    BoardMeasure {
+        board: String,
+        a: String,
+        b: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        layer: Option<String>,
+    },
     /// A finding waived with a reason, or (`remove`) its waiver removed.
     #[serde(rename = "board.waive")]
     BoardWaive {

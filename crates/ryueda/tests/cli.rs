@@ -848,6 +848,7 @@ fn every_protocol_method_has_a_command() {
         ("board.rules.unset", &["board", "rules", "unset"]),
         ("board.rules.explain", &["board", "rules", "explain"]),
         ("board.waive", &["board", "waive"]),
+        ("board.measure", &["board", "measure"]),
         ("board.export", &["board", "export"]),
         ("block.create", &["block", "create"]),
         ("block.edit", &["block", "edit"]),
@@ -6063,4 +6064,31 @@ fn findings_waived_from_the_cli() {
         "finding_not_waivable",
         1,
     );
+}
+
+/// board measure from the CLI (ryueda 7.B): two pads of the round's
+/// board, a pad and its own track, a net and a part's courtyard.
+#[test]
+fn board_measure_from_the_cli() {
+    let p = Pair::breakout();
+    for args in breakout_board::script() {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        p.ok(&args);
+    }
+    let id = breakout_board::BOARD;
+    let m = p.ok(&["board", "measure", id, "R1/1", "R1/2"]);
+    let d = m["closest"]["distance_nm"].as_i64().unwrap();
+    assert!(d > 0 && d < 2_000_000, "{m}");
+    assert_eq!(m["closest"]["layer"], "copper.top", "{m}");
+    assert_eq!(m["closest"]["clearance"]["source"], "preset:jlc-2l", "{m}");
+    assert_eq!(m["closest"]["under"], false, "{m}");
+    let own = p.ok(&["board", "measure", id, "U1/3", "track/sda"]);
+    assert_eq!(own["closest"]["touching"], true, "{own}");
+    let net = p.ok(&[
+        "board", "measure", id, "net:sda", "net:scl", "--layer", "top",
+    ]);
+    assert!(net["closest"]["distance_nm"].as_i64().unwrap() > 0, "{net}");
+    let part = p.ok(&["board", "measure", id, "U1", "J1"]);
+    assert_eq!(part["closest"]["layer"], Value::Null, "{part}");
+    p.fails(&["board", "measure", id, "R9/1", "R1/1"], "not_found", 1);
 }

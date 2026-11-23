@@ -1419,6 +1419,9 @@ fn dispatch(
         Request::BoardRulesExplain { board, refs } => {
             crate::board::rulecmd::explain(session, &board, &refs)
         }
+        Request::BoardMeasure { board, a, b, layer } => {
+            crate::board::cmd::measure(session, &board, &a, &b, layer.as_deref())
+        }
         Request::BoardWaive {
             board,
             finding,

@@ -1756,6 +1756,16 @@ enum BoardCmd {
     /// The board's rules: defaults and per net class over its preset's floor.
     #[command(subcommand)]
     Rules(RulesCmd),
+    /// The exact distance between two items (R1/1, track/t1, via/v1,
+    /// hole/h1, R1/1#hole, R1 by its courtyard, net:NAME) on each copper
+    /// layer they share, with the clearance the rules ask of them.
+    Measure {
+        board: String,
+        a: String,
+        b: String,
+        #[arg(long)]
+        layer: Option<String>,
+    },
     /// Waive a finding by ID with --reason (kept with its measurement as a
     /// limit: a finding that gets worse counts again), or --remove its
     /// waiver. Shorts can't be waived.
@@ -4081,6 +4091,12 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
         Command::Board(BoardCmd::Drc { board, codes }) => Request::BoardDrc {
             board: board.clone(),
             codes: codes.clone(),
+        },
+        Command::Board(BoardCmd::Measure { board, a, b, layer }) => Request::BoardMeasure {
+            board: board.clone(),
+            a: a.clone(),
+            b: b.clone(),
+            layer: layer.clone(),
         },
         Command::Board(BoardCmd::Waive {
             board,
