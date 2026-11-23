@@ -99,3 +99,65 @@ The design is document 924 in the Coxswain planning project `ryucad-ryukei`; the
 - **Merges.** Presets and rules files merge by value through `merge::newest`; `rules.json`'s atoms are each waiver and each `via` (defaults' and a class's), so two waivers of different findings merge and two edits of one via conflict whole. Without `presets/<id>.json` and `boards/<b>/rules.json` in `git::project_file` the commit guard refused clean merges.
 - **Testing.** Unit tests per module: presets (documents, resolution, `jlc-4l`, inner hole clearances), `rules.rs` (judging, resolution and sources, waivers' limits), DRC under rules, merges and `measure.rs` (tracks exactly on their layer, a pad touching its own track, a hole in the plane, a net as every piece claiming it). `tests/cli.rs`, both ways: the preset commands, `board_rules_from_the_cli`, `findings_waived_from_the_cli` (gaps under 0.3 mm on the round's board waived until `drc`, `status`, `check` and an export without `--allow-errors` pass, the manifest listing the waivers; a short refused) and `board_measure_from_the_cli`. `board_gen::Spec` gained `rules` (none on every board it made before, byte for byte) and the fault `Nudge(n)`; `board_props.rs`'s `rules_raise_exactly_the_findings_they_should` (16 seeds, release only): a clearance a nanometre over the rows' track gap gives only `drc_clearance`, the preset's none, a width a nanometre over the tracks' one `drc_track_width` a track; every gap waived at its distance leaves no errors and no `waiver_unused`; a connection nudged a nanometre towards the row above exceeds the waivers it shares with that row, only those (findings are per pair, so a nudge exceeds several, not one as the plan expected). `rules_on_disk_round_trip` reads seeded files back to the same bytes. Goldens: `board.rules.{show,drc,measure,export.manifest.json}` (the round's board with a power class, 0.3 mm board-wide, 0.3 mm power tracks, every error waived; added only). The fuzz target `board` also draws a `rules.json` (defaults round the floor and under it, a class that exists and one that doesn't, waivers of any code with drawn limits) over a design with a `power` class; GitHub's fuzz.yml ran it 68,798 times in 10 minutes with no finding (https://github.com/Seiraiyu/ryucad/actions/runs/45103124577).
 - **Bars** (cox-worker-2, Ryzen 7 9700X, shared and not quiet, `RYUEDA_BARS=1`, one test at a time): the breakout's track write with its delta through a warm daemon 5.1 ms (50 ms); the generated board loaded, shaped, connected and checked 63 ms (1 s), a write 134 ms (250 ms). Design 629's 10,000-occurrence BOM bar missed again (56 ms; #976, on main too). No 7.B bar is asserted.
+
+## Placement, keepouts and drawings (decided in ryueda 7.C)
+
+The design is document 924 in the Coxswain planning project `ryucad-ryukei`; these are its phases 5 and 6, plan 7.C.
+
+- **Placements gain intent.** `constraints`, `group` and `fields` sit beside `at`, `rotation_mdeg` and `side`. Each is written only when set, and a placement holding any of them is format 2 (`conn::format_of`). Merge atoms: `/constraints` (the list is one promise) and `/fields/reference`, `/fields/value`. Faults: a negative or out-of-range `within_nm`, a group that is empty, longer than 64 characters or holds `/` or a control character, a field size that isn't positive.
+- **Constraints** (`board::place`, judged by the DRC rule `place::constraints`), each one of:
+  - `{near: REF, within_nm}`: the least distance between the part's pads' copper and REF's (a pad, or a part's pads) is at most `within_nm` (`measure::within`). A target the board lacks is unmet with `details.missing`.
+  - `{edge: left|right|top|bottom|any, within_nm}`: the part's courtyard (its pads' copper without one) lies within `within_nm` of that side of the outline's box, measured perpendicular to it on integer boxes; `any` is `measure::within` against the outline's edges.
+  - `{side}`: the placement's side.
+
+  One not met is `placement_constraint_unmet` (an error). Its refs are the part and the target (the pad or part, `<board>:edge/<side>`, `<board>:side/<side>`), so the ID survives a reordered list. `details` hold `constraint`, `distance_nm`, `within_nm` and `uncertain` (an uncertain verdict is reported, never guessed). It is waivable, its measurement `distance_nm`, larger worse. Nothing ever moves a part by itself.
+- **The legaliser** (`place::legalise`; `board place B REF --near T | --edge S --within D` without `--at`):
+  - Candidates are the placement grid's points (`rules.placement_grid()`) in a square about the target, ordered by squared distance, then x, then y.
+  - The target is the near target's box centre, or the point of the asked side of the outline's box nearest the part's place (the box's centre when unplaced; `any` the nearest of the four).
+  - The square's half side is `within + the part's copper radius + the target's half size` for `near`, `within + twice the part's copper radius` for `edge`. At most 250,000 candidates are tried.
+  - The first is taken where every constraint holds and the part is clear:
+    - its courtyard (else its pads' copper) is inside the outline and no closer than `edge_clearance(None)` to its edges;
+    - it clears every other same-side courtyard by `courtyard_clearance()`;
+    - no keepout keeping `placements` on its side's outer layer touches it;
+    - each pad clears other nets' copper on its layers by `pair_clearance`.
+  - Uncertain counts as blocked. None is `placement_no_room`, with `blocked_by` (what stopped the nearest candidate whose constraints held, or `constraint`) and `searched_nm`.
+  - A side constraint against `--side` is `invalid_param` at once.
+  - Parts placed in one request see the board as it was: place dependent parts in turn.
+- **Re-placing keeps intent** (question 1258). `board place` on a placed part keeps its constraints, group and field places unless the request changes them:
+  - constraint flags or `constraints` replace the list, and `--unconstrain` clears it;
+  - `--group` sets the group and `--ungroup` clears it;
+  - `--ref-at`, `--ref-rotation`, `--ref-hide` and `--ref-show` edit the designator.
+
+  Without `--at` and without a constraint a placed part stays where it is, so `board place B R1 --ref-at 0,1.5` moves only the designator. The answer's entry adds `constraints`, `group` and `legalised` (`searched_nm`, `tried`) only when set; `board show` prints a placement the same way, so stage 5's answers don't move.
+- **Groups** (`board::group`): `board group list` (each group with its members, sorted), `board group move B G --by DX,DY | --rotate A [--about X,Y]`, `board group flip B G`.
+  - The centre is the members' places' box midpoint, rounding down.
+  - A turn goes through `Place::point` (exact for quarter turns, `ryu_math` otherwise) and adds A to each rotation.
+  - A flip mirrors about the centre's vertical line (`x' = 2c - x`), swaps the side and negates the rotation.
+  - Every move is all or nothing. Tracks don't follow: the DRC delta says what moved under them.
+- **Designator fields.** `fields.reference` and `fields.value` are each `{at?, rotation_mdeg?, hidden?, size_nm?}` relative to the part, over the footprint's field key by key (`shapes::field_with`). A field the footprint lacks is drawn from the override on `silk.top` at 1 mm, 0.15 mm thick, when it gives `at`.
+- **Keepout files.** `boards/<b>/keepouts/<id>.json`, kind `ryueda.keepout`, format 1: `contour` (lines and arcs, as an outline), `layers` (`top`, `in1` …, `bottom`, or `all`), `keeps`.
+  - `footprint::Keep` gains `placements` and `holes` beside `copper`, `tracks`, `vias`, `pads` and `pours`. `copper` keeps tracks, vias, pads and pours; `pours` waits for 7.D.
+  - Faults: `board_contour_invalid` at `/contour` (open, crossing itself through `outline::ring`/`simple`, or no area), `board_layer_not_found` at `/layers`, `invalid_document` for empty `keeps` or `layers`. The commit refuses a write that adds one.
+  - Merges: `/contour` is an atom; `keeps` and `layers` merge as sets.
+  - Commands: `board keepout add B --rect X0,Y0,X1,Y1 | --contour JSON [--layer L…] --keep K… [--id]` (every layer by default; `--ops` for several), `edit B ID`, `delete B ID…`.
+- **Footprints' keepouts** are placed with their parts (`keepout::placed_footprint_keepout`). Their footprint layers `copper.top`, `copper.bottom`, `copper.inner` and `copper.all` become the board's indices, top and bottom swapped on the bottom. They are enforced like the board's own, except against their own part's pads and drills (question 1259). References are `<board>:keepout/<id>` and `<board>:<label>#keepout/<id>`.
+- **`drc_keepout`** (an error, `keepout::check`, the 14th DRC rule): an item of a kept kind meets a keepout's area on one of its layers (`measure::touches`; uncertain reported).
+  - Tracks, vias and pads meet by their copper on the layer.
+  - Holes meet by their drill when the layer is in their span (`<owner>#hole`).
+  - `placements` meet by courtyards of parts on the side whose outer layer the keepout covers.
+  - refs: the keepout and the item. No measurement.
+- **Drawings.** `boards/<b>/drawings/<id>.json`, kind `ryueda.board-drawing`, format 1, the footprint format's `Graphic`.
+  - Layers: `silk`, `fab` and `mask` (either side), `drawings`, `comments`, `eco.1`, `eco.2`, `user.N`. Copper, paste, courtyard, adhesive, edge and margin are `invalid_document` at `/layer`, as is a shape that can't be drawn (`footprint::undrawable`).
+  - Text is centred on its place, and on a bottom layer mirrored about it (`Place { rot: -r, mirror: true }`).
+  - Drawings join `BoardShapes.layers` as `<board>:drawing/<id>`, so the silk and mask Gerbers and renders take them. A glyph the font lacks is `board_text_missing_glyph`, a warning.
+  - Commands: `board text add B --layer L --at X,Y --text T [--size] [--thickness] [--rotation] [--id]` (1 mm, a seventh of the size thick, at least 0.1 mm), `board drawing add B --ops JSON`, `edit B ID --ops OBJECT`, `delete B ID…`.
+- **Renders.** `board render` knows a `keepout` layer (each keepout's area, translucent red) and any layer a drawing is on. The default layers are unchanged.
+- **Git.** `keepouts/` and `drawings/` join `git::project_file`, the board's revision, the session's tracking and `merge::newest` (format 1).
+- **What didn't move.** No fixture board has constraints, keepouts or drawings, and no breakout footprint has a keepout. Every `board.breakout.*`, `board.four.*` and `board.rules.*` golden is unchanged; 7.C adds `board.place.*` only.
+- **Testing.**
+  - Unit tests per module: placement files and their faults; field places; each constraint at its distance and a nanometre under; the legaliser's order, refusals and keepouts; groups' moves; keepout files, placing and `drc_keepout`; drawings' layers and mirrored text; renders.
+  - `tests/cli.rs`, both ways: constraints, the legaliser and the side rule, groups, keepouts, text and drawings in the silk Gerber. `tests/git.rs`: constraints and groups merge; two constraint lists conflict at `/constraints`.
+  - `board_gen::Spec` gained `keepouts`, `constraints` and `drawings`, empty on every board it made before, byte for byte. `board_props.rs`, 16 seeds: near at the generated gap holds and a nanometre under fails once a pair; the left edge likewise; keepouts over a track or a part give only their findings; drawings none. The legaliser on 8 seeds finds a place that adds only opens, or says no room. Placements, keepouts and drawings round-trip.
+  - Goldens: `board.place.*`, added only.
+  - Fuzz: the `board` target draws constraints, groups, field places, keepouts and drawings, and runs the legaliser. It ran 45,009 times in 10 minutes on GitHub's runner with no finding: https://github.com/Seiraiyu/ryucad/actions/runs/45118804212.
+- **Bars** (cox-worker-2, Ryzen 7 9700X, shared, load about 11, `RYUEDA_BARS=1`, one test at a time): the breakout's track write 7.2 ms (50 ms); the generated board checked cold in 90 ms (1 s), a write 180 ms (250 ms). The 10,000-occurrence write-and-read bar read 185 ms once under that load and 18 to 25 ms on three reruns (50 ms). No 7.C bar is asserted.
