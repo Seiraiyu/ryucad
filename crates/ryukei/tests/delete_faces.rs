@@ -518,3 +518,96 @@ fn a_small_rounded_corners_two_fillets_deleted_never_panics() {
 fn face_of(r: FaceRole) -> Name {
     Name::derive(OpKey(0x22c0), Role::Face(r), &[])
 }
+
+/// Plan 23.C: the public partial delete. Nothing picked: the body back
+/// and an empty report. A bad size refuses before anything is built.
+#[test]
+fn a_partial_delete_of_nothing_is_the_body() {
+    use ryukei::tweak::{DeleteBlends, delete_blends_partial};
+    let (b, _) = primitive::block(OpKey(0x23c3), 1.0, 1.0, 1.0, &Rigid::IDENTITY).unwrap();
+    let spec = DeleteBlends {
+        max_size: Some(0.1),
+        ..Default::default()
+    };
+    let (o, j, r) = delete_blends_partial(OpKey(0x23c4), &b, &spec).unwrap();
+    assert_eq!(o.dump(), b.dump());
+    assert!(j.events().is_empty() && r.deleted.is_empty() && r.kept.is_empty());
+    let bad = DeleteBlends {
+        max_size: Some(-1.0),
+        ..Default::default()
+    };
+    assert_eq!(
+        delete_blends_partial(OpKey(0x23c4), &b, &bad).map(|_| ()),
+        Err(Error::InvalidTweak(TweakError::BadDistance))
+    );
+}
+
+/// ryukei 23.C's twin: a slab and a disc floating above it, joined by
+/// two concave fillets whose supports never meet, and a small fillet
+/// round the slab's bottom -x edge, all recognised blends; the disc reads
+/// as a larger fillet on the two bridges.
+#[test]
+fn the_partial_deletes_twin_holds_its_bridges_and_a_fillet() {
+    use ryukei_testkit::partial_deletes::{BRIDGE, DISC, FILLET, body};
+    let b = body();
+    assert_eq!(check(&b), []);
+    assert_eq!(check_intersections(&b), []);
+    let r = ryukei::tweak::recognise_blends(&b, &Default::default()).unwrap();
+    let mut sizes: Vec<f64> = r
+        .blends
+        .iter()
+        .map(|x| match x.kind {
+            BlendKind::Fillet { radius } => radius,
+            _ => 0.0,
+        })
+        .collect();
+    sizes.sort_by(f64::total_cmp);
+    let want = [FILLET, BRIDGE, BRIDGE, DISC];
+    assert_eq!(sizes.len(), want.len(), "{sizes:?}");
+    for (s, w) in sizes.iter().zip(want) {
+        assert!((s - w).abs() < 1e-9, "{sizes:?}");
+    }
+}
+
+/// ryukei 23.C's twin through the public API: the whole delete refuses;
+/// the partial one deletes the fillet and keeps both bridges, each with
+/// a typed refusal, one valid solid at the closed-form volume, the
+/// bridges' faces under their names.
+#[test]
+fn the_partial_deletes_twin_keeps_its_bridges() {
+    use ryukei::tweak::{DeleteBlends, delete_blends, delete_blends_partial};
+    use ryukei_testkit::partial_deletes::{FILLET, MAX_SIZE, body, kept_volume};
+    let b = body();
+    let spec = DeleteBlends {
+        max_size: Some(MAX_SIZE),
+        ..Default::default()
+    };
+    let whole = delete_blends(OpKey(0x23cb), &b, &spec);
+    assert!(
+        matches!(whole, Err(Error::InvalidTweak(_))),
+        "{:?}",
+        whole.map(|(o, _)| o.counts().faces)
+    );
+    let (o, j, r) = delete_blends_partial(OpKey(0x23cb), &b, &spec).unwrap();
+    println!("deleted {:?}", r.deleted);
+    println!("kept {:?}", r.kept);
+    assert_eq!(r.deleted.len(), 1);
+    let fillet = &r.recognition.blends[r.deleted[0].blends[0]];
+    assert_eq!(fillet.kind, BlendKind::Fillet { radius: FILLET });
+    assert_eq!(r.kept.len(), 2);
+    for k in &r.kept {
+        assert!(matches!(k.cause, Error::InvalidTweak(_)), "{:?}", k.cause);
+        for f in &k.unit.faces {
+            assert!(o.by_name(*f).is_some(), "{f:?}");
+        }
+    }
+    assert_eq!(check(&o), []);
+    assert_eq!(check_intersections(&o), []);
+    let v = volume(&o);
+    assert!(
+        (v - kept_volume()).abs() <= 2e-3 * kept_volume(),
+        "{v} against {}",
+        kept_volume()
+    );
+    assert!(!j.events().is_empty());
+}
