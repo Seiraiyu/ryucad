@@ -1793,6 +1793,9 @@ enum BoardCmd {
     /// The board's rules: defaults and per net class over its preset's floor.
     #[command(subcommand)]
     Rules(RulesCmd),
+    /// Groups: parts moved together, rigidly, all or nothing.
+    #[command(subcommand)]
+    Group(GroupCmd),
     /// The exact distance between two items (R1/1, track/t1, via/v1,
     /// hole/h1, R1/1#hole, R1 by its courtyard, net:NAME) on each copper
     /// layer they share, with the clearance the rules ask of them.
@@ -1957,6 +1960,40 @@ enum HoleCmd {
         board: String,
         #[arg(required = true)]
         holes: Vec<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+}
+
+#[derive(Subcommand)]
+enum GroupCmd {
+    /// Each group and its members.
+    List { board: String },
+    /// Move every member --by DX,DY, or turn them --rotate A degrees about
+    /// --about X,Y (the members' places' box centre by default). Tracks
+    /// don't follow: the DRC delta says what moved under them.
+    Move {
+        board: String,
+        group: String,
+        #[arg(long, value_name = "DX,DY", allow_hyphen_values = true)]
+        by: Option<String>,
+        #[arg(long, allow_hyphen_values = true, conflicts_with = "by")]
+        rotate: Option<String>,
+        #[arg(
+            long,
+            value_name = "X,Y",
+            allow_hyphen_values = true,
+            requires = "rotate"
+        )]
+        about: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Turn every member over to the other side, mirrored about the
+    /// members' box's vertical centre line.
+    Flip {
+        board: String,
+        group: String,
         #[command(flatten)]
         expect: Expect,
     },
@@ -4159,6 +4196,33 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             a: a.clone(),
             b: b.clone(),
             layer: layer.clone(),
+        },
+        Command::Board(BoardCmd::Group(GroupCmd::List { board })) => Request::BoardGroupList {
+            board: board.clone(),
+        },
+        Command::Board(BoardCmd::Group(GroupCmd::Move {
+            board,
+            group,
+            by,
+            rotate,
+            about,
+            expect,
+        })) => Request::BoardGroupMove {
+            board: board.clone(),
+            group: group.clone(),
+            by: by.as_deref().map(|a| pair_arg("--by", a)).transpose()?,
+            rotate: rotate.clone(),
+            about: about.as_deref().map(|a| pair_arg("--about", a)).transpose()?,
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Board(BoardCmd::Group(GroupCmd::Flip {
+            board,
+            group,
+            expect,
+        })) => Request::BoardGroupFlip {
+            board: board.clone(),
+            group: group.clone(),
+            expected_revision: expect.expect.clone(),
         },
         Command::Board(BoardCmd::Waive {
             board,

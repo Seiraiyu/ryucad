@@ -849,6 +849,9 @@ fn every_protocol_method_has_a_command() {
         ("board.rules.explain", &["board", "rules", "explain"]),
         ("board.waive", &["board", "waive"]),
         ("board.measure", &["board", "measure"]),
+        ("board.group.list", &["board", "group", "list"]),
+        ("board.group.move", &["board", "group", "move"]),
+        ("board.group.flip", &["board", "group", "flip"]),
         ("board.export", &["board", "export"]),
         ("block.create", &["block", "create"]),
         ("block.edit", &["block", "edit"]),
@@ -6179,4 +6182,49 @@ fn parts_placed_by_constraint_from_the_cli() {
         1,
     );
     p.fails(&["board", "place", "main", "C1"], "invalid_param", 1);
+}
+
+/// Groups from the CLI (ryueda 7.C): listed, moved, turned and flipped
+/// rigidly, all or nothing; an unknown group refused.
+#[test]
+fn groups_move_rigidly_from_the_cli() {
+    let p = Pair::breakout();
+    p.ok(&[
+        "board", "create", "Main", "--design", "board", "--rect", "30,20", "--id", "main",
+    ]);
+    p.ok(&[
+        "board", "place", "main", "R1", "--at", "10,10", "--group", "g",
+    ]);
+    p.ok(&[
+        "board", "place", "main", "R2", "--at", "14,10", "--group", "g",
+    ]);
+    p.ok(&["board", "place", "main", "C1", "--at", "20,10"]);
+    let l = p.ok(&["board", "group", "list", "main"]);
+    assert_eq!(
+        l["groups"],
+        json!([{"group": "g", "members": ["r1", "r2"]}]),
+        "{l}"
+    );
+    let m = p.ok(&["board", "group", "move", "main", "g", "--by", "1,2"]);
+    assert_eq!(m["moved"].as_array().unwrap().len(), 2, "{m}");
+    let at = |r: &str| placement_of(&p, "main", r);
+    assert_eq!(at("R1")["at"], json!([11_000_000, 12_000_000]));
+    assert_eq!(
+        at("C1")["at"],
+        json!([20_000_000, 10_000_000]),
+        "not a member"
+    );
+    p.ok(&[
+        "board", "group", "move", "main", "g", "--rotate", "90", "--about", "13,12",
+    ]);
+    assert_eq!(at("R1")["at"], json!([13_000_000, 10_000_000]));
+    assert_eq!(at("R1")["rotation_mdeg"], 90_000);
+    p.ok(&["board", "group", "flip", "main", "g"]);
+    assert_eq!(at("R1")["side"], "bottom");
+    p.fails(
+        &["board", "group", "move", "main", "nope", "--by", "1,0"],
+        "not_found",
+        1,
+    );
+    p.fails(&["board", "group", "move", "main", "g"], "invalid_param", 1);
 }

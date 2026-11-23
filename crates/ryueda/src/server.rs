@@ -1438,6 +1438,52 @@ fn dispatch(
         Request::BoardMeasure { board, a, b, layer } => {
             crate::board::cmd::measure(session, &board, &a, &b, layer.as_deref())
         }
+        Request::BoardGroupList { board } => crate::board::group::list(session.project(), &board),
+        Request::BoardGroupMove {
+            board,
+            group,
+            by,
+            rotate,
+            about,
+            expected_revision,
+        } => {
+            let unit = session.project().manifest.default_unit;
+            let m = match (by, rotate) {
+                (Some(d), None) => {
+                    crate::board::group::Move::By(crate::coord::point(&json!(d), unit)?)
+                }
+                (None, Some(a)) => {
+                    crate::board::group::Move::Rotate(crate::coord::mdeg(&json!(a))?)
+                }
+                _ => {
+                    return Err(crate::error::Error::new(
+                        crate::error::Code::InvalidParam,
+                        "give --by DX,DY or --rotate A",
+                    )
+                    .with("param", "by"));
+                }
+            };
+            crate::board::group::apply(
+                session,
+                &board,
+                &group,
+                m,
+                about.map(|a| json!(a)).as_ref(),
+                expected_revision.as_deref(),
+            )
+        }
+        Request::BoardGroupFlip {
+            board,
+            group,
+            expected_revision,
+        } => crate::board::group::apply(
+            session,
+            &board,
+            &group,
+            crate::board::group::Move::Flip,
+            None,
+            expected_revision.as_deref(),
+        ),
         Request::BoardWaive {
             board,
             finding,

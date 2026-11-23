@@ -889,6 +889,32 @@ pub enum Request {
     },
     #[serde(rename = "board.rules.explain")]
     BoardRulesExplain { board: String, refs: Vec<String> },
+    /// Each group of a board and its members.
+    #[serde(rename = "board.group.list")]
+    BoardGroupList { board: String },
+    /// A group's members moved `by` [dx, dy], or turned `rotate` degrees
+    /// about `about` (the members' box's centre when absent).
+    #[serde(rename = "board.group.move")]
+    BoardGroupMove {
+        board: String,
+        group: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<[String; 2]>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rotate: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        about: Option<[String; 2]>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// A group's members turned over about its box's vertical centre line.
+    #[serde(rename = "board.group.flip")]
+    BoardGroupFlip {
+        board: String,
+        group: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     /// The exact distance between two items of a board, per copper layer.
     #[serde(rename = "board.measure")]
     BoardMeasure {
@@ -1744,6 +1770,8 @@ impl Request {
                 | Request::BoardRulesSet { .. }
                 | Request::BoardRulesUnset { .. }
                 | Request::BoardWaive { .. }
+                | Request::BoardGroupMove { .. }
+                | Request::BoardGroupFlip { .. }
                 | Request::BoardEdit { .. }
                 | Request::BoardDelete { .. }
                 | Request::BoardPlace { .. }
