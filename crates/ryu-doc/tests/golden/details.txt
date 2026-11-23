@@ -276,6 +276,12 @@ operation_no_effect exit 1 "Operation no effect"
   point str The point at fault.
   annotation str The annotation that would change nothing.
 
+release_tag_clash exit 1 "Release tag clash"
+  tag str The tag that couldn't be written.
+  clashes str The tag Git already holds that it clashes with.
+  created any The tags written before it, which are kept.
+  moved any The tags moved before it, which are kept.
+
 wrong_part_kind exit 1 "Wrong part kind"
   part str The part of the wrong kind.
   feature str The feature that needs another kind.
@@ -315,6 +321,47 @@ drc_hole_clearance exit 1 "DRC hole clearance"
   uncertain bool Whether the verdict is uncertain.
   plated bool Whether the hole is plated.
   rule_nm num The hole clearance asked for, in nanometres.
+
+board_class_not_found exit 1 "Board class not found"
+  class str The net class the rules name, which the design doesn't have.
+
+board_preset_not_found exit 1 "Board preset not found"
+  preset str The preset asked for.
+
+rule_below_preset exit 1 "Rule below preset"
+  floor_nm num The preset's floor, in nanometres.
+  max_nm num The preset's greatest drill, in nanometres.
+
+waiver_exceeded exit 1 "Waiver exceeded"
+  reason str Why the finding was waived.
+  by str Who waived it.
+  limit num The waiver's limit, which the finding now passes.
+
+finding_not_found exit 1 "Finding not found"
+  finding str The finding asked for.
+
+finding_not_waivable exit 1 "Finding not waivable"
+  finding str The finding asked for.
+
+preset_in_use exit 1 "Preset in use"
+  boards arr The boards that use the preset.
+
+placement_constraint_unmet exit 1 "Placement constraint unmet"
+  constraint any The placement constraint that isn't met.
+  distance_nm num How far the part is from its target, in nanometres.
+  within_nm num How near the constraint asks it to be, in nanometres.
+  uncertain bool Whether the verdict is uncertain.
+  missing bool Whether the constraint's target is missing.
+
+placement_no_room exit 1 "Placement no room"
+  blocked_by str What blocked the nearest point that held the constraints.
+  searched_nm num How far from the target was searched, in nanometres.
+
+drc_keepout exit 1 "DRC keepout"
+  uncertain bool Whether the verdict is uncertain.
+  keeps arr What the keepout keeps out.
+
+board_contour_invalid exit 1 "Board contour invalid"
 
 drc_failed exit 1 "DRC failed"
   report obj The board's DRC report: `board`, `findings` and `drc`.

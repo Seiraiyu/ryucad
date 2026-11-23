@@ -541,6 +541,52 @@ details! {
         key("why", Str, "Why the ledger can't be asked, as a code (`ledger_off`, `review_unreachable`)."),
         key("cause", Obj, "The error asking it gave."),
     ],
+    ReleaseTagClash => [
+        key("tag", Str, "The tag that couldn't be written."),
+        key("clashes", Str, "The tag Git already holds that it clashes with."),
+        key("created", Any, "The tags written before it, which are kept."),
+        key("moved", Any, "The tags moved before it, which are kept."),
+    ],
+    BoardClassNotFound => [
+        key("class", Str, "The net class the rules name, which the design doesn't have."),
+    ],
+    BoardPresetNotFound => [
+        key("preset", Str, "The preset asked for."),
+    ],
+    RuleBelowPreset => [
+        key("floor_nm", Num, "The preset's floor, in nanometres."),
+        key("max_nm", Num, "The preset's greatest drill, in nanometres."),
+    ],
+    WaiverExceeded => [
+        key("reason", Str, "Why the finding was waived."),
+        key("by", Str, "Who waived it."),
+        key("limit", Num, "The waiver's limit, which the finding now passes."),
+    ],
+    FindingNotFound => [
+        key("finding", Str, "The finding asked for."),
+    ],
+    FindingNotWaivable => [
+        key("finding", Str, "The finding asked for."),
+    ],
+    PresetInUse => [
+        key("boards", Arr, "The boards that use the preset."),
+    ],
+    PlacementConstraintUnmet => [
+        key("constraint", Any, "The placement constraint that isn't met."),
+        key("distance_nm", Num, "How far the part is from its target, in nanometres."),
+        key("within_nm", Num, "How near the constraint asks it to be, in nanometres."),
+        key("uncertain", Bool, "Whether the verdict is uncertain."),
+        key("missing", Bool, "Whether the constraint's target is missing."),
+    ],
+    PlacementNoRoom => [
+        key("blocked_by", Str, "What blocked the nearest point that held the constraints."),
+        key("searched_nm", Num, "How far from the target was searched, in nanometres."),
+    ],
+    DrcKeepout => [
+        key("uncertain", Bool, "Whether the verdict is uncertain."),
+        key("keeps", Arr, "What the keepout keeps out."),
+    ],
+    BoardContourInvalid => [],
 }
 
 /// Words written their own way in titles.
