@@ -261,6 +261,31 @@ fn every_protocol_method_has_a_command() {
     let commands: &[(&str, &[&str])] = &[
         ("project.info", &["info"]),
         ("item.create", &["item", "create"]),
+        (
+            "document.add",
+            &[
+                "document", "add", "../x.pdf", "--number", "D-1", "--title", "X",
+            ],
+        ),
+        ("document.show", &["document", "show", "D-1"]),
+        ("document.list", &["document", "list"]),
+        (
+            "document.edit",
+            &["document", "edit", "D-1", "--title", "Y"],
+        ),
+        ("document.renumber", &["document", "renumber", "D-1", "D-2"]),
+        (
+            "document.replace",
+            &["document", "replace", "D-1", "../x.pdf"],
+        ),
+        ("document.remove", &["document", "remove", "D-1"]),
+        (
+            "document.get",
+            &["document", "get", "D-1", "--out", "../y.pdf"],
+        ),
+        ("document.attach", &["document", "attach", "D-1", "A-1"]),
+        ("document.detach", &["document", "detach", "D-1", "A-1"]),
+        ("document.where_used", &["document", "where-used", "D-1"]),
         ("item.show", &["item", "show"]),
         ("item.list", &["item", "list"]),
         ("item.edit", &["item", "edit"]),
