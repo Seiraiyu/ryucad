@@ -25,6 +25,7 @@ pub mod check;
 pub mod client;
 pub mod daemon;
 pub mod diff;
+pub mod document;
 pub mod drivers;
 pub mod fault;
 pub mod ids;

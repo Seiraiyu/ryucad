@@ -78,11 +78,35 @@ pub struct Item {
     pub aml: Vec<Value>,
     pub links: Vec<Link>,
     pub bom: Vec<Line>,
-    pub documents: Vec<Id>,
+    /// Documents named, sorted and without repeats (design 937).
+    pub documents: Vec<crate::document::DocRef>,
     /// Provenance by import name, opaque here (0.C).
     pub source: Map<String, Value>,
     /// Unmapped fields by import name, kept as read (0.C).
     pub extra: Map<String, Value>,
+}
+
+/// Gives a numbered thing `number`, keeping the one it had first in
+/// `previous` (design 734): what names it names its ID, so nothing else
+/// changes. Items and documents both renumber this way.
+pub fn renumber_in(current: &mut String, previous: &mut Vec<String>, number: &str) -> Result<()> {
+    if !number_ok(number) {
+        return Err(
+            Error::new(Code::InvalidParam, format!("bad part number {number:?}"))
+                .with("number", number),
+        );
+    }
+    if number == current {
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!("the number is already {number:?}"),
+        )
+        .with("number", number));
+    }
+    let old = std::mem::replace(current, number.to_owned());
+    previous.retain(|p| p != number && *p != old);
+    previous.insert(0, old);
+    Ok(())
 }
 
 /// Whether `n` may be a part number: non-empty, at most 200 characters, no
@@ -110,23 +134,7 @@ impl Item {
     /// `previous_numbers` (design 734): links, lines and documents name
     /// the ID, so nothing else changes.
     pub fn renumber(&mut self, number: &str) -> Result<()> {
-        if !number_ok(number) {
-            return Err(
-                Error::new(Code::InvalidParam, format!("bad part number {number:?}"))
-                    .with("number", number),
-            );
-        }
-        if number == self.number {
-            return Err(Error::new(
-                Code::InvalidParam,
-                format!("the item is already {number:?}"),
-            )
-            .with("number", number));
-        }
-        let old = std::mem::replace(&mut self.number, number.to_owned());
-        self.previous_numbers.retain(|p| p != number && *p != old);
-        self.previous_numbers.insert(0, old);
-        Ok(())
+        renumber_in(&mut self.number, &mut self.previous_numbers, number)
     }
 
     /// The unit of measure, `each` unless set.
@@ -189,7 +197,7 @@ impl Item {
         if !self.documents.is_empty() {
             put(
                 "documents",
-                self.documents.iter().map(|d| json!(d.as_str())).collect(),
+                self.documents.iter().map(|d| json!(d.text())).collect(),
             );
         }
         if !self.source.is_empty() {
@@ -338,12 +346,19 @@ impl Item {
                 .ok_or_else(|| invalid("/documents", "documents must be a list"))?;
             for (i, x) in list.iter().enumerate() {
                 let at = format!("/documents/{i}");
-                let id = x
+                let r = x
                     .as_str()
-                    .and_then(|s| Id::parse(s, "document").ok())
-                    .ok_or_else(|| invalid(&at, "a document ID"))?;
-                item.documents.push(id);
+                    .and_then(crate::document::DocRef::parse)
+                    .ok_or_else(|| {
+                        invalid(
+                            &at,
+                            "a document ID, or <catalogue project ID>:<document ID>",
+                        )
+                    })?;
+                item.documents.push(r);
             }
+            item.documents.sort();
+            item.documents.dedup();
         }
         for (k, slot) in [("source", &mut item.source), ("extra", &mut item.extra)] {
             if let Some(x) = o.take_opt(k) {
@@ -475,6 +490,38 @@ pub(crate) mod tests {
             assert_eq!(e.details["item"], "k3v9q2m8x4c1p");
         }
     }
+    #[test]
+    fn documents_are_a_sorted_set() {
+        let mut v = full();
+        v["documents"] = json!([
+            "0123456789abcdef0123456789abcdef:k3v9q2m8x4c1p",
+            "k3v9q2m8x4c1p",
+            "0000000000001",
+            "k3v9q2m8x4c1p"
+        ]);
+        let item = Item::from_json(&v).unwrap();
+        let texts: Vec<String> = item
+            .documents
+            .iter()
+            .map(crate::document::DocRef::text)
+            .collect();
+        assert_eq!(
+            texts,
+            [
+                "0000000000001",
+                "k3v9q2m8x4c1p",
+                "0123456789abcdef0123456789abcdef:k3v9q2m8x4c1p"
+            ]
+        );
+        let id = Id::parse("k3v9q2m8x4c1p", "item").unwrap();
+        assert_eq!(Item::read(&id, item.to_text().as_bytes()).unwrap(), item);
+        v["documents"] = json!(["x:y"]);
+        assert_eq!(
+            Item::from_json(&v).unwrap_err().details["pointer"],
+            "/documents/0"
+        );
+    }
+
     #[test]
     fn renumbering_keeps_the_old_number() {
         let mut i = Item::new("A-1");

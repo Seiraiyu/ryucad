@@ -117,15 +117,90 @@ pub fn item_of(path: &str) -> Option<Id> {
 /// The name of a JSON file one folder below `items/`, at its shard or not:
 /// what a misplaced item file is called.
 pub fn shard_of(path: &str) -> Option<&str> {
-    let rest = path.strip_prefix(ITEMS)?.strip_prefix('/')?;
+    shard_in(ITEMS, path)
+}
+
+/// The folder of documents, below the catalogue (design 937).
+pub const DOCUMENTS: &str = "documents";
+
+/// The name of a JSON file one folder below `top`, at its shard or not.
+fn shard_in<'a>(top: &str, path: &'a str) -> Option<&'a str> {
+    let rest = path.strip_prefix(top)?.strip_prefix('/')?;
     let (dir, file) = rest.split_once('/')?;
     (dir.len() == 2 && !file.contains('/')).then_some(())?;
     file.strip_suffix(".json").filter(|n| n.len() >= 2)
 }
 
+/// [`shard_of`] for document records.
+pub fn doc_shard_of(path: &str) -> Option<&str> {
+    shard_in(DOCUMENTS, path)
+}
+
+/// Where document `id`'s record lives: `documents/<first two>/<id>.json`.
+pub fn document_path(id: &Id) -> String {
+    format!("{DOCUMENTS}/{}/{id}.json", &id.as_str()[..2])
+}
+
+/// The ID of the document record at `path`, when it is one at its shard.
+pub fn document_of(path: &str) -> Option<Id> {
+    let id = Id::parse(doc_shard_of(path)?, "document").ok()?;
+    (document_path(&id) == path).then_some(id)
+}
+
+/// The folder holding document `id`'s bytes.
+pub fn bytes_dir(id: &Id) -> String {
+    format!("{DOCUMENTS}/{}/{id}", &id.as_str()[..2])
+}
+
+/// Where document `id`'s bytes named `name` live.
+pub fn bytes_path(id: &Id, name: &str) -> String {
+    format!("{}/{name}", bytes_dir(id))
+}
+
+/// The document whose folder holds the file at `path`, and the file's
+/// name: `documents/<first two>/<id>/<name>`, at its shard.
+pub fn bytes_of(path: &str) -> Option<(Id, &str)> {
+    let rest = path.strip_prefix(DOCUMENTS)?.strip_prefix('/')?;
+    let mut it = rest.splitn(3, '/');
+    let (shard, id, name) = (it.next()?, it.next()?, it.next()?);
+    if name.is_empty() || name.contains('/') {
+        return None;
+    }
+    let id = Id::parse(id, "document").ok()?;
+    (id.as_str().len() >= 2 && &id.as_str()[..2] == shard).then_some((id, name))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn documents_and_their_bytes_live_at_their_shard() {
+        let id = Id::parse("k3v9q2m8x4c1p", "document").unwrap();
+        assert_eq!(document_path(&id), "documents/k3/k3v9q2m8x4c1p.json");
+        assert_eq!(
+            document_of("documents/k3/k3v9q2m8x4c1p.json"),
+            Some(id.clone())
+        );
+        assert_eq!(document_of("documents/k4/k3v9q2m8x4c1p.json"), None);
+        assert_eq!(document_of("items/k3/k3v9q2m8x4c1p.json"), None);
+        assert_eq!(bytes_dir(&id), "documents/k3/k3v9q2m8x4c1p");
+        assert_eq!(
+            bytes_path(&id, "Spec A.pdf"),
+            "documents/k3/k3v9q2m8x4c1p/Spec A.pdf"
+        );
+        assert_eq!(
+            bytes_of("documents/k3/k3v9q2m8x4c1p/Spec A.pdf"),
+            Some((id.clone(), "Spec A.pdf"))
+        );
+        assert_eq!(bytes_of("documents/k4/k3v9q2m8x4c1p/a.pdf"), None);
+        assert_eq!(bytes_of("documents/k3/k3v9q2m8x4c1p/sub/a.pdf"), None);
+        assert_eq!(bytes_of("documents/k3/k3v9q2m8x4c1p.json"), None);
+        assert_eq!(
+            doc_shard_of("documents/k4/k3v9q2m8x4c1p.json"),
+            Some("k3v9q2m8x4c1p")
+        );
+    }
 
     #[test]
     fn ids_are_thirteen_crockford_characters() {

@@ -193,6 +193,9 @@ mod tests {
         use crate::testing::Toy;
         let files: std::collections::BTreeMap<String, Vec<u8>> = Default::default();
         let a = ryu_doc::id::Id::parse("a", "part").unwrap();
-        assert_eq!(Toy::properties_path_in(&files, &a), Toy::properties_path(&a));
+        assert_eq!(
+            Toy::properties_path_in(&files, &a),
+            Toy::properties_path(&a)
+        );
     }
 }
