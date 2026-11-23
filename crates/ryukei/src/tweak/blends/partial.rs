@@ -593,6 +593,103 @@ mod tests {
         assert_eq!(o.dump(), grow_all(&b, &m).unwrap().0.dump());
     }
 
+    /// The corner-and-round block's units, as
+    /// [`a_refused_set_is_tried_unit_by_unit`] names them: the corner's
+    /// two, by least face name, and the round.
+    fn corner_units(b: &Body) -> (Vec<Name>, Vec<Name>, Vec<Name>) {
+        let rec = crate::tweak::recognise_blends(b, &RecogniseOptions::default()).unwrap();
+        let all: BTreeSet<usize> = (0..rec.blends.len()).collect();
+        let on_top = |n: &Name| {
+            let f = b.faces().find(|&f| b.faces[f].name == *n).unwrap();
+            crate::intersect::face_box(b, f).max().z > 0.399
+        };
+        let (top, round): (Vec<BlendUnit>, Vec<BlendUnit>) = units(&rec, &all)
+            .into_iter()
+            .partition(|u| u.faces.iter().all(on_top));
+        (
+            top[0].faces.clone(),
+            top[1].faces.clone(),
+            round[0].faces.clone(),
+        )
+    }
+
+    /// Plan 23.C, Decision 5: a cancel during a step answers `Cancelled`
+    /// from the partial delete itself, never a unit kept with it.
+    #[test]
+    fn a_cancel_during_a_step_answers_cancelled() {
+        let b = a_corner_and_a_round();
+        let flag = std::sync::atomic::AtomicBool::new(false);
+        let w = Work::unlimited().with_cancel(&flag);
+        let m = Meter::new(&w);
+        let set = |_: &Body, ids: &BTreeSet<FaceId>, m: &Meter| -> Built {
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+            let _ = m.charge(1);
+            Err(TweakError::Uncertain {
+                at: b.faces[*ids.iter().next().unwrap()].name,
+            }
+            .into())
+        };
+        let unit = |_: &Body, f: Vec<Name>, _: &Meter| -> Built { panic!("{f:?}") };
+        let spec = DeleteBlends {
+            max_size: Some(0.1),
+            ..Default::default()
+        };
+        let steps = Steps {
+            set: &set,
+            unit: &unit,
+        };
+        assert_eq!(
+            partial_with(&b, &spec, &m, &steps).map(|_| ()),
+            Err(Error::Cancelled)
+        );
+    }
+
+    /// Plan 23.C, Decision 5: a budget that runs out during a unit's step
+    /// keeps it, and every unit that would have been tried after it, with
+    /// the budget as their cause; a unit nothing changed round since it
+    /// refused keeps its own cause. Here both sets refuse whole; the
+    /// corner's first unit runs the budget out, so its second, never
+    /// tried, is kept with the budget; the round (a set of one unit, its
+    /// neighbours unchanged) keeps its set's refusal.
+    #[test]
+    fn a_budget_spent_in_a_unit_keeps_the_rest_with_it() {
+        let b = a_corner_and_a_round();
+        let (first, second, round) = corner_units(&b);
+        let w = Work::unlimited().with_budget(1 << 40);
+        let m = Meter::new(&w);
+        let no = |f: Name| -> Error { TweakError::Uncertain { at: f }.into() };
+        let set = |o: &Body, ids: &BTreeSet<FaceId>, _: &Meter| -> Built {
+            Err(no(o.faces[*ids.iter().next().unwrap()].name))
+        };
+        let unit = |_: &Body, f: Vec<Name>, m: &Meter| -> Built {
+            assert_eq!(f, first, "only the corner's first unit is tried");
+            let _ = m.charge(1 << 41);
+            Err(no(f[0]))
+        };
+        let spec = DeleteBlends {
+            max_size: Some(0.1),
+            ..Default::default()
+        };
+        let steps = Steps {
+            set: &set,
+            unit: &unit,
+        };
+        let (o, _, r) = partial_with(&b, &spec, &m, &steps).unwrap();
+        assert_eq!(o.dump(), b.dump());
+        assert!(r.deleted.is_empty());
+        let cause = |faces: &Vec<Name>| {
+            r.kept
+                .iter()
+                .find(|k| &k.unit.faces == faces)
+                .map(|k| k.cause.clone())
+                .unwrap()
+        };
+        assert!(matches!(cause(&first), Error::BudgetExceeded { .. }));
+        assert!(matches!(cause(&second), Error::BudgetExceeded { .. }));
+        let least = |f: &Vec<Name>| *f.iter().min().unwrap();
+        assert_eq!(cause(&round), no(least(&round)));
+    }
+
     /// Design 919, plan 23.C: units partition the closed picks, each the
     /// closure of its least blend alone, by least face name.
     #[test]
