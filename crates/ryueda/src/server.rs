@@ -2200,7 +2200,7 @@ fn dispatch(
         // In process there is nothing running to cancel; the daemon
         // answers it before it reaches here.
         Request::RequestCancel { .. } => Err(live::no_live_session("request.cancel")),
-        Request::DaemonStatus {} | Request::DaemonShutdown {} => Err(Error::new(
+        Request::DaemonStatus { .. } | Request::DaemonShutdown {} => Err(Error::new(
             Code::Usage,
             "only a running daemon answers daemon requests",
         )),
