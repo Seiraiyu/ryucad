@@ -521,6 +521,7 @@ pub fn place(
                     .with("param", "side"));
                 }
             },
+            ..Placement::default()
         };
         w.put(
             placement_path(&id, &o.reference),

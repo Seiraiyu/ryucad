@@ -80,6 +80,12 @@ fn rules_atom(at: &str) -> bool {
     )
 }
 
+/// A placement's constraint list is one promise; each field's place one
+/// value.
+fn placement_atom(at: &str) -> bool {
+    matches!(segs(at).as_slice(), ["constraints"] | ["fields", _])
+}
+
 fn libcomp_atom(at: &str) -> bool {
     matches!(
         segs(at).as_slice(),
@@ -104,6 +110,7 @@ fn atoms(kind: &str) -> fn(&str) -> bool {
         crate::libcomp::KIND => libcomp_atom,
         crate::board::BOARD_KIND => board_atom,
         crate::board::RULES_KIND => rules_atom,
+        crate::board::PLACEMENT_KIND => placement_atom,
         crate::project::LOCK_KIND => ryupdm::git::lock_atom,
         _ => no_atom,
     }

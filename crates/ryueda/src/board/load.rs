@@ -370,13 +370,57 @@ fn hole_faults(h: &Hole) -> Vec<Fault> {
 
 fn placement_faults(p: &Placement) -> Vec<Fault> {
     let lim = ryu_board::geom::COORD_LIMIT;
+    let mut out = Vec::new();
     if p.at[0].abs() > lim || p.at[1].abs() > lim {
-        vec![
+        out.push(
             Fault::error(Code::BoardOutOfRange, "a placement past ±2^40 nm").with("pointer", "/at"),
-        ]
-    } else {
-        Vec::new()
+        );
     }
+    for (i, c) in p.constraints.iter().enumerate() {
+        let w = match c {
+            Constraint::Near { within_nm, .. } | Constraint::Edge { within_nm, .. } => *within_nm,
+            Constraint::Side { .. } => 0,
+        };
+        if !(0..=lim).contains(&w) {
+            out.push(invalid(
+                "a constraint's within_nm is 0 to 2^40 nm",
+                &format!("/constraints/{i}/within_nm"),
+            ));
+        }
+    }
+    if let Some(g) = &p.group
+        && (g.is_empty()
+            || g.chars().count() > 64
+            || g.contains('/')
+            || g.chars().any(char::is_control))
+    {
+        out.push(invalid(
+            "a group is 1 to 64 characters, without / or control characters",
+            "/group",
+        ));
+    }
+    for (name, f) in [
+        ("reference", &p.fields.reference),
+        ("value", &p.fields.value),
+    ] {
+        if let Some(f) = f
+            && f.size_nm.is_some_and(|s| s[0] <= 0 || s[1] <= 0)
+        {
+            out.push(invalid(
+                "a field's size is positive",
+                &format!("/fields/{name}/size_nm"),
+            ));
+        }
+        if let Some(f) = f
+            && f.at.is_some_and(|a| a[0].abs() > lim || a[1].abs() > lim)
+        {
+            out.push(
+                Fault::error(Code::BoardOutOfRange, "a field's place past ±2^40 nm")
+                    .with("pointer", format!("/fields/{name}/at")),
+            );
+        }
+    }
+    out
 }
 
 impl BoardFiles {
@@ -468,6 +512,34 @@ mod tests {
         assert_ne!(a[&id].revision, b[&id].revision);
         let again = load(&files(&[("boards/b/board.json", BOARD)])).unwrap().0;
         assert_eq!(a[&id].revision, again[&id].revision);
+    }
+
+    #[test]
+    fn bad_constraints_and_groups_are_faults() {
+        for (body, pointer) in [
+            (
+                r#""constraints":[{"near":"U1","within_nm":-1}]"#,
+                "/constraints/0/within_nm",
+            ),
+            (r#""group":"a/b""#, "/group"),
+            (r#""group":"""#, "/group"),
+            (
+                r#""fields":{"reference":{"size_nm":[0,1]}}"#,
+                "/fields/reference/size_nm",
+            ),
+        ] {
+            let placed = format!(r#"{{"at":[1,2],"format":2,"kind":"ryueda.placement",{body}}}"#);
+            let (boards, _) = load(&files(&[
+                ("boards/b/board.json", BOARD),
+                ("boards/b/placements/r1.json", &placed),
+            ]))
+            .unwrap();
+            let f = boards[&Id::parse("b", "board").unwrap()].faults();
+            assert!(
+                f.iter().any(|x| x.error.details["pointer"] == pointer),
+                "{body}: {f:?}"
+            );
+        }
     }
 
     #[test]

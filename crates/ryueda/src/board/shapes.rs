@@ -658,6 +658,7 @@ pub(crate) mod tests {
                 at: [5_000_000 * (i as i64 + 1), 10_000_000],
                 rotation_mdeg: 90_000 * i as i64,
                 side: super::super::file::PlacementSide::Top,
+                ..super::super::file::Placement::default()
             };
             files.insert(
                 format!(

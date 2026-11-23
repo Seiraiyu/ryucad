@@ -71,7 +71,9 @@ pub fn format_of(kind: &str, v: &serde_json::Value) -> u64 {
         }
         NET_KIND | RAIL_KIND => v.get("tags").is_some(),
         crate::board::BOARD_KIND => v.get("stackup").is_some(),
-        crate::board::PLACEMENT_KIND => v.get("side").is_some(),
+        crate::board::PLACEMENT_KIND => ["side", "constraints", "group", "fields"]
+            .iter()
+            .any(|k| v.get(*k).is_some()),
         crate::board::TRACK_KIND => v["layer"].as_str().is_some_and(|l| l.starts_with("in")),
         crate::board::VIA_KIND => v.get("from").is_some() || v.get("to").is_some(),
         _ => false,
