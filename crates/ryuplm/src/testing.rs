@@ -623,7 +623,7 @@ pub fn documents(seed: &str, n: usize, m: usize) -> BTreeMap<String, Vec<u8>> {
         h.update(&(k as u64).to_le_bytes());
         h.finalize_xof().fill(&mut bytes);
         let number = match k % 5 {
-            0 | 1 | 2 => format!("DOC-{:04}", k),
+            0..=2 => format!("DOC-{:04}", k),
             3 => format!("Legacy spec {k}"),
             _ => format!("DOC-{:04}", k % 2), // shared: duplicates
         };
