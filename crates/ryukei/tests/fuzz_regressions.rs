@@ -7,7 +7,7 @@
 
 use ryukei::Error;
 use ryukei::boolean::boolean;
-use ryukei::check::{check, check_intersections};
+use ryukei::check::{Fault, check, check_intersections};
 use ryukei::geom::{KnotVector, NurbsSurface, Point3};
 use ryukei::heal::{HealOptions, heal};
 use ryukei::mesh::{MeshParams, check_mesh, tessellate};
@@ -398,6 +398,40 @@ fn the_sweep_143f5e74_checks_itself_quickly() {
     });
     eprintln!("143f5e74: {s:.1} s");
     assert!(!bars() || s < 10.0, "{s} s");
+}
+
+/// #919: the sweep corpus seed 56382b47 (removed from the corpus by
+/// #949) took 17-20 s plain release in `general::Face::search`
+/// (cox-worker-4). As the `sweep` target reads it, a sweep and a sweep
+/// along a path, each checked: sound or refused typed, under 5 s on one
+/// thread under the bars.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release only")]
+fn the_sweep_56382b47_searches_quickly() {
+    let _timed = timed();
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    let s = pool.install(|| {
+        let t = std::time::Instant::now();
+        let data = bytes("5b001d7a00000000000000080000fb002b");
+        if let Some((body, _)) = sweep(&data) {
+            assert_eq!(check(&body), []);
+            for fault in check_intersections(&body) {
+                assert!(matches!(fault, Fault::CannotCheck { .. }), "{fault:?}");
+            }
+        }
+        if let Some((Ok(body), _, _)) = ryukei_testkit::along_bytes::outcome(&data) {
+            assert_eq!(check(&body), []);
+            for fault in check_intersections(&body) {
+                assert!(matches!(fault, Fault::CannotCheck { .. }), "{fault:?}");
+            }
+        }
+        t.elapsed().as_secs_f64()
+    });
+    eprintln!("56382b47: {s:.1} s");
+    assert!(!bars() || s < 5.0, "{s} s");
 }
 
 /// #260's two sweep finds, whose self-intersection check ran past 600 s,
