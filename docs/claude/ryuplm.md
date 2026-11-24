@@ -143,6 +143,41 @@ The design is document 937 in the Coxswain planning project `ryucad-ryukei`; thi
 - **Codes.** `document_not_found`, `document_bytes_missing`, `document_bytes_changed`, `document_file_unknown`, `document_large`, `document_too_large`, `document_missing`, `document_unresolved`, `document_in_use`, `document_released`, `document_unreleased`, all exit 1, in `_codes.py`.
 - **Golden, fuzz and bars.** `documents_answer_the_same_everywhere` hashes `testing::documents("golden", 300, 200)` (changed, missing and service-stored bytes, shared and legacy numbers, a missing document) through load, judge, `next_document`, content and textconv, in `tests/golden/documents.txt`. The `plm` fuzz target's mode 14 reads a record (canonical round trip, content, textconv) and judges a seeded catalogue holding the bytes as a record and as a document's bytes; mode 15 checks a clean merge of three readable records reads (`mode % 16`). The bars (`tests/bar.rs`, release only, `RYUPLM_BARS=1` strict): 10,000 documents of 64 KiB (640 MiB) beside 100,000 items loaded by a cold daemon in 2.5 s; a cold check (the session's open included) hashing them in 3 s and a warm one in 1 s; document where-used across ten checkouts of 10,000 items in 1 s. What they made change: the catalogue's revision takes a document's bytes as their BLAKE3 from the digest cache, on threads (`revision()` 0.75 s to 0.26 s; the cold load 7.9 s to 4.2 s), and document where-used opens other checkouts eight at a time, as items' does. Measured on cox-worker-1 (Intel Xeon E5-2650, 8 threads, a Ceph RBD disk, load 7 to 15), release build: where-used 0.92 s strict; cold load 4.2 to 6.4 s, cold check 6.9 to 10.0 s and warm check 3.8 to 4.2 s, all missing strict and passing loose, as the items-only bars do on that box (cold load 2.7 to 2.8 s against 2 s, check 3.0 to 3.2 s against 1 s; #1003). The documents add about 0.5 to 1.5 s to items' times, most of it reading 640 MiB into the session's snapshot and hashing it once.
 
+## Service storage (decided in ryuplm 3.B, design 937)
+
+The design is document 937 in the Coxswain planning project `ryucad-ryukei`; this is its plan 3.B (design phase 3). The code is `crates/ryuplm/src/store.rs` (the cache), `docstore.rs` (the service's store, asked by the CLI) and `documents.rs` (the session's side), with `ryu_review::testing::Store` the stand-in.
+
+- **Only the CLI process talks to the service**, as with 2.B's ledger. The daemon and the in-process session read and write only local files: the catalogue, the source files the CLI names, and the cache. A write that leaves bytes to upload says so in its answer's `to_upload` (`[{document, blake3, size}]`). `docstore::around` uploads them after the answer. Before `document get` and `document move --storage git` of a service-stored document whose bytes the cache lacks, `around` asks `document.locate` and fetches the bytes. `document get` writes `--out` from the cache through the daemon, as 3.A's writes it from Git (the owner's call over design 937's "bytes follow the response line").
+- **The contract**, under `/api/v1/repos/{owner}/{name}`, `schema: 1`:
+  - `POST /documents/has` takes `{"blake3": [hex…]}` (at most 10,000) and answers `{held}`.
+  - `PUT /documents/{blake3}` takes the bytes as `application/octet-stream`. It answers `201` or `200` with `{blake3, size, held}`. Wrong bytes are `400 invalid_request`; past the limit is `413 limit_exceeded`.
+  - `GET /documents/{blake3}` answers `{blake3, size, url, expires_at}`. `url` is a signed link fetched without the token.
+  - `POST /drive/files/{drive_id}/pin` answers `{drive_id, revision, name, media_type, size, blake3}`. Refusals are `409 drive_not_connected` and `404 drive_file_unavailable`.
+
+  ryupdm-service answers the same routes the same way.
+- **The client.** `ryu_review::Client` gains `put_bytes` and `put_file` (streamed, `Content-Length` set), and is `Clone`. `refusal` maps `drive_not_connected` and `drive_file_unavailable` to their own codes. A download longer than asked is `review_failed` with `details.limit`, not `review_unreachable` (ureq's `BodyExceedsLimit`). ureq's read limit is exclusive, so `DocStore::fetch` asks `size + 1`, and a longer body is `document_bytes_changed`. Bytes that don't match their hash are never cached.
+- **The cache** (`store::Cache`) is `RYUPLM_CACHE_DIR`, else `%LOCALAPPDATA%\ryuplm\cache`, `~/Library/Caches/ryuplm` or `$XDG_CACHE_HOME/ryuplm`, found as ryueda's is, with documents at `documents/<blake3>`.
+  - A write streams into a temporary file in that folder, hashing as it goes, then renames it. A source file is never read whole into memory.
+  - A read checks length and hash, and drops a bad entry.
+  - It is derived data: deleting it loses nothing the service holds.
+- **The default storage.** `ryuplm.json` gains `documents.storage` (`git` or `service`, absent meaning `git`), widened at format 1 since no ryuplm release has shipped (question 1264). `settings edit --document-storage` sets it, and `document add --storage` overrides it.
+- **Sizes.** A Git-stored file stays capped at 100 MiB, and the refusal names `--storage service`. A service-stored file has no local cap: the service's `413` becomes `document_too_large`.
+- **The commands.** `document add` gains `--storage` and `--drive <id>`. A Drive document with no `--title` takes the pinned file's name, made safe for the record's `file.name`.
+  - `document replace` of a service-stored document puts the new bytes in the cache.
+  - `document move <document> --storage git|service` moves the bytes and sets `storage` in one write (`document.move`). Moving to Git needs the bytes in the cache, and refuses over 100 MiB.
+  - `document get` reads the cache for service storage.
+  - `document upload [<document>…]` (all service-stored documents when none are named) uploads what the service lacks, from the cache. It fails with `document_bytes_missing` naming any document whose bytes are in neither.
+  - `document sync [<document>…|--all] [--dry-run]` pins each document's Drive file again (`document.sync`). The same revision and hash write nothing (`unchanged`).
+  - `document.locate` (read only) says each document's storage, file, pin and, for service storage, whether this machine's cache holds the bytes.
+- **Offline.** An upload the service can't take (no network, no token, no GitHub remote, not a repository) leaves the record written, with `not_uploaded` in the answer and the warning `document_not_uploaded: …; run ryuplm document upload`. Any other refusal fails the command after the record is written, and `document upload` retries it. `check` never needs the network.
+- **Undo** restores a service-stored record's earlier `file`. The earlier bytes stay in the cache and on the service, where retention keeps them for 30 days after nothing names them.
+- **The window's Documents tab** is built with the window, in ryuplm 1.E (question 1263).
+- **Codes.** `document_not_uploaded` (a warning), `drive_not_connected` (exit 4: the organization's setup) and `drive_file_unavailable`, in `_codes.py`.
+- **Testing.**
+  - `ryu_review::testing::Store` keeps blobs by hash and a fake Drive (`Revision`), with `tamper`, `refuse`, `limit` and `connected` switches. `testing::Seen` keeps the raw body (`bytes`).
+  - Unit tests are in `store.rs`, `docstore.rs` (upload once, fetch checked, tampered refused, offline, upload naming what nobody holds, Drive pinned, added and synced) and `documents.rs` (locate, service add, replace, move both ways, get from the cache, Drive pins). Tests that point `RYUPLM_CACHE_DIR` at their own folder hold `documents::tests::CACHE_LOCK`.
+  - `tests/documents_service.rs` runs the binary in process and through a daemon, each with its own cache as two machines would. It covers add with storage service, get from an empty cache, a move each way, add from Drive, an offline add, and upload.
+
 ## Releases (decided in ryuplm 0.A)
 
 - **Its own line.** ryuplm is released apart from ryucad, ryueda and ryudfm, as they are:
