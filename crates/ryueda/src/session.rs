@@ -66,6 +66,9 @@ pub struct Session {
     /// most recently used first: dropped whenever the project is read
     /// again ([`Session::set_project`]).
     netlists: Vec<(crate::id::Id, std::sync::Arc<crate::netlist::Netlist>)>,
+    /// What the request's writes spent by phase (#1050), taken by the
+    /// daemon into its timings.
+    phases: Vec<(&'static str, std::time::Duration)>,
 }
 
 /// How many designs' working netlists a session keeps (#976).
@@ -166,6 +169,7 @@ impl Session {
             boards: Vec::new(),
             checks: Vec::new(),
             netlists: Vec::new(),
+            phases: Vec::new(),
         })
     }
 
@@ -338,6 +342,16 @@ impl Session {
         self.netlists.insert(0, (design.clone(), n.clone()));
         self.netlists.truncate(NETLISTS);
         Ok(n)
+    }
+
+    /// Notes that a write's phase `name` took `took` (#1050).
+    pub(crate) fn phase(&mut self, name: &'static str, took: std::time::Duration) {
+        self.phases.push((name, took));
+    }
+
+    /// The phases noted since the last call.
+    pub(crate) fn take_phases(&mut self) -> Vec<(&'static str, std::time::Duration)> {
+        std::mem::take(&mut self.phases)
     }
 
     /// The project read again: what was derived from the old one goes.

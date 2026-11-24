@@ -231,6 +231,26 @@ struct Syncer {
 struct SyncState {
     queue: BTreeSet<PathBuf>,
     busy: bool,
+    stats: SyncStats,
+}
+
+/// What the deferred syncer has done since [`defer_syncs`] (#1050):
+/// batches, files, the time spent syncing them, and the longest batch and
+/// file, so a daemon's timings show whether a slow write waited on it.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SyncStats {
+    pub batches: u64,
+    pub files: u64,
+    pub total: std::time::Duration,
+    pub longest_batch: std::time::Duration,
+    pub longest_file: std::time::Duration,
+}
+
+/// [`SyncStats`] so far; all zero when syncs aren't deferred.
+pub fn sync_stats() -> SyncStats {
+    SYNCER.get().map_or_else(SyncStats::default, |s| {
+        s.state.lock().unwrap_or_else(|p| p.into_inner()).stats
+    })
 }
 
 static SYNCER: OnceLock<&'static Syncer> = OnceLock::new();
@@ -339,12 +359,18 @@ impl Syncer {
             // that wait together once, where one after another each waits
             // for a commit of its own.
             let files: Vec<&PathBuf> = batch.iter().collect();
+            let began = std::time::Instant::now();
+            let longest = Mutex::new(std::time::Duration::ZERO);
             in_parallel(&files, |path| {
+                let t = std::time::Instant::now();
                 // Write access, which Windows' FlushFileBuffers needs;
                 // nothing is truncated. A file removed since needs nothing.
                 if let Ok(f) = fs::OpenOptions::new().write(true).open(path) {
                     let _ = sync_one(&f);
                 }
+                let took = t.elapsed();
+                let mut l = longest.lock().unwrap_or_else(|p| p.into_inner());
+                *l = (*l).max(took);
             });
             // The folders' entries for the renames; Windows has no such sync.
             #[cfg(unix)]
@@ -364,6 +390,15 @@ impl Syncer {
             if let Some(f) = batch.iter().find_map(|p| fs::File::open(p).ok()) {
                 let _ = f.sync_all();
             }
+            let took = began.elapsed();
+            let longest_file = longest.into_inner().unwrap_or_else(|p| p.into_inner());
+            let mut st = self.state.lock().unwrap_or_else(|p| p.into_inner());
+            let stats = &mut st.stats;
+            stats.batches += 1;
+            stats.files += files.len() as u64;
+            stats.total += took;
+            stats.longest_batch = stats.longest_batch.max(took);
+            stats.longest_file = stats.longest_file.max(longest_file);
         }
     }
 }
@@ -504,6 +539,14 @@ mod tests {
             let got = fs::read_to_string(dir.join(format!("f{i}.json"))).unwrap();
             assert_eq!(got, format!("{{\"i\": {i}}}"));
         }
+        // What the syncer did is counted (#1050): every file synced, in
+        // one batch or more, the longest no longer than all of them.
+        let s = sync_stats();
+        assert!(s.batches >= 1 && s.files >= 50, "{s:?}");
+        assert!(
+            s.longest_file <= s.longest_batch && s.longest_batch <= s.total,
+            "{s:?}"
+        );
     }
 
     /// The writer of `kill_never_tears_a_file`, run as a child of it: it

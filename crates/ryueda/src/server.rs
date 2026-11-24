@@ -270,6 +270,13 @@ pub fn answer(
         },
         None => working(session, live.as_deref_mut(), me, req, job),
     };
+    // A write's phases (#1050), in the daemon's timings beside the method.
+    let phases = session.take_phases();
+    if let Some(l) = live.as_deref_mut() {
+        for (name, took) in phases {
+            l.timings.request(name, std::time::Duration::ZERO, took);
+        }
+    }
     if let (Some(l), Some(files_before), true) = (live.as_deref_mut(), files_before, result.is_ok())
     {
         // Only this project's own files: an alias's library project comes

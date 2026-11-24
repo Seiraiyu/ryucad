@@ -123,12 +123,21 @@ fn ten_thousand_occurrences_flatten_and_check_within_the_bars() {
         )
     };
     println!("a write and the next read through a warm daemon: {worst:?} at worst of five");
+    let sync = &spent["result"]["timings"]["syncer"];
     println!(
-        "  rounds (bare CLI/write/read, ms): {}; daemon: {}; {}; {}",
+        "  rounds (bare CLI/write/read, ms): {}; daemon: {}; {}; {}; {}; {}; {}; syncer: {} batches, {} files, {:.1} ms, longest batch {:.1} ms, longest file {:.1} ms",
         rounds.join(" "),
         method("net.rename"),
         method("net.show"),
-        method("session.refresh")
+        method("session.refresh"),
+        method("write.prepare"),
+        method("write.files"),
+        method("write.adopt"),
+        sync["batches"],
+        sync["files"],
+        sync["total_ms"].as_f64().unwrap_or(0.0),
+        sync["longest_batch_ms"].as_f64().unwrap_or(0.0),
+        sync["longest_file_ms"].as_f64().unwrap_or(0.0)
     );
     let _ = Command::cargo_bin("ryueda")
         .unwrap()
