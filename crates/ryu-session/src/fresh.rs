@@ -19,8 +19,29 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, SystemTime};
 
 /// A modification time this close to when it was read may be followed by
-/// another write in the same timestamp tick, so it isn't trusted.
+/// another write in the same timestamp tick, so it isn't trusted: the
+/// window for a time in whole seconds (FAT and exFAT give 2 s, HFS+ and
+/// some network shares 1 s).
 const RACY: Duration = Duration::from_secs(2);
+
+/// [`RACY`] for a time with a sub-second part (NTFS gives 100 ns, ext4,
+/// APFS and most others ns): such a file system stamps with the clock's
+/// tick (about 15.6 ms on Windows, 1 to 10 ms on Linux), so this covers
+/// a tick with room for a little clock skew (#1050).
+const RACY_FINE: Duration = Duration::from_millis(100);
+
+/// How long after its modification time a file's stamp can be trusted.
+/// A write after the read that took the stamp gets a time at least a
+/// tick later, so once the read came a tick after the time, an unchanged
+/// time and length prove the bytes unchanged (racy-git's argument). The
+/// tick is judged from the time itself: one with no sub-second part may
+/// be a coarse file system's, and keeps the 2 s window (#1050).
+fn racy_window(modified: SystemTime) -> Duration {
+    match modified.duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(d) if d.subsec_nanos() != 0 => RACY_FINE,
+        _ => RACY,
+    }
+}
 
 /// A file's content, shared: snapshots, dry runs and the activity log hold
 /// the very bytes the stamps do.
@@ -110,7 +131,6 @@ impl Stamps {
         under: &[PathBuf],
     ) -> Result<Vec<(String, &'static str)>> {
         use rayon::prelude::*;
-        let trusted_before = self.stamped_at.checked_sub(RACY);
         let mut changes = Vec::new();
         // Hashed: ordering paths compares them a component at a time.
         let mut listed = std::collections::HashSet::with_capacity(files.len());
@@ -121,8 +141,18 @@ impl Stamps {
             }
             let (modified, len) = (meta.modified().ok(), meta.len());
             let old = self.stamps.get(&path);
-            let trusted = match (old, modified, trusted_before) {
-                (Some(o), Some(m), Some(t)) => o.modified == Some(m) && o.len == len && m < t,
+            // Trusted only when the last scan came a whole window after
+            // the time: a time later than the scan's own clock (skew, or
+            // a stamp in the future) is never trusted.
+            let trusted = match (old, modified) {
+                (Some(o), Some(m)) => {
+                    o.modified == Some(m)
+                        && o.len == len
+                        && self
+                            .stamped_at
+                            .checked_sub(racy_window(m))
+                            .is_some_and(|t| m < t)
+                }
                 _ => false,
             };
             if !trusted {
@@ -601,6 +631,102 @@ mod tests {
         );
         assert_eq!(s.bytes(&root.join("a")), Some(&b"3"[..]));
         assert_eq!(s.paths_from(root).count(), 1);
+    }
+
+    /// `path`'s modification time set to `t`.
+    fn set_modified(path: &Path, t: SystemTime) {
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(t)
+            .unwrap();
+    }
+
+    /// Now, to the whole second, as a coarse file system stamps.
+    fn whole_second_now() -> SystemTime {
+        let d = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap();
+        SystemTime::UNIX_EPOCH + Duration::from_secs(d.as_secs())
+    }
+
+    /// #1050: a file with a sub-second time, unchanged and older than the
+    /// fine window, isn't read again: under the 2 s window every scan
+    /// within 2 s of a write read every file the write left.
+    #[test]
+    fn an_unchanged_fine_grained_file_is_trusted_after_the_fine_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.json");
+        fs::write(&a, b"{}").unwrap();
+        let t = SystemTime::now() - RACY_FINE - Duration::from_millis(50);
+        // A sub-second part, whatever the clock gave.
+        let t = match t
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .subsec_nanos()
+        {
+            0 => t - Duration::from_nanos(100),
+            _ => t,
+        };
+        set_modified(&a, t);
+        let mut s = Stamps::default();
+        s.scan(dir.path(), read_dir(dir.path()).unwrap()).unwrap();
+        assert_eq!(s.last_reads(), 1);
+        for _ in 0..3 {
+            assert!(
+                s.scan(dir.path(), read_dir(dir.path()).unwrap())
+                    .unwrap()
+                    .is_empty()
+            );
+            assert_eq!(s.last_reads(), 0);
+        }
+        // Changed, it is read again, and its change seen.
+        fs::write(&a, b"{\"a\":1}").unwrap();
+        let c = s.scan(dir.path(), read_dir(dir.path()).unwrap()).unwrap();
+        assert_eq!(c, vec![("a.json".to_owned(), "modified")]);
+        assert_eq!(s.last_reads(), 1);
+    }
+
+    /// #1050: a time in whole seconds may be a coarse file system's, so
+    /// within 2 s of it the file is read on every scan; older, trusted.
+    #[test]
+    fn a_whole_second_time_stays_racy_for_two_seconds() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (dir.path().join("a.json"), dir.path().join("b.json"));
+        fs::write(&a, b"{}").unwrap();
+        fs::write(&b, b"{}").unwrap();
+        // `a` under a second old, `b` three seconds old.
+        let now = whole_second_now();
+        set_modified(&a, now);
+        set_modified(&b, now - Duration::from_secs(3));
+        let mut s = Stamps::default();
+        s.scan(dir.path(), read_dir(dir.path()).unwrap()).unwrap();
+        assert_eq!(s.last_reads(), 2);
+        s.scan(dir.path(), read_dir(dir.path()).unwrap()).unwrap();
+        assert_eq!(s.last_reads(), 1);
+        assert!(s.bytes(&a).is_some());
+    }
+
+    /// A time later than the scan's own clock (skew, or a stamp in the
+    /// future) is never trusted, whatever its resolution.
+    #[test]
+    fn a_time_in_the_future_is_never_trusted() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (dir.path().join("a.json"), dir.path().join("b.json"));
+        fs::write(&a, b"{}").unwrap();
+        fs::write(&b, b"{}").unwrap();
+        set_modified(&a, whole_second_now() + Duration::from_secs(60));
+        set_modified(
+            &b,
+            whole_second_now() + Duration::from_secs(60) + Duration::from_millis(250),
+        );
+        let mut s = Stamps::default();
+        s.scan(dir.path(), read_dir(dir.path()).unwrap()).unwrap();
+        for _ in 0..3 {
+            s.scan(dir.path(), read_dir(dir.path()).unwrap()).unwrap();
+            assert_eq!(s.last_reads(), 2);
+        }
     }
 
     #[test]
