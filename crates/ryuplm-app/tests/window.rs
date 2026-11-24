@@ -325,3 +325,87 @@ fn a_lost_daemon_is_found_again() {
             .is_some_and(|w| !w.lost && w.rows.total == Some(300))
     });
 }
+
+#[test]
+fn a_document_opens_through_the_opener() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let root = common::write("documents", ryuplm::testing::documents("app", 300, 20));
+    // A Git-stored document whose bytes read, and an item naming it.
+    let listed = cli(&root, &["document", "list"]);
+    let (doc, item, size) = listed["documents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|d| {
+            let id = d["id"].as_str()?;
+            let s = cli(&root, &["document", "show", id]);
+            (s["document"]["storage"] == "git" && s["faults"].as_array()?.is_empty())
+                .then(|| {
+                    Some((
+                        id.to_owned(),
+                        s["items"][0]["id"].as_str()?.to_owned(),
+                        s["document"]["file"]["size"].as_u64()?,
+                    ))
+                })
+                .flatten()
+        })
+        .expect("a readable Git-stored document named by an item");
+    #[cfg(unix)]
+    let said = {
+        use std::os::unix::fs::PermissionsExt;
+        let said = common::shared().join("opened");
+        let _ = std::fs::remove_file(&said);
+        let opener = common::shared().join("opener");
+        std::fs::write(
+            &opener,
+            format!("#!/bin/sh\necho \"$1\" > '{}'\n", said.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&opener, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // SAFETY: one test at a time; the window reads it when it opens bytes.
+        unsafe { std::env::set_var("RYUPLM_OPENER", &opener) };
+        said
+    };
+    let mut h = window(&root);
+    frames(&mut h, |a| {
+        a.opened().is_some_and(|w| w.rows.total.is_some())
+    });
+    let a = h.state_mut();
+    a.opened_mut().unwrap().open_item(Some(item.clone()));
+    ryu_app::shell::open(&ryuplm_app::ui::tiles::SPEC, &mut a.tree, "documents");
+    frames(&mut h, |a| {
+        a.opened()
+            .and_then(|w| w.doc_cards.get(&doc))
+            .is_some_and(|g| g.value.is_some())
+    });
+    h.step();
+    let number = h.state().opened().unwrap().doc_cards[&doc]
+        .value
+        .as_ref()
+        .unwrap()
+        .number
+        .clone();
+    h.get_by_label(&format!("Open {number}")).click();
+    #[cfg(unix)]
+    {
+        let end = Instant::now() + Duration::from_secs(10);
+        while !said.exists() {
+            h.step();
+            assert!(Instant::now() < end, "the opener never ran");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let path = std::fs::read_to_string(&said).unwrap();
+        assert_eq!(std::fs::metadata(path.trim()).unwrap().len(), size);
+    }
+    // Every document: the list, searched.
+    let w = h.state_mut().opened_mut().unwrap();
+    w.set_docs(true, &number);
+    frames(&mut h, |a| {
+        a.opened()
+            .and_then(|w| w.documents.value.as_ref())
+            .is_some_and(|d| d.iter().any(|d| d.number == number))
+    });
+}

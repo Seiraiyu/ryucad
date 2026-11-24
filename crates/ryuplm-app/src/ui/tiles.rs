@@ -95,7 +95,7 @@ impl egui_tiles::Behavior<Pane> for Behavior<'_> {
                 "changes" => changes(ui, self.w),
                 "releases" => releases(ui, self.w, self.copy),
                 "imports" => imports(ui, self.w, self.copy),
-                "documents" => {}
+                "documents" => documents(ui, self.w, self.local, self.copy),
                 "activity" => activity(ui, self.w),
                 _ => {}
             }
@@ -293,7 +293,7 @@ fn navigator(ui: &mut egui::Ui, w: &mut Window) {
 
 const COLUMNS: [(&str, Option<&str>, f32); 7] = [
     ("Number", Some("number"), 130.0),
-    ("Name", Some("name"), 230.0),
+    ("Name", Some("name"), 170.0),
     ("Class", Some("class"), 100.0),
     ("State", None, 90.0),
     ("Unit", None, 50.0),
@@ -945,6 +945,139 @@ fn activity(ui: &mut egui::Ui, w: &mut Window) {
         .show(ui, |ui| {
             for e in &list {
                 ui.label(format!("{}  {}", e.seq, e.text));
+            }
+        });
+}
+
+fn doc_row(
+    ui: &mut egui::Ui,
+    w: &mut Window,
+    c: &crate::core::documents::Card,
+    copy: &mut Option<String>,
+) {
+    ui.horizontal(|ui| {
+        let busy = w.opening();
+        let b = ui
+            .add_enabled(!busy, egui::Button::new("Open").small())
+            .on_hover_text(format!(
+                "{} with this computer's program for {}",
+                c.file_name, c.media_type
+            ));
+        b.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::Role::Button, !busy, format!("Open {}", c.number))
+        });
+        if b.clicked() {
+            w.open_document(&c.id);
+        }
+        ui.strong(&c.number);
+        ui.label(&c.title);
+        ui.weak(format!(
+            "{} · {} · {}",
+            c.doc_type,
+            crate::core::documents::size(c.size),
+            c.storage
+        ));
+        if ui.small_button("Copy number").clicked() {
+            *copy = Some(c.number.clone());
+        }
+    });
+    for f in &c.faults {
+        ui.colored_label(
+            ui.visuals().warn_fg_color,
+            format!("{} {}: {}", f.severity, f.code, f.message),
+        );
+    }
+}
+
+fn documents(ui: &mut egui::Ui, w: &mut Window, local: &mut Local, copy: &mut Option<String>) {
+    let mut all = w.docs_all || w.item.is_none();
+    ui.horizontal(|ui| {
+        if ui.checkbox(&mut all, "Every document").changed() || (all && !w.docs_all) {
+            w.set_docs(all, &local.doc_search);
+        }
+        if all {
+            let r = ui.add(
+                egui::TextEdit::singleline(&mut local.doc_search)
+                    .hint_text("A number, a title or a description"),
+            );
+            if r.changed() {
+                w.set_docs(true, &local.doc_search);
+            }
+        }
+    });
+    if all {
+        failed(ui, w.documents.error.as_ref());
+        let rows = w.documents.value.clone().unwrap_or_default();
+        if rows.is_empty() && w.documents.value.is_some() {
+            command(
+                ui,
+                copy,
+                "No documents. An agent or the CLI adds them:",
+                "ryuplm document add <FILE> --title <TITLE>".into(),
+            );
+        }
+        egui::ScrollArea::vertical()
+            .id_salt("documents")
+            .show(ui, |ui| {
+                for (k, d) in rows.iter().enumerate() {
+                    ui.push_id(k, |ui| {
+                        let open = w.doc_cards.contains_key(&d.id);
+                        if ui.selectable_label(open, d.text()).clicked() {
+                            w.doc_card(&d.id);
+                        }
+                        if let Some(c) = w.doc_cards.get(&d.id).and_then(|g| g.value.clone()) {
+                            doc_row(ui, w, &c, copy);
+                            for (id, number) in &c.items {
+                                ui.horizontal(|ui| {
+                                    show_button(ui, w, Some(&format!("item/{id}")), number);
+                                    ui.label(number);
+                                });
+                            }
+                        }
+                    });
+                }
+            });
+        return;
+    }
+    let Some(card) = w.card.value.clone() else {
+        ui.weak("Reading…");
+        return;
+    };
+    if card.documents.is_empty() {
+        command(
+            ui,
+            copy,
+            "No documents. An agent or the CLI attaches one:",
+            format!("ryuplm document attach <DOCUMENT> {}", card.number),
+        );
+        return;
+    }
+    egui::ScrollArea::vertical()
+        .id_salt("documents")
+        .show(ui, |ui| {
+            for (k, r) in card.documents.iter().enumerate() {
+                ui.push_id(k, |ui| {
+                    if r.contains(':') {
+                        ui.weak(format!("{r} (another catalogue's)"));
+                        return;
+                    }
+                    match w
+                        .doc_cards
+                        .get(r)
+                        .map(|g| (g.value.clone(), g.error.clone()))
+                    {
+                        Some((Some(c), _)) => doc_row(ui, w, &c, copy),
+                        Some((None, Some(e))) => {
+                            ui.colored_label(
+                                ui.visuals().error_fg_color,
+                                format!("{r}: {}", e.message),
+                            );
+                        }
+                        _ => {
+                            ui.weak(format!("{r}…"));
+                        }
+                    }
+                });
             }
         });
 }
