@@ -857,6 +857,9 @@ fn every_protocol_method_has_a_command() {
         ("board.drawing.delete", &["board", "drawing", "delete"]),
         ("board.keepout.edit", &["board", "keepout", "edit"]),
         ("board.keepout.delete", &["board", "keepout", "delete"]),
+        ("board.pour.add", &["board", "pour", "add"]),
+        ("board.pour.edit", &["board", "pour", "edit"]),
+        ("board.pour.delete", &["board", "pour", "delete"]),
         ("board.group.move", &["board", "group", "move"]),
         ("board.group.flip", &["board", "group", "flip"]),
         ("board.export", &["board", "export"]),
@@ -6384,4 +6387,66 @@ fn text_and_drawings_from_the_cli() {
     }
     p.ok(&["board", "drawing", "delete", id, "rev"]);
     p.fails(&["board", "drawing", "delete", id, "rev"], "not_found", 1);
+}
+
+/// Pours from the CLI (ryueda 7.D): a ground plane on the round's board,
+/// its fill reaching the ground pads with spokes and clear of every
+/// other net (DRC clean), shown, edited to solid, deleted.
+#[test]
+fn pours_from_the_cli() {
+    let p = Pair::breakout();
+    for args in breakout_board::script() {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        p.ok(&args);
+    }
+    let id = breakout_board::BOARD;
+    let a = p.ok(&[
+        "board", "pour", "add", id, "--net", "rail:gnd", "--layer", "bottom", "--whole", "--id",
+        "gnd",
+    ]);
+    assert_eq!(a["pours"][0]["reference"], format!("{id}:pour/gnd"), "{a}");
+    let errors = a["drc"]["errors"].as_u64().unwrap();
+    assert_eq!(errors, 0, "the plane is DRC clean: {a}");
+    let s = p.ok(&["board", "show", id, "--pours"]);
+    let gnd = &s["pours"][0];
+    assert!(
+        gnd["area_nm2"].as_str().unwrap().parse::<i128>().unwrap() > 0,
+        "{gnd}"
+    );
+    assert!(!gnd["regions"].as_array().unwrap().is_empty());
+    assert_eq!(gnd["rules"]["clearance_nm"]["source"], "preset:jlc-2l");
+    let e = p.ok(&[
+        "board",
+        "pour",
+        "edit",
+        id,
+        "gnd",
+        "--connect",
+        "solid",
+        "--clearance",
+        "0.3mm",
+    ]);
+    assert_eq!(e["pours"][0]["pour"]["connect"], "solid", "{e}");
+    p.fails(
+        &[
+            "board", "pour", "add", id, "--net", "nope", "--layer", "top", "--whole",
+        ],
+        "board_net_not_found",
+        1,
+    );
+    p.fails(
+        &[
+            "board", "pour", "add", id, "--net", "rail:gnd", "--layer", "in1", "--whole",
+        ],
+        "board_layer_not_found",
+        1,
+    );
+    p.fails(
+        &[
+            "board", "pour", "add", id, "--net", "rail:gnd", "--layer", "top",
+        ],
+        "invalid_param",
+        1,
+    );
+    p.ok(&["board", "pour", "delete", id, "gnd"]);
 }

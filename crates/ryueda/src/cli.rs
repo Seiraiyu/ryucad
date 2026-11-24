@@ -1768,11 +1768,14 @@ enum BoardCmd {
         #[command(flatten)]
         rev: Rev,
     },
-    /// A board: its file, each occurrence's placement, with --pads every pad.
+    /// A board: its file, each occurrence's placement, with --pads every
+    /// pad, with --pours every pour as filled.
     Show {
         board: String,
         #[arg(long)]
         pads: bool,
+        #[arg(long)]
+        pours: bool,
         #[command(flatten)]
         rev: Rev,
     },
@@ -1802,6 +1805,11 @@ enum BoardCmd {
     /// parts or holes out.
     #[command(subcommand)]
     Keepout(KeepoutCmd),
+    /// Pours: copper of one net filled over an area or the whole board,
+    /// clear of other nets, with thermal spokes to its pads; refilled on
+    /// every write.
+    #[command(subcommand)]
+    Pour(PourCmd),
     /// Text on silk, fab, mask or a documentation layer.
     #[command(subcommand)]
     Text(TextCmd),
@@ -2085,6 +2093,110 @@ enum KeepoutCmd {
         board: String,
         #[arg(required = true)]
         keepouts: Vec<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+}
+
+/// A pour's boundary: the whole board, a rectangle or a contour.
+#[derive(Subcommand)]
+enum PourCmd {
+    /// A pour of --net on --layer over --whole board, --rect X0,Y0,X1,Y1
+    /// or --contour JSON. --ops for several, all or nothing.
+    Add {
+        board: String,
+        #[arg(long)]
+        net: Option<String>,
+        #[arg(long)]
+        layer: Option<String>,
+        #[arg(long, group = "boundary")]
+        whole: bool,
+        #[arg(
+            long,
+            value_name = "X0,Y0,X1,Y1",
+            allow_hyphen_values = true,
+            group = "boundary"
+        )]
+        rect: Option<String>,
+        /// JSON: {start: [x, y], edges: [{type: line, to} | {type: arc, mid, to}]}.
+        #[arg(long, value_name = "JSON", group = "boundary")]
+        contour: Option<String>,
+        /// Higher pours fill first; a lower one clears them.
+        #[arg(long, allow_hyphen_values = true)]
+        priority: Option<i64>,
+        /// To other nets' copper (a length); the rules' when absent.
+        #[arg(long)]
+        clearance: Option<String>,
+        /// No neck narrower than this is left (a length).
+        #[arg(long)]
+        min_width: Option<String>,
+        /// How it meets its net's pads: thermal (the default) or solid.
+        #[arg(long)]
+        connect: Option<String>,
+        #[arg(long)]
+        thermal_gap: Option<String>,
+        #[arg(long)]
+        thermal_spoke: Option<String>,
+        /// What it does with copper its net doesn't reach: remove (the
+        /// default) or keep.
+        #[arg(long)]
+        islands: Option<String>,
+        #[arg(long)]
+        id: Option<String>,
+        /// JSON: [{net, layer, whole | rect | contour, priority?, clearance?, …, id?}].
+        #[arg(long, value_name = "OPS", conflicts_with_all = ["net", "layer", "whole", "rect", "contour", "id"])]
+        ops: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Replace a pour's fields: its layer, boundary (--whole, --rect or
+    /// --contour), --cutouts JSON list of contours, or settings.
+    Edit {
+        board: String,
+        pour: String,
+        #[arg(long)]
+        layer: Option<String>,
+        #[arg(long, group = "boundary")]
+        whole: bool,
+        #[arg(
+            long,
+            value_name = "X0,Y0,X1,Y1",
+            allow_hyphen_values = true,
+            group = "boundary"
+        )]
+        rect: Option<String>,
+        #[arg(long, value_name = "JSON", group = "boundary")]
+        contour: Option<String>,
+        #[arg(long, value_name = "JSON")]
+        cutouts: Option<String>,
+        /// Higher pours fill first; a lower one clears them.
+        #[arg(long, allow_hyphen_values = true)]
+        priority: Option<i64>,
+        /// To other nets' copper (a length); the rules' when absent.
+        #[arg(long)]
+        clearance: Option<String>,
+        /// No neck narrower than this is left (a length).
+        #[arg(long)]
+        min_width: Option<String>,
+        /// How it meets its net's pads: thermal (the default) or solid.
+        #[arg(long)]
+        connect: Option<String>,
+        #[arg(long)]
+        thermal_gap: Option<String>,
+        #[arg(long)]
+        thermal_spoke: Option<String>,
+        /// What it does with copper its net doesn't reach: remove (the
+        /// default) or keep.
+        #[arg(long)]
+        islands: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Delete pours by ID.
+    Delete {
+        board: String,
+        #[arg(required = true)]
+        pours: Vec<String>,
         #[command(flatten)]
         expect: Expect,
     },
@@ -4252,9 +4364,15 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
         Command::Board(BoardCmd::List { rev }) => Request::BoardList {
             rev: rev.rev.clone(),
         },
-        Command::Board(BoardCmd::Show { board, pads, rev }) => Request::BoardShow {
+        Command::Board(BoardCmd::Show {
+            board,
+            pads,
+            pours,
+            rev,
+        }) => Request::BoardShow {
             board: board.clone(),
             pads: *pads,
+            pours: *pours,
             rev: rev.rev.clone(),
         },
         Command::Board(BoardCmd::Track(TrackCmd::Add { board, net, layer, width, path, id, ops, expect })) => Request::BoardTrackAdd {
@@ -4426,6 +4544,83 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
         })) => Request::BoardKeepoutDelete {
             board: board.clone(),
             keepouts: keepouts.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Board(BoardCmd::Pour(PourCmd::Add {
+            board,
+            net,
+            layer,
+            whole,
+            rect,
+            contour,
+            priority,
+            clearance,
+            min_width,
+            connect,
+            thermal_gap,
+            thermal_spoke,
+            islands,
+            id,
+            ops,
+            expect,
+        })) => Request::BoardPourAdd {
+            board: board.clone(),
+            net: net.clone(),
+            layer: layer.clone(),
+            whole: *whole,
+            rect: rect.as_deref().map(|r| quad_arg("--rect", r)).transpose()?,
+            contour: contour.as_deref().map(|c| json_arg("--contour", c)).transpose()?,
+            priority: *priority,
+            clearance: clearance.clone(),
+            min_width: min_width.clone(),
+            connect: connect.clone(),
+            thermal_gap: thermal_gap.clone(),
+            thermal_spoke: thermal_spoke.clone(),
+            islands: islands.clone(),
+            id: id.clone(),
+            ops: ops.as_deref().map(|o| json_arg("--ops", o)).transpose()?,
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Board(BoardCmd::Pour(PourCmd::Edit {
+            board,
+            pour,
+            layer,
+            whole,
+            rect,
+            contour,
+            cutouts,
+            priority,
+            clearance,
+            min_width,
+            connect,
+            thermal_gap,
+            thermal_spoke,
+            islands,
+            expect,
+        })) => Request::BoardPourEdit {
+            board: board.clone(),
+            pour: pour.clone(),
+            layer: layer.clone(),
+            whole: *whole,
+            rect: rect.as_deref().map(|r| quad_arg("--rect", r)).transpose()?,
+            contour: contour.as_deref().map(|c| json_arg("--contour", c)).transpose()?,
+            cutouts: cutouts.as_deref().map(|c| json_arg("--cutouts", c)).transpose()?,
+            priority: *priority,
+            clearance: clearance.clone(),
+            min_width: min_width.clone(),
+            connect: connect.clone(),
+            thermal_gap: thermal_gap.clone(),
+            thermal_spoke: thermal_spoke.clone(),
+            islands: islands.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Board(BoardCmd::Pour(PourCmd::Delete {
+            board,
+            pours,
+            expect,
+        })) => Request::BoardPourDelete {
+            board: board.clone(),
+            pours: pours.clone(),
             expected_revision: expect.expect.clone(),
         },
         Command::Board(BoardCmd::Group(GroupCmd::List { board })) => Request::BoardGroupList {
