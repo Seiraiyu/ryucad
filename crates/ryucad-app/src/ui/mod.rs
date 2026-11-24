@@ -21,6 +21,7 @@ pub mod markup;
 pub mod mate;
 pub mod menu;
 pub mod modes;
+pub mod opened;
 pub mod palette;
 pub mod panels;
 pub mod platform;

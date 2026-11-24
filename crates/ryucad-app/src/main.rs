@@ -140,6 +140,8 @@ fn main() -> ExitCode {
         run_and_return: true,
         ..Default::default()
     };
+    // On macOS, Open With and a folder dropped on the Dock icon (#1022).
+    ryucad_app::ui::opened::listen();
     // `alive: …` in the trace while the window runs (#799).
     ryucad_app::ui::exits::heartbeat();
     let run = eframe::run_native(
