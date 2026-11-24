@@ -882,7 +882,13 @@ mod tests {
             let _ = m.charge(5);
             Err(Error::NonFinite)
         });
-        assert_eq!(r, Err(Error::BudgetExceeded { spent: 5, budget: 3 }));
+        assert_eq!(
+            r,
+            Err(Error::BudgetExceeded {
+                spent: 5,
+                budget: 3
+            })
+        );
         let w = Work::unlimited().with_budget(3);
         let r: Result<(), Error> = run_keeping(&w, |m| {
             let _ = m.charge(2);
