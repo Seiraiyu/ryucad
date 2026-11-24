@@ -372,7 +372,9 @@ enum Command {
     /// Measure one entity (its point, length or area and shape; a solid's or occurrence's
     /// volume and area) or two (their distance and nearest points, and their angle where
     /// both have directions): <part>/<solid>/<name>, <part>/<solid>,
-    /// <assembly>/<instance>/…/<solid>/<name> or <assembly>/<instance>/….
+    /// <assembly>/<instance>/…/<solid>/<name> or <assembly>/<instance>/…. Between two
+    /// circular edges, cylindrical or spherical faces, it also gives "centres": the distance
+    /// between their centres or axes (holes' spacing).
     Measure {
         #[arg(num_args = 1..=2, required = true, value_name = "ENTITY")]
         entities: Vec<String>,
