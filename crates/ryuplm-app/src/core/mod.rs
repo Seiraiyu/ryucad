@@ -8,6 +8,7 @@ pub mod link;
 pub mod lists;
 pub mod marks;
 pub mod people;
+pub mod pointing;
 pub mod prefs;
 pub mod product;
 pub mod reader;

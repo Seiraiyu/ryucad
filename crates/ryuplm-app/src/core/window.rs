@@ -7,7 +7,8 @@ use crate::core::command::{Place, places};
 use crate::core::flash::Flash;
 use crate::core::link::{Daemon, Event, Link, Wake};
 use crate::core::lists::{self, BomLine, Card, Change, Entry, Finding, Import, Release, Used};
-use crate::core::people::People;
+use crate::core::people::{ItemView, People};
+use crate::core::pointing::{Sent, Throttle};
 use crate::core::product::Plm;
 use crate::core::reader::Readers;
 use crate::core::rows::{Ask, Filter, Rows};
@@ -118,8 +119,6 @@ pub fn count_keys(info: &Value) -> Vec<String> {
 }
 
 /// Why a request was sent: what to do with its answer.
-// GoTo and Quiet are sent by pointing (Task 15).
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 enum Why {
     Rows(Ask),
@@ -189,6 +188,13 @@ pub struct Window {
     pub hover: Option<String>,
     pub flash: Flash,
     pub flash_on: bool,
+    select: Throttle,
+    view: Throttle,
+    /// The views this window sent with `view.set`.
+    sent: Sent,
+    /// Whom the People strip follows.
+    pub following: Option<String>,
+    pub follow_shows: bool,
     /// The palette's `@` answer.
     pub places: Vec<Place>,
     places_query: Option<String>,
@@ -242,6 +248,11 @@ impl Window {
             hover: None,
             flash: Flash::default(),
             flash_on: crate::core::prefs::flag("ui.flash_changes"),
+            select: Throttle::default(),
+            view: Throttle::default(),
+            sent: Sent::default(),
+            following: None,
+            follow_shows: crate::core::prefs::flag("ui.follow_shows"),
             places: Vec::new(),
             places_query: None,
         };
@@ -660,7 +671,30 @@ impl Window {
                 self.want("info");
                 self.refresh();
             }
-            "participant.changed" => self.people.changed(params),
+            "participant.changed" => {
+                let me = self.me().to_owned();
+                let before = self.people.get(&me).map(|p| p.view.clone());
+                self.people.changed(params);
+                if let Some(mine) = self.people.get(&me).map(|p| p.view.clone())
+                    && self
+                        .sent
+                        .adopts(before.as_ref(), &mine, &me, self.follow_shows)
+                {
+                    let selection = self
+                        .people
+                        .get(&me)
+                        .map(|p| p.selection.clone())
+                        .unwrap_or_default();
+                    self.adopt(&mine);
+                    self.selection = selection;
+                }
+                if let Some(f) = self.following.clone() {
+                    match self.people.get(&f).map(|p| p.view.clone()) {
+                        Some(v) => self.adopt(&v),
+                        None => self.following = None,
+                    }
+                }
+            }
             "activity.appended" => {
                 let me = self.me().to_owned();
                 self.toasts.activity(params, &me, now);
@@ -683,8 +717,69 @@ impl Window {
         self.checking = false;
     }
 
-    /// Task 15 sends the view; until then, nothing.
-    fn view_due(&mut self) {}
+    fn view_due(&mut self) {
+        self.view.due();
+    }
+
+    /// The person picked `reference` (or nothing): one, or with `add`
+    /// added or taken out. Sent at most every 150 ms.
+    pub fn pick(&mut self, reference: Option<String>, add: bool) {
+        match (reference, add) {
+            (None, false) => self.selection.clear(),
+            (None, true) => {}
+            (Some(r), true) => {
+                if let Some(i) = self.selection.iter().position(|x| *x == r) {
+                    self.selection.remove(i);
+                } else {
+                    self.selection.push(r);
+                }
+            }
+            (Some(r), false) => self.selection = vec![r],
+        }
+        self.select.due();
+    }
+
+    /// Go to: the session shows `reference` to this window's participant,
+    /// and the window adopts the show.
+    pub fn go_to(&mut self, reference: &str) {
+        let me = self.me().to_owned();
+        self.sent.show();
+        self.send(
+            req("view.show", json!({"ref": reference, "participant": me})),
+            Why::GoTo(reference.to_owned()),
+        );
+    }
+
+    /// Follows `who` (or stops): their item, tab and filter as they move.
+    pub fn follow(&mut self, who: Option<String>) {
+        self.following = who;
+        if let Some(v) = self
+            .following
+            .clone()
+            .and_then(|id| self.people.get(&id).map(|p| p.view.clone()))
+        {
+            self.adopt(&v);
+        }
+    }
+
+    /// Takes `v`'s item, tab and list.
+    fn adopt(&mut self, v: &ItemView) {
+        self.set_item(v.item.clone());
+        if v.tab.is_some() && v.tab != self.tab {
+            self.tab = v.tab.clone();
+            self.open_tab = v.tab.clone();
+        }
+        self.rows.filter(v.list.clone());
+    }
+
+    fn view_now(&self) -> ItemView {
+        ItemView {
+            item: self.item.clone(),
+            tab: self.tab.clone(),
+            list: self.rows.filter.clone(),
+            shown_by: Some(self.me().to_owned()),
+        }
+    }
 
     /// Sends what is due and expires toasts and flashes. Returns how soon
     /// it needs calling again, if it does.
@@ -697,7 +792,27 @@ impl Window {
         if let Some(a) = self.rows.ask() {
             self.send(req("item.list", Rows::params(&a)), Why::Rows(a));
         }
-        self.flash.due().then_some(Duration::from_millis(33))
+        if self.select.ready(now) {
+            let refs = self.selection.clone();
+            self.send(req("selection.set", json!({"refs": refs})), Why::Quiet);
+        }
+        if self.view.ready(now) && self.following.is_none() {
+            let v = self.view_now();
+            let mut p = json!({"list": v.list});
+            if let Some(i) = &v.item {
+                p["item"] = json!(i);
+            }
+            if let Some(t) = &v.tab {
+                p["tab"] = json!(t);
+            }
+            self.sent.set(v);
+            self.send(req("view.set", p), Why::Quiet);
+        }
+        let flash = self.flash.due().then_some(Duration::from_millis(33));
+        [self.select.wait(now), self.view.wait(now), flash]
+            .into_iter()
+            .flatten()
+            .min()
     }
 }
 
