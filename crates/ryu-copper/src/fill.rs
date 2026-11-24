@@ -116,11 +116,9 @@ pub fn fill(ask: &Ask) -> Fill {
         }
         counts.push(n);
     }
-    let joined = if kept.len() > 1 {
-        union_all(&kept)
-    } else {
-        opened
-    };
+    // The opening's grow and the spokes may reach past the area (by a
+    // flattening bound, or a spoke's length near its edge): clip.
+    let joined = poly::intersection(&union_all(&kept), &ask.area);
     let mut out = Vec::new();
     let mut uncertain = Vec::new();
     let mut removed = 0;
@@ -258,6 +256,19 @@ pub(crate) mod tests {
         a.obstacles.push(other.clone());
         a.spoke_obstacles.push(other);
         assert_eq!(fill(&a).spokes, [3]);
+    }
+    #[test]
+    fn spokes_stop_at_the_area() {
+        // A pad 1.2 mm from the area's left edge: its left spoke, 1.25 mm
+        // long, would reach past it.
+        let at = Point::new(6 * MM / 5, 5 * MM);
+        let pad = rect(at.x - MM / 2, at.y - MM / 2, at.x + MM / 2, at.y + MM / 2);
+        let mut a = ask(rect(0, 0, 10 * MM, 10 * MM));
+        a.obstacles.push(poly::grow(&pad, MM / 2, &opts()));
+        a.thermals.push(thermal(at));
+        let f = fill(&a);
+        assert_eq!(f.spokes, [4]);
+        assert!(poly::difference(&f.polygons, &a.area).is_empty());
     }
     #[test]
     fn islands_without_own_copper_go_unless_kept() {
