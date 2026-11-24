@@ -1690,6 +1690,51 @@ fn the_bridged_twin_through_step_holds_its_blends() {
     assert_eq!(e.code, Code::TweakFailed, "{e}");
 }
 
+/// Plan 23.D: a partial delete of the twin below 5 mm builds. The fillet
+/// goes (`blends`), both bridges stay (`kept`, each `heal_ambiguous` with
+/// its faces and size), at the slab and disc's volume with the bridges,
+/// every bridge face under its name. Without `partial` it is the kernel's
+/// refusal again.
+#[test]
+fn a_partial_blend_delete_keeps_the_bridges() {
+    let (_f, _d, mut s, imp) = bridged();
+    add(
+        &mut s,
+        json!({"type": "delete_blend", "id": "d", "below": "5 mm", "partial": true}),
+    );
+    let rep = report(&mut s, "d");
+    let blends = rep["blends"].as_array().unwrap();
+    assert_eq!(blends.len(), 1, "{rep}");
+    assert!(
+        (blends[0]["size"].as_f64().unwrap() - 0.002).abs() < 1e-8,
+        "{rep}"
+    );
+    let kept = rep["kept"].as_array().unwrap();
+    assert_eq!(kept.len(), 2, "{rep}");
+    for k in kept {
+        assert!((k["size"].as_f64().unwrap() - 0.004).abs() < 1e-8, "{rep}");
+        assert_eq!(k["reason"], "heal_ambiguous", "{rep}");
+    }
+    let after = names(&mut s, "d");
+    for k in kept {
+        for f in k["faces"].as_array().unwrap() {
+            assert!(
+                after.contains(&f.as_str().unwrap().to_owned()),
+                "{f} renamed"
+            );
+        }
+    }
+    let want = ryukei_testkit::partial_deletes::kept_volume() * 1e9;
+    near(volume(&mut s, "d", &imp), want, 2e-3);
+    // Without partial it is the kernel's refusal.
+    must(
+        &mut s,
+        "feature.edit",
+        json!({"part": "p", "id": "d", "partial": false}),
+    );
+    assert_eq!(failure(&mut s, "d").code, Code::TweakFailed);
+}
+
 /// The committed NIST corpus (ryustep's `tests/corpus`), each file
 /// imported as solids, each solid's blends at most 2 mm deleted under the
 /// default edit budget: every outcome is a body that passes the kernel's

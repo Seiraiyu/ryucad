@@ -195,6 +195,52 @@ pub(crate) fn blend_delete_report(
     })
 }
 
+/// A partial blend delete's kept report (plan 23.D): the deleted units'
+/// blends and corners, as a plain delete's, and `kept`, each blend of each
+/// kept unit as `blend_raw` gives it with its `reason` and, where one
+/// applies, its `hint`.
+pub(crate) fn partial_report(
+    target: &Id,
+    body: &ryukei::topo::Body,
+    rep: &ryukei::tweak::PartialDelete,
+    changes: bool,
+) -> Value {
+    let rec = &rep.recognition;
+    let gone: std::collections::BTreeSet<usize> = rep
+        .deleted
+        .iter()
+        .flat_map(|u| u.blends.iter().copied())
+        .collect();
+    let mut v = blend_delete_report(target, rec, &gone);
+    let mut kept = Vec::new();
+    for k in &rep.kept {
+        let (reason, hint) = match &k.cause {
+            ryukei::Error::InvalidTweak(t) => {
+                let r = refusal(t);
+                (r.reason, hint_for(&r, changes, body))
+            }
+            ryukei::Error::BudgetExceeded { .. } => (
+                "budget",
+                Some(
+                    "raise edit.budget (ryucad config set edit.budget <units>) to let each unit run longer",
+                ),
+            ),
+            ryukei::Error::NotASolid { .. } => ("not_a_solid", None),
+            _ => ("kernel", None),
+        };
+        for &i in &k.unit.blends {
+            let mut b = crate::blends::blend_raw(rec, i);
+            b["reason"] = json!(reason);
+            if let Some(h) = hint {
+                b["hint"] = json!(h);
+            }
+            kept.push(b);
+        }
+    }
+    v["kept"] = Value::Array(kept);
+    v
+}
+
 /// What a tweak asks the kernel.
 pub(crate) enum Spec {
     Move(MoveSpec),
@@ -215,11 +261,13 @@ pub(crate) enum Spec {
         heal: ryukei::tweak::Heal,
     },
     /// A blend delete: every blend at most `below` meters and those
-    /// holding `faces`, recognised at `tolerance`.
+    /// holding `faces`, recognised at `tolerance`; with `partial`, deleted
+    /// unit by unit, keeping what refuses (ryukei 23.D).
     DeleteBlend {
         below: Option<f64>,
         faces: Vec<Name>,
         tolerance: f64,
+        partial: bool,
     },
     /// A resize: each group's faces and the kind it gives their blends,
     /// recognised at `tolerance`.
@@ -702,6 +750,7 @@ pub(crate) fn resolve<'a>(
                     below: x.below.as_ref().map(|q| q.meters()),
                     faces,
                     tolerance: recognition(x.tolerance.as_ref()),
+                    partial: x.partial,
                 },
             })
         }
@@ -1227,6 +1276,8 @@ pub fn build(
     };
     let key = crate::rebuild::op_key(&part.id, id);
     let body = &r.built.body;
+    // A partial blend delete's own count: it has a budget of its own.
+    let mut partial_spent: Option<u64> = None;
     let (made, report) = match &r.spec {
         Spec::Move(s) => (ryukei::tweak::move_faces_with(key, body, s, &work), None),
         Spec::Offset(s) => (ryukei::tweak::offset_faces_with(key, body, s, &work), None),
@@ -1253,11 +1304,17 @@ pub fn build(
             below,
             faces,
             tolerance,
+            partial,
         } => {
             let options = ryukei::tweak::RecogniseOptions {
                 tolerance: *tolerance,
             };
-            match ryukei::tweak::recognise_blends_with(body, &options, &work) {
+            // A partial delete recognises under the cancel alone, then has
+            // `edit.budget` for each unit it may try (plan 23.D); a plain
+            // one recognises under its budget, as before.
+            let cancel_only = crate::work::work(run.job);
+            let seeing = if *partial { &cancel_only } else { &work };
+            match ryukei::tweak::recognise_blends_with(body, &options, seeing) {
                 Err(e) => (Err(e), None),
                 Ok(rec) => {
                     let taken = crate::blends::taken(&rec, *below, faces);
@@ -1266,10 +1323,26 @@ pub fn build(
                         faces: faces.clone(),
                         options,
                     };
-                    (
-                        ryukei::tweak::delete_blends_with(key, body, &spec, &work),
-                        Some(blend_delete_report(r.target, &rec, &taken)),
-                    )
+                    if *partial {
+                        let units = crate::blends::units(&rec, &taken).max(1);
+                        let each = crate::work::work(run.job)
+                            .with_budget(run.edit_budget.saturating_mul(units));
+                        let made =
+                            ryukei::tweak::delete_blends_partial_with(key, body, &spec, &each);
+                        partial_spent = Some(each.spent());
+                        match made {
+                            Ok((b, j, rep)) => (
+                                Ok((b, j)),
+                                Some(partial_report(r.target, body, &rep, changes)),
+                            ),
+                            Err(e) => (Err(e), None),
+                        }
+                    } else {
+                        (
+                            ryukei::tweak::delete_blends_with(key, body, &spec, &work),
+                            Some(blend_delete_report(r.target, &rec, &taken)),
+                        )
+                    }
                 }
             }
         }
@@ -1310,7 +1383,7 @@ pub fn build(
     let built = crate::rebuild::finish(id, ty, made, origins)?;
     let report = if budgeted {
         let mut rep = report.unwrap_or_else(|| json!({"target": r.target}));
-        rep["spent"] = json!(work.spent());
+        rep["spent"] = json!(partial_spent.unwrap_or(work.spent()));
         Some(rep)
     } else {
         report
