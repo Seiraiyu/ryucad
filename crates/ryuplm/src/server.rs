@@ -115,6 +115,10 @@ pub fn answer(
     if let Some(l) = live.as_deref_mut() {
         if !external.is_empty() {
             ryu_session::activity::record_external(l, external);
+            // What a change from outside took away leaves every
+            // selection, highlight and status before the request reads
+            // them (design 938).
+            l.prune(|t| crate::refs::stands(session, t));
         }
         if let Some(me) = me {
             l.touch(me);
@@ -123,6 +127,7 @@ pub fn answer(
     // A daemon keeps what its writes change, for the log and for undo;
     // undo and redo log themselves.
     let (method, params) = (req.method(), req.params());
+    let writes = req.mutates();
     let logs_itself = matches!(req, Request::Undo { .. } | Request::Redo { .. });
     let files_before = match (&live, req.mutates() && !logs_itself) {
         (Some(_), true) => Some(session.files()),
@@ -138,6 +143,11 @@ pub fn answer(
         }
     }
     if let (Some(l), Some(before)) = (live, before) {
+        // References a write took away drop out of every selection,
+        // highlight and status.
+        if writes && result.is_ok() {
+            l.prune(|t| crate::refs::stands(session, t));
+        }
         l.announce(&before);
         publish(l, session);
     }
@@ -543,6 +553,7 @@ pub fn settle(slot: &mut Option<Session>, live: &mut Live<Plm>, root: &Path) {
         let external = s.refresh_changes()?;
         if !external.is_empty() {
             ryu_session::activity::record_external(live, external);
+            live.prune(|t| crate::refs::stands(s, t));
         }
         live.announce(&before);
         publish(live, s);
