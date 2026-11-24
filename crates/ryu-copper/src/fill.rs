@@ -6,8 +6,10 @@
 //! every machine and thread count.
 
 use crate::measure::{self, Body, Verdict};
-use crate::poly::{self, FillRule, FlattenOptions, Polygons, Rings};
-use ryu_board::geom::{Mdeg, Nm, Place, Point};
+use crate::poly::{self, FillRule, FlattenOptions, Op, Polygons, Rings};
+use crate::tree;
+use rayon::prelude::*;
+use ryu_board::geom::{Mdeg, Nm, Place, Point, Rect};
 
 /// The bound fills are flattened at.
 pub const BOUND: Nm = 10;
@@ -59,15 +61,20 @@ pub struct Fill {
     pub spokes: Vec<u8>,
 }
 
-/// The union of `ps`.
-pub fn union_all(ps: &[Polygons]) -> Polygons {
+/// Every ring of `ps`, as one operand.
+fn all_rings(ps: &[Polygons]) -> Rings {
     let mut rings = Rings::default();
     for p in ps {
         let r = p.rings();
         rings.bound = rings.bound.max(r.bound);
         rings.rings.extend(r.rings);
     }
-    poly::simplify(&rings, FillRule::Positive)
+    rings
+}
+
+/// The union of `ps`.
+pub fn union_all(ps: &[Polygons]) -> Polygons {
+    poly::simplify(&all_rings(ps), FillRule::Positive)
 }
 
 /// A thermal pad's four spokes, along its axes from its centre out past
@@ -95,30 +102,84 @@ fn spokes(t: &ThermalPad, min_width: Nm) -> Vec<Polygons> {
 
 /// The fill.
 pub fn fill(ask: &Ask) -> Fill {
-    let cut = poly::difference(&ask.area, &union_all(&ask.obstacles));
+    // The area less every obstacle, opened by half the least width. The
+    // opening's shrink goes through the difference, (A - U O) shrunk by
+    // d being A shrunk by d less each O grown by d: the area is simple
+    // and the obstacles small and grown in parallel, so no plane-sized
+    // polygon is shrunk. One boolean for the difference (a union first
+    // would be a second pass over a plane's thousands of obstacles).
+    let d = ask.min_width / 2;
     let opened = if ask.min_width > 1 {
-        poly::open(&cut, ask.min_width / 2, &opts())
+        let grown: Vec<Polygons> = ask
+            .obstacles
+            .par_iter()
+            .map(|o| poly::grow(o, d, &opts()))
+            .collect();
+        let shrunk = poly::boolean(
+            &poly::shrink(&ask.area, d, &opts()).rings(),
+            FillRule::NonZero,
+            &all_rings(&grown),
+            FillRule::NonZero,
+            Op::Difference,
+        );
+        poly::grow(&shrunk, d, &opts())
     } else {
-        cut
+        poly::boolean(
+            &ask.area.rings(),
+            FillRule::NonZero,
+            &all_rings(&ask.obstacles),
+            FillRule::NonZero,
+            Op::Difference,
+        )
     };
-    let blocked = union_all(&ask.spoke_obstacles);
-    let mut kept: Vec<Polygons> = vec![opened.clone()];
+    let opened_rings = opened.rings();
+    let spoke_boxes: Vec<Option<Rect>> = ask.spoke_obstacles.iter().map(Polygons::bounds).collect();
+    let mut kept = opened_rings.clone();
     let mut counts = Vec::with_capacity(ask.thermals.len());
     for t in &ask.thermals {
         let mut n = 0u8;
         for s in spokes(t, ask.min_width) {
-            let reaches = !poly::intersection(&s, &opened).is_empty();
-            let clear = poly::intersection(&s, &blocked).is_empty();
+            let Some(b) = s.bounds() else { continue };
+            // Whether it reaches the fill: the fill cut to the spoke's
+            // box (a nanometre's rounding at the box's edges, outside the
+            // spoke), not a boolean of the whole plane.
+            let near = poly::clip(&opened_rings, tree::grown(&b, 2));
+            let reaches = !poly::boolean(
+                &s.rings(),
+                FillRule::NonZero,
+                &near,
+                FillRule::NonZero,
+                Op::Intersection,
+            )
+            .is_empty();
+            // Whether it misses other nets' copper: exactly, against each
+            // obstacle whose box meets it.
+            let clear = reaches
+                && ask
+                    .spoke_obstacles
+                    .iter()
+                    .zip(&spoke_boxes)
+                    .filter(|(_, ob)| ob.is_some_and(|ob| tree::meets(&ob, &b)))
+                    .all(|(o, _)| poly::intersection(&s, o).is_empty());
             if reaches && clear {
-                kept.push(s);
+                let r = s.rings();
+                kept.bound = kept.bound.max(r.bound);
+                kept.rings.extend(r.rings);
                 n += 1;
             }
         }
         counts.push(n);
     }
-    // The opening's grow and the spokes may reach past the area (by a
-    // flattening bound, or a spoke's length near its edge): clip.
-    let joined = poly::intersection(&union_all(&kept), &ask.area);
+    // The fill and its spokes joined and clipped to the area in one
+    // boolean: the opening's grow and the spokes may reach past it (by a
+    // flattening bound, or a spoke's length near its edge).
+    let joined = poly::boolean(
+        &kept,
+        FillRule::NonZero,
+        &ask.area.rings(),
+        FillRule::NonZero,
+        Op::Intersection,
+    );
     let mut out = Vec::new();
     let mut uncertain = Vec::new();
     let mut removed = 0;

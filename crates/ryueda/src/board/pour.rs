@@ -328,11 +328,11 @@ fn fill_one(
             .max(r.clearance.value);
         poly::grow(&flat(shape), reach(need), &opts)
     };
+    // Other nets' copper, grown in parallel below, in this order.
+    let mut others: Vec<(&Shape, Option<&str>)> = Vec::new();
     for pd in s.pads.iter().filter(|pd| pd.on(l, n)) {
         if pd.net.as_deref() != Some(net) {
-            let g = other(&pd.copper, pd.net.as_deref());
-            obstacles.push(g.clone());
-            blocked.push(g);
+            others.push((&pd.copper, pd.net.as_deref()));
             continue;
         }
         own.push(Body::of_shape(&pd.copper, &body_opts));
@@ -373,20 +373,22 @@ fn fill_one(
         if t.net == net {
             own.push(Body::of_shape(&t.shape, &body_opts));
         } else {
-            let g = other(&t.shape, Some(&t.net));
-            obstacles.push(g.clone());
-            blocked.push(g);
+            others.push((&t.shape, Some(&t.net)));
         }
     }
     for v in s.vias.iter().filter(|v| v.from <= l && l <= v.to) {
         if v.net == net {
             own.push(Body::of_shape(&v.shape, &body_opts));
         } else {
-            let g = other(&v.shape, Some(&v.net));
-            obstacles.push(g.clone());
-            blocked.push(g);
+            others.push((&v.shape, Some(&v.net)));
         }
     }
+    let grown: Vec<Polygons> = others
+        .par_iter()
+        .map(|(shape, their)| other(shape, *their))
+        .collect();
+    obstacles.extend(grown.iter().cloned());
+    blocked.extend(grown);
     for h in s.holes.iter().filter(|h| h.span.0 <= l && l <= h.span.1) {
         let owned = h.plated
             && match &h.of {
