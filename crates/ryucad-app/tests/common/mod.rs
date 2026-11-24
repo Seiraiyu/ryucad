@@ -272,6 +272,31 @@ pub fn gpu() -> Option<(
     g
 }
 
+/// The longest path a test makes inside a project, relative to it, with
+/// room to spare: Git's objects and packs (`.git/objects/pack/pack-` and
+/// 40 hex digits), its hooks' samples, ryucad's own files (#1084).
+const DEEPEST: usize = 100;
+
+/// `depth`, or on Windows as much of it as keeps `<base>/<depth>/<name>/`
+/// and [`DEEPEST`] under `MAX_PATH` (260, its terminator included): Git
+/// for Windows doesn't write past it (#1084). Elsewhere `depth` as given.
+fn deep_depth(base: &Path, name: &str, depth: usize) -> usize {
+    if !cfg!(windows) {
+        return depth;
+    }
+    const MAX_PATH: usize = 259;
+    let base = ryucad::doc::project::plain(base.canonicalize().unwrap())
+        .to_string_lossy()
+        .chars()
+        .count();
+    let room = MAX_PATH.saturating_sub(base + 1 + name.len() + 1 + DEEPEST);
+    assert!(
+        room >= 20,
+        "a {base}-character target folder leaves no room"
+    );
+    depth.min(room)
+}
+
 /// A project in a folder of its own.
 pub struct Project {
     _dir: tempfile::TempDir,
@@ -296,9 +321,12 @@ impl Project {
 
     /// A project in a folder called `name`, under a folder whose name is
     /// `depth` characters long: paths as long as a deep checkout's
-    /// target folder gives (#1039).
+    /// target folder gives (#1039). On Windows the folder is shortened
+    /// so the deepest path the test makes in the project stays under
+    /// `MAX_PATH`, which Git's own files there don't pass (#1084).
     pub fn named_deep(name: &str, depth: usize) -> Project {
         let dir = tempfile::tempdir_in(shared()).unwrap();
+        let depth = deep_depth(dir.path(), name, depth);
         let deep = dir.path().join("d".repeat(depth));
         std::fs::create_dir(&deep).unwrap();
         let root = ryucad::doc::project::plain(deep.canonicalize().unwrap()).join(name);
