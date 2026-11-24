@@ -53,8 +53,12 @@ release() {
         mkdir -p "$d"
         for t in x86_64-unknown-linux-musl aarch64-unknown-linux-musl aarch64-apple-darwin; do
             s="$work/stage/ryuplm-$v-$t"
-            mkdir -p "$s"
+            mkdir -p "$s/share"
             cp "$binary" "$s/ryuplm"
+            printf '#!/bin/sh\necho "{\\"ryuplm\\":\\"%s\\"}"\n' "$v" >"$s/ryuplm-app"
+            chmod 755 "$s/ryuplm-app"
+            cp "$root/packaging/linux/ryuplm.desktop" "$root/packaging/linux/ryuplm.xml" \
+                "$root/packaging/macos/ryuplm.applescript" "$s/share/"
             tar -czf "$d/ryuplm-$v-$t.tar.gz" -C "$work/stage" "ryuplm-$v-$t"
         done
         if command -v sha256sum >/dev/null 2>&1; then
@@ -137,6 +141,38 @@ else
     check ".zshenv is not created without zsh" '[ ! -e "$work/home-fresh/.zshenv" ]'
 fi
 check "nothing of ryucad's or ryueda's is touched" '[ ! -e "$work/home-fresh/.ryucad" ] && [ ! -e "$work/home-fresh/.ryueda" ] && ! grep -q "ryucad installer\|ryueda installer" "$work/home-fresh/.profile"'
+check "app installed" '[ -x "$work/home-fresh/.ryuplm/bin/ryuplm-app" ]'
+desktop="$work/home-fresh/.local/share/applications/ryuplm.desktop"
+case "$(uname -s)" in
+    Linux)
+        check "desktop entry runs the installed app" 'grep -qx "Exec=$work/home-fresh/.ryuplm/bin/ryuplm-app %f" "$desktop"'
+        if command -v desktop-file-validate >/dev/null 2>&1; then
+            check "desktop entry is valid" 'desktop-file-validate "$desktop"'
+        fi
+        check "catalogue MIME type registered" '[ -f "$work/home-fresh/.local/share/mime/packages/ryuplm.xml" ]'
+        check "desktop entry opens catalogues, not every folder" 'grep -qx "MimeType=application/x-ryuplm-catalogue;" "$desktop"'
+        check "ryucad's and ryueda's desktop entries are left alone" '[ ! -e "$work/home-fresh/.local/share/applications/ryucad.desktop" ] && [ ! -e "$work/home-fresh/.local/share/applications/ryueda.desktop" ]'
+        ;;
+    Darwin)
+        if command -v osacompile >/dev/null 2>&1; then
+            plist="$work/home-fresh/Applications/ryuplm.app/Contents/Info.plist"
+            check "launcher in ~/Applications" '[ -f "$plist" ]'
+            types=$(plutil -extract CFBundleDocumentTypes json -o - "$plist" 2>/dev/null || true)
+            check "launcher opens folders" 'echo "$types" | grep -q public.folder'
+            check "launcher opens JSON" 'echo "$types" | grep -q public.json'
+            check "launcher is still signed" 'codesign --verify "$work/home-fresh/Applications/ryuplm.app"'
+            check "says nothing of signing" '! grep -q "signature" "$work/out"'
+        fi
+        ;;
+esac
+if [ "$(uname -s)" = Linux ]; then
+    run "with space" "$good"
+    spaced="$work/home-with space/.local/share/applications/ryuplm.desktop"
+    check "a path with a space is quoted" 'grep -qx "Exec=\"$work/home-with space/.ryuplm/bin/ryuplm-app\" %f" "$spaced"'
+fi
+run noapp "$good" RYUPLM_NO_APP=1
+check "RYUPLM_NO_APP installs the command only" '[ "$status" -eq 0 ] && [ -x "$work/home-noapp/.ryuplm/bin/ryuplm" ] && [ ! -e "$work/home-noapp/.ryuplm/bin/ryuplm-app" ]'
+check "RYUPLM_NO_APP registers nothing" '[ ! -e "$work/home-noapp/.local/share/applications" ] && [ ! -e "$work/home-noapp/Applications" ]'
 run fresh "$good"
 check "reinstall succeeds" '[ "$status" -eq 0 ]'
 check "reinstall adds no second PATH line" '[ "$(markers "$work/home-fresh/.profile")" = 1 ]'
