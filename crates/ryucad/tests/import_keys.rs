@@ -10,6 +10,7 @@ fn ryucad() -> &'static str {
 
 fn run(dir: &Path, args: &[&str]) -> serde_json::Value {
     let out = Command::new(ryucad())
+        .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
         .arg("-C")
         .arg(dir.join("project"))
         .args(args)

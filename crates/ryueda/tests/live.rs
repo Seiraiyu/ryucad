@@ -22,6 +22,8 @@ fn breakout(dir: &Path) -> PathBuf {
     std::fs::create_dir_all(&board).unwrap();
     let run = |args: &[&str]| {
         let mut cmd = assert_cmd::Command::cargo_bin("ryueda").unwrap();
+        // No repository above the test's folder is found (#1004).
+        cmd.env("GIT_CEILING_DIRECTORIES", std::env::temp_dir());
         cmd.current_dir(&board)
             .env("RYUEDA_NO_DAEMON", "1")
             .env("RYUEDA_ID_SEED", "live")

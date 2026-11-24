@@ -26,6 +26,7 @@ pub mod client;
 pub mod daemon;
 pub mod diff;
 pub mod digest;
+pub mod docstore;
 pub mod document;
 pub mod documents;
 pub mod drivers;
@@ -53,6 +54,7 @@ pub mod review;
 pub mod server;
 pub mod session;
 pub mod settings;
+pub mod store;
 #[cfg(feature = "testing")]
 pub mod testing;
 pub mod textconv;

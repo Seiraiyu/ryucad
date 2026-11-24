@@ -195,7 +195,11 @@ fuzz_target!(|data: &[u8]| {
     };
     match (run(one), run(eight)) {
         (Ok(a), Ok(b)) => assert_eq!(a, b, "one thread and eight differ"),
-        (Err(a), Err(b)) => assert_eq!(a.code, b.code),
+        (Err(a), Err(b)) => {
+            ryueda::error::details::check(&a);
+            ryueda::error::details::check(&b);
+            assert_eq!(a.code, b.code)
+        }
         (a, b) => panic!("one thread and eight disagree: {:?} vs {:?}", a.is_ok(), b.is_ok()),
     }
     let _ = ryueda::erc::erc(&p, None);
@@ -217,7 +221,11 @@ fuzz_target!(|data: &[u8]| {
                     assert!(it["owner"].as_u64().is_none_or(|i| i < owners), "{it}");
                 }
             }
-            (Err(a), Err(b)) => assert_eq!(a.code, b.code),
+            (Err(a), Err(b)) => {
+                ryueda::error::details::check(&a);
+                ryueda::error::details::check(&b);
+                assert_eq!(a.code, b.code)
+            }
             (a, b) => panic!("one thread and eight disagree: {:?} vs {:?}", a.is_ok(), b.is_ok()),
         }
     }
@@ -259,7 +267,11 @@ fuzz_target!(|data: &[u8]| {
                         assert!(g["ref"].is_string(), "{g}");
                     }
                 }
-                (Err(a), Err(b)) => assert_eq!(a.code, b.code),
+                (Err(a), Err(b)) => {
+                    ryueda::error::details::check(&a);
+                    ryueda::error::details::check(&b);
+                    assert_eq!(a.code, b.code)
+                }
                 (a, b) => panic!("one thread and eight disagree: {:?} vs {:?}", a.is_ok(), b.is_ok()),
             }
         }

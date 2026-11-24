@@ -33,6 +33,16 @@ fn everything() -> Options {
 
 fn project() -> (tempfile::TempDir, Session) {
     let dir = tempfile::tempdir().unwrap();
+    // Its own repository, so the install lands there and never in one
+    // above the temp folder (#1004).
+    assert!(
+        ryu_git::git_env::isolated()
+            .args(["init", "-q"])
+            .arg(dir.path())
+            .status()
+            .unwrap()
+            .success()
+    );
     ryueda::server::init(dir.path(), None, false).unwrap();
     let s = Session::open(dir.path()).unwrap();
     (dir, s)

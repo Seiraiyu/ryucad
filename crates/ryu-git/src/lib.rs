@@ -14,6 +14,30 @@ pub mod value;
 
 pub use repo::{MergeState, Repo, Revision, Step, Unmerged, Worktree, merging_projects};
 
+/// The repository holding `here`, found as Git finds it: upward from
+/// `here`, stopping below each of `GIT_CEILING_DIRECTORIES`, so a project
+/// in a folder a test or a user has fenced off never finds a repository
+/// above it (#1004). A ceiling that isn't an ancestor of `here` is
+/// ignored, as Git ignores it. With `isolated`, the repository reads only
+/// its own config (tests: the user's global config must not decide what
+/// they see). [`Repo::open`] and [`drivers::discover`], and so every
+/// install of drivers and hooks, find their repository through this.
+pub fn discover_upwards(here: &std::path::Path, isolated: bool) -> Option<gix::Repository> {
+    let mut upwards = gix::discover::upwards::Options::default().apply_environment();
+    upwards.match_ceiling_dir_or_error = false;
+    let trust = if isolated {
+        gix::sec::trust::Mapping {
+            full: gix::open::Options::isolated(),
+            reduced: gix::open::Options::isolated(),
+        }
+    } else {
+        Default::default()
+    };
+    gix::ThreadSafeRepository::discover_opts(here, upwards, trust)
+        .ok()
+        .map(Into::into)
+}
+
 /// Where a product's project files are, as Git sees them.
 pub trait Layout: 'static {
     /// The product (`ryucad`, `ryueda`): its messages name it.

@@ -16,6 +16,8 @@ thread_local! {
 
 fn r(dir: &Path, args: &[&str]) -> Value {
     let mut c = Command::new(cargo_bin("ryucad"));
+    // No repository above the test's folder is found (#1004).
+    c.env("GIT_CEILING_DIRECTORIES", std::env::temp_dir());
     c.args(args)
         .current_dir(dir)
         .env("RYUCAD_CACHE_DIR", dir.join(".cache"))
