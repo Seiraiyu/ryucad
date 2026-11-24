@@ -559,6 +559,9 @@ enum ItemCmd {
         /// An import mapping's name: items it made or updated.
         #[arg(long)]
         source: Option<String>,
+        /// Also count every item by class, state, findings and import.
+        #[arg(long)]
+        counts: bool,
         /// id (the default), number, name or class.
         #[arg(long)]
         sort: Option<String>,
@@ -1127,6 +1130,7 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
             make_buy,
             faults,
             source,
+            counts,
             sort,
             offset,
             limit,
@@ -1140,6 +1144,7 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
                 make_buy: make_buy.clone(),
                 faults: faults.clone(),
                 source: source.clone(),
+                counts: *counts,
                 sort: sort.clone(),
                 offset: *offset,
                 limit: *limit,

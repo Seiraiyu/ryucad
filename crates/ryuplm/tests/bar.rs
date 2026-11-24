@@ -466,6 +466,7 @@ fn where_used_across_ten_checkouts() {
             make_buy: None,
             faults: None,
             source: None,
+            counts: false,
             sort: None,
             offset: None,
             limit: Some(1),

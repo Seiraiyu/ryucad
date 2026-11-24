@@ -91,6 +91,10 @@ pub enum Request {
         /// An import mapping's name: items whose provenance names it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source: Option<String>,
+        /// Also count every item by class, state, findings and import,
+        /// in the same pass (the window's Navigator).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        counts: bool,
         /// `id` (the default), `number`, `name` or `class`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sort: Option<String>,
