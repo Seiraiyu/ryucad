@@ -625,6 +625,8 @@ pub fn publish(live: &mut Live<Plm>, session: &Session) {
     let now = session.revisions();
     if live.hub.is_watched()
         && let Some(seen) = &live.seen.revisions
+        // The same generation's map is the same allocation: nothing moved.
+        && !std::sync::Arc::ptr_eq(seen, &now)
         && seen != &now
     {
         let changed: Vec<&String> = now
@@ -637,7 +639,7 @@ pub fn publish(live: &mut Live<Plm>, session: &Session) {
         live.hub.send(
             Topic::Project,
             "project.changed",
-            &json!({"revisions": now, "changed": changed}),
+            &json!({"revisions": *now, "changed": changed}),
         );
     }
     live.seen.revisions = Some(now);
@@ -855,5 +857,35 @@ pub(crate) mod tests {
         ] {
             assert_eq!(ask(&root, r).unwrap_err().code, Code::NoLiveSession);
         }
+    }
+
+    #[test]
+    fn revisions_are_computed_once_per_generation() {
+        let (_d, root) = catalogue();
+        let mut slot = None;
+        handle_safely(&mut slot, None, None, &root, Request::ProjectInfo {}).unwrap();
+        let s = slot.as_ref().unwrap();
+        let a = s.revisions();
+        assert!(
+            std::sync::Arc::ptr_eq(&a, &s.revisions()),
+            "kept while nothing moves"
+        );
+        handle_safely(
+            &mut slot,
+            None,
+            None,
+            &root,
+            Request::ItemCreate {
+                fields: Default::default(),
+                number: Some("A-1".into()),
+                next: None,
+                expected_revision: None,
+            },
+        )
+        .unwrap();
+        handle_safely(&mut slot, None, None, &root, Request::ProjectInfo {}).unwrap();
+        let b = slot.as_ref().unwrap().revisions();
+        assert!(!std::sync::Arc::ptr_eq(&a, &b));
+        assert_eq!(b.len(), a.len() + 1, "the new item is in it");
     }
 }

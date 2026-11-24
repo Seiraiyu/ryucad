@@ -2,7 +2,6 @@
 //! the daemon last told them, so it says only what moved.
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 
 /// What a subscription can ask for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,5 +25,5 @@ impl ryu_session::notify::Topics for Topic {
 /// item's, by `catalogue` and `item/<id>`. `None` until the first telling.
 #[derive(Debug, Default)]
 pub struct Seen {
-    pub revisions: Option<BTreeMap<String, serde_json::Value>>,
+    pub revisions: Option<crate::session::Revisions>,
 }

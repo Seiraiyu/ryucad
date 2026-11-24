@@ -26,7 +26,14 @@ pub struct Session {
     /// were built.
     listing: Option<crate::listing::Listing>,
     listings: u64,
+    /// [`Session::revisions`] as last computed, by generation: a
+    /// subscribed window has it asked after every request and every poll,
+    /// and at 100,000 items it hashes every file (about 80 ms).
+    revisions: std::sync::Mutex<Option<(u64, Revisions)>>,
 }
+
+/// Every item's and document's revision, and `catalogue`'s.
+pub type Revisions = std::sync::Arc<std::collections::BTreeMap<String, serde_json::Value>>;
 
 pub fn path_of(root: &Path, rel: &str) -> PathBuf {
     rel.split('/').fold(root.to_path_buf(), |p, s| p.join(s))
@@ -173,6 +180,7 @@ impl Session {
             generation: 0,
             listing: None,
             listings: 0,
+            revisions: std::sync::Mutex::new(None),
         })
     }
 
@@ -282,7 +290,19 @@ impl Session {
 
     /// Every item's revision, and `catalogue`'s: what `project.changed`
     /// tells subscribers.
-    pub fn revisions(&self) -> std::collections::BTreeMap<String, serde_json::Value> {
+    pub fn revisions(&self) -> Revisions {
+        let mut held = self.revisions.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((g, r)) = held.as_ref()
+            && *g == self.generation
+        {
+            return std::sync::Arc::clone(r);
+        }
+        let r = std::sync::Arc::new(self.compute_revisions());
+        *held = Some((self.generation, std::sync::Arc::clone(&r)));
+        r
+    }
+
+    fn compute_revisions(&self) -> std::collections::BTreeMap<String, serde_json::Value> {
         let mut out: std::collections::BTreeMap<String, serde_json::Value> = self
             .catalogue
             .items
