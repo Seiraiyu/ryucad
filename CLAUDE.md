@@ -223,6 +223,7 @@ What each phase decided is recorded per area under `docs/claude/`. Read the guid
 - `docs/claude/shared-crates.md` — ryu-math, ryu-doc, ryu-session
 - `docs/claude/ryudfm.md` — ryudfm: the board model and shapes (`ryu-board`), the ODB++ reader and corpus, projects, the CLI, renders and releases
 - `docs/claude/ryuplm.md` — ryuplm: catalogues, items, numbers, AMLs, classes, the CLI and releases
+- `docs/claude/ryuplm-app.md` — the ryuplm window: tiles and readers, the Items list's windows, pointing and follow, documents, shipping the app
 - `docs/claude/ryueda.md` — ryueda projects, library projects, symbols, footprints, models, library components
 - `docs/claude/ryueda-schematic.md` — ryueda schematics: properties and designator formats, the ryusch engine, layout files and their commands
 - `docs/claude/ryueda-parts.md` — ryueda part data: the vocabulary, categories, alternates, library search, the parts cache and identification findings
