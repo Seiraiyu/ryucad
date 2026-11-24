@@ -483,6 +483,18 @@ document_unreleased exit 1 "Document unreleased"
   item str The item whose record names the document.
   document str The document with no release of its current content.
 
+document_not_uploaded exit 1 "Document not uploaded"
+
+drive_not_connected exit 4 "Drive not connected"
+  status num The HTTP status the service answered.
+  service_code str The service's own code.
+  service any The service's details.
+
+drive_file_unavailable exit 1 "Drive file unavailable"
+  status num The HTTP status the service answered.
+  service_code str The service's own code.
+  service any The service's details: which file, and why.
+
 item_history_label_foreign exit 1 "Item history label foreign"
   item str The item whose history it is.
   label str The revision label outside the scheme.
