@@ -7,3 +7,4 @@ pub mod link;
 pub mod people;
 pub mod prefs;
 pub mod product;
+pub mod tiles;
