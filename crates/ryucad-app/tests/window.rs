@@ -2698,6 +2698,68 @@ fn the_measure_tool_measures_two_faces_and_esc_leaves_it() {
     assert!(h.query_by_label("8 mm (exact)").is_none());
 }
 
+/// #1053: Measure on two holes' bores reads the distance between their
+/// centres and draws it as a second dimension line.
+#[test]
+fn the_measure_tool_reads_two_holes_centres() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    for (id, at) in [("h1", "4,5,0"), ("h2", "16,5,0")] {
+        p.ok(&[
+            "feature",
+            "add",
+            "p",
+            "cylinder",
+            "--id",
+            id,
+            "--param",
+            "radius=1",
+            "--param",
+            "height=5",
+            "--origin",
+            at,
+            "--operation",
+            "cut",
+            "--target",
+            "base",
+        ]);
+    }
+    let body = p.ok(&["inspect", "p"])["bodies"][0].clone();
+    let bore = |feature: &str| {
+        body["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["origin"]["feature"] == feature && f["surface"]["type"] == "cylinder")
+            .map(|f| format!("p/base/{}", f["name"].as_str().unwrap()))
+            .unwrap_or_else(|| panic!("no bore of {feature}: {body}"))
+    };
+    let (b1, b2) = (bore("h1"), bore("h2"));
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    menu(&mut h, "Tools", "Measure");
+    frames(&mut h, |a| a.opened().ws.view.measure.on);
+    // Picked as a click picks them (`ui::view`): the tool takes each.
+    h.state_mut().opened_mut().ws.measure_pick(&b1);
+    h.state_mut().opened_mut().ws.measure_pick(&b2);
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .view
+            .measure
+            .reading
+            .as_ref()
+            .is_some_and(|r| r.centre_line.is_some())
+    });
+    let r = h.state().opened().ws.view.measure.reading.clone().unwrap();
+    assert_eq!(r.centre_label.as_deref(), Some("12 mm"), "{r:?}");
+    shown(&mut h, "Centres");
+    shown(&mut h, "12 mm (exact)");
+}
+
 #[test]
 fn tools_appearance_colours_a_face_and_ctrl_z_undoes_it() {
     let _one = one_at_a_time();

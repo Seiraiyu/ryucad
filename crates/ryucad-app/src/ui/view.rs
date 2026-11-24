@@ -2154,6 +2154,10 @@ impl View {
             && let Some((a, b)) = r.line
         {
             lines.push((a, b, r.label.clone()));
+            // Two holes: their centres' line too (#1053).
+            if let Some((a, b)) = r.centre_line {
+                lines.push((a, b, r.centre_label.clone()));
+            }
         }
         if let Some(c) = &ws.assembly.clearance
             && let Some(g) = c.shown.and_then(|k| c.gaps.get(k))

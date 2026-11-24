@@ -325,6 +325,56 @@ fn properties(l: &Located, unit: Unit) -> Result<Value> {
     })
 }
 
+/// Where an entity's centre is, for measuring between holes (#1053): a
+/// circular edge's or a sphere's centre as a point, a cylinder's axis as a
+/// line, placed by the entity's pose. `None` for any other entity.
+fn centre_of(l: &Located) -> Option<Flat> {
+    let pose = &l.pose;
+    match kernel::properties(&l.built.body, l.entity).ok()? {
+        Properties::Edge {
+            shape: EdgeShape::Arc { centre, .. },
+            ..
+        }
+        | Properties::Face {
+            shape: FaceShape::Sphere { centre, .. },
+            ..
+        } => Some(Flat::Point(pose.apply_point(centre))),
+        Properties::Face {
+            shape: FaceShape::Cylinder { origin, axis, .. },
+            ..
+        } => Some(Flat::Line(
+            pose.apply_point(origin),
+            pose.apply_unit(axis).get(),
+        )),
+        _ => None,
+    }
+}
+
+/// `measure`'s `centres` between two entities that have them: the distance
+/// between their centres or axes and its two points, and for two axes
+/// whether they are parallel, with `axis_distance` (a hole's spacing).
+/// `near` is the nearest distance's two points: a cylinder's origin is any
+/// point of its axis, so an axis is taken from the point of it by its face,
+/// and parallel axes' points lie by the faces.
+fn centres(a: Flat, b: Flat, near: [Point3; 2], unit: Unit) -> Value {
+    use ryukei::tol::ANGULAR_RESOLUTION;
+    let by = |c: Flat, q: Point3| match c {
+        Flat::Line(o, d) => Flat::Line(o + d * (q - o).dot(d), d),
+        c => c,
+    };
+    let (a, b) = (by(a, near[0]), by(b, near[1]));
+    let (gap, pts) = flat_distance(a, b);
+    let mut v = json!({
+        "distance": value(Measured::Exact(gap), Kind::Length, unit),
+        "points": [point(pts[0], unit), point(pts[1], unit)],
+    });
+    if let (Flat::Line(_, u), Flat::Line(_, w)) = (a, b) {
+        v["parallel"] = json!(u.cross(w).length() <= ANGULAR_RESOLUTION);
+        v["axis_distance"] = v["distance"].clone();
+    }
+    v
+}
+
 /// The sum of bounded values: values add, bounds add.
 fn sum(vs: impl IntoIterator<Item = Measured>) -> Measured {
     let (mut v, mut b, mut exact) = (0.0, 0.0, true);
@@ -773,6 +823,12 @@ pub fn run(session: &mut Session, entities: &[String], rev: Option<&str>) -> Res
                 v["angle"] = value(an.angle, Kind::Angle, unit);
                 v["supplement"] = value(an.supplement, Kind::Angle, unit);
             }
+            // Two holes' edges or bores: how far apart their centres are.
+            if let ([x], [y]) = (a.as_slice(), b.as_slice())
+                && let (Some(ca), Some(cb)) = (centre_of(x), centre_of(y))
+            {
+                v["centres"] = centres(ca, cb, d.points, unit);
+            }
             v
         }
         _ => unreachable!("one or two"),
@@ -903,6 +959,68 @@ mod tests {
         );
         assert_eq!(v["kinds"], json!(["occurrence", "occurrence"]));
         assert!(v.get("angle").is_none());
+    }
+
+    /// #1053: two holes 20 mm apart in a plate: their bores say the
+    /// distance between their axes, and their rims between their centres,
+    /// beside the nearest distance; an entity with no centre says none.
+    #[test]
+    fn two_holes_say_how_far_apart_their_centres_are() {
+        let (_dir, mut s) = fresh();
+        call(&mut s, "part.create", json!({"part": "p"})).unwrap();
+        call(
+            &mut s,
+            "feature.add",
+            json!({"part": "p", "type": "box", "id": "b", "params": {"x": 40, "y": 20, "z": 5}}),
+        )
+        .unwrap();
+        for (id, x) in [("h1", 10), ("h2", 30)] {
+            call(
+                &mut s,
+                "feature.add",
+                json!({"part": "p", "type": "cylinder", "id": id,
+                       "params": {"radius": 2, "height": 5},
+                       "placement": {"origin": [x, 10, 0]}, "operation": "cut"}),
+            )
+            .unwrap();
+        }
+        let body = call(&mut s, "inspect", json!({"part": "p"})).unwrap()["bodies"][0].clone();
+        let named = |feature: &str, list: &str, key: &str, kind: &str| -> Vec<String> {
+            body[list]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|e| e["origin"]["feature"] == feature && e[key]["type"] == kind)
+                .map(|e| format!("p/b/{}", e["name"].as_str().unwrap()))
+                .collect()
+        };
+        // The bores: a cylindrical face each, their axes 20 mm apart.
+        let (f1, f2) = (
+            named("h1", "faces", "surface", "cylinder"),
+            named("h2", "faces", "surface", "cylinder"),
+        );
+        assert_eq!((f1.len(), f2.len()), (1, 1), "{body}");
+        let v = measure(&mut s, &[f1[0].clone(), f2[0].clone()]);
+        assert_eq!(v["centres"]["distance"]["value"], "20 mm", "{v}");
+        assert_eq!(v["centres"]["axis_distance"]["value"], "20 mm", "{v}");
+        assert_eq!(v["centres"]["parallel"], true, "{v}");
+        assert_eq!(v["distance"]["value"], "16 mm", "{v}");
+        // A rim of each: circular edges, their centres 20 mm apart.
+        let (e1, e2) = (
+            named("h1", "edges", "curve", "circle"),
+            named("h2", "edges", "curve", "circle"),
+        );
+        assert!(!e1.is_empty() && !e2.is_empty(), "{body}");
+        let v = measure(&mut s, &[e1[0].clone(), e2[0].clone()]);
+        assert_eq!(v["centres"]["distance"]["value"], "20 mm", "{v}");
+        assert!(v["centres"].get("parallel").is_none(), "{v}");
+        // A bore and its own rim: the rim's centre is on the bore's axis.
+        let v = measure(&mut s, &[f1[0].clone(), e1[0].clone()]);
+        assert_eq!(v["centres"]["distance"]["value"], "0 mm", "{v}");
+        // A bore and a box edge: no centres.
+        let plain = named("b", "edges", "curve", "line");
+        let v = measure(&mut s, &[f1[0].clone(), plain[0].clone()]);
+        assert!(v.get("centres").is_none(), "{v}");
     }
 
     #[test]
