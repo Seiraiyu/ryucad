@@ -8,7 +8,7 @@ window = { max-threads = 1 }
 
 [[profile.default.overrides]]
 # Both apps' drawing tests: ryueda-app's window and snapshot tests too.
-filter = "(package(ryucad-app) & binary(window)) | (package(ryueda-app) & (binary(window) | binary(snapshot)))"
+filter = "(package(ryucad-app) & binary(window)) | (package(ryueda-app) & (binary(window) | binary(snapshot))) | (package(ryuplm-app) & (binary(window) | binary(snapshot) | binary(cli)))"
 test-group = "window"
 
 [profile.ci]

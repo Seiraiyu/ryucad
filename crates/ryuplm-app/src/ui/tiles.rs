@@ -304,9 +304,9 @@ const COLUMNS: [(&str, Option<&str>, f32); 7] = [
 fn row_cols(r: &Row) -> Vec<(f32, String)> {
     let findings = match (r.errors, r.warnings) {
         (0, 0) => String::new(),
-        (e, 0) => format!("{e} ✖"),
-        (0, w) => format!("{w} ⚠"),
-        (e, w) => format!("{e} ✖ {w} ⚠"),
+        (e, 0) => format!("{e} err"),
+        (0, w) => format!("{w} warn"),
+        (e, w) => format!("{e} err {w} warn"),
     };
     vec![
         (COLUMNS[0].2, r.number.clone()),
@@ -410,7 +410,7 @@ fn items(
                 Some(k) => {
                     let on = sort.as_deref() == Some(k);
                     let t = if on {
-                        format!("{title} ▾")
+                        format!("{title} ↓")
                     } else {
                         title.to_owned()
                     };
@@ -645,7 +645,7 @@ fn line_row(
             Some(id) => {
                 let open = w.children.contains_key(id);
                 let b = ui
-                    .small_button(if open { "▾" } else { "▸" })
+                    .small_button(if open { "-" } else { "+" })
                     .on_hover_text("Its own lines");
                 b.widget_info(|| {
                     egui::WidgetInfo::labeled(
