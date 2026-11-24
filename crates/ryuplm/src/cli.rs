@@ -576,6 +576,11 @@ enum DocumentCmd {
         #[command(flatten)]
         expect: Expect,
     },
+    /// Upload service-stored documents' bytes the service lacks, from
+    /// this machine's cache (all of them when none are named).
+    Upload {
+        documents: Vec<String>,
+    },
     /// Move the document's bytes between Git and the service.
     Move {
         document: String,
@@ -1357,6 +1362,7 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
         | Command::Merge(_)
         | Command::Review(_)
         | Command::Number(_)
+        | Command::Document(DocumentCmd::Upload { .. })
         | Command::WhereUsed { org: true, .. } => return Ok(None),
     }))
 }
@@ -1474,6 +1480,17 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
             };
             ryuplm::review::run(&here, action)
         }
+        Command::Document(DocumentCmd::Upload { documents }) => {
+            let root = find_root(&here)?;
+            let mut sent = Vec::new();
+            let out = {
+                let mut send_one = |r: Request| send(cli, &root, r, &mut sent);
+                let open = || ryuplm::docstore::DocStore::open(&root);
+                ryuplm::docstore::upload_all(&mut send_one, &open, documents)
+            };
+            warnings.extend(sent);
+            out
+        }
         Command::Number(cmd) => {
             let root = find_root(&here)?;
             let ask = match cmd {
@@ -1527,6 +1544,15 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
                     }
                     Request::ImportRun { .. } => {
                         ryuplm::ledger::import_run(&mut send_one, &open, req, warnings)
+                    }
+                    // Service-stored bytes move here, in the CLI's process,
+                    // never in the daemon (ryuplm 3.B).
+                    Request::DocumentAdd { .. }
+                    | Request::DocumentReplace { .. }
+                    | Request::DocumentMove { .. }
+                    | Request::DocumentGet { .. } => {
+                        let open = || ryuplm::docstore::DocStore::open(&root);
+                        ryuplm::docstore::around(&mut send_one, &open, req, warnings)
                     }
                     _ => send_one(req),
                 }

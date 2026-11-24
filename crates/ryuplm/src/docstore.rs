@@ -4,6 +4,7 @@
 //! `ryu_review::testing::Store` here and by ryupdm-service (plan 3.C).
 
 use crate::error::{Code, Error, Result};
+use crate::proto::Request;
 use crate::store::Cache;
 use serde_json::{Value, json};
 use std::path::Path;
@@ -197,6 +198,131 @@ impl DocStore {
     }
 }
 
+/// What sends a request to the catalogue's daemon or answers it in
+/// process (the ledger's `Sender`).
+pub type Sender<'a> = crate::ledger::Sender<'a>;
+
+/// The warning for bytes left to upload.
+pub fn not_uploaded_warning(e: &Error) -> String {
+    format!(
+        "document_not_uploaded: {}; run ryuplm document upload",
+        e.message
+    )
+}
+
+/// The CLI's side of a request touching service-stored bytes. Before
+/// `document.get` and `document.move --storage git` of a service-stored
+/// document whose bytes this machine's cache lacks, the bytes are fetched.
+/// After any answer with `to_upload`, they are uploaded; when the service
+/// can't be asked, the answer says `not_uploaded` and `warnings` says why.
+/// Other requests are sent unchanged, with no call to the service and no
+/// token looked for.
+pub fn around(
+    send: &mut Sender,
+    open: &dyn Fn() -> Result<DocStore>,
+    req: Request,
+    warnings: &mut Vec<String>,
+) -> Result<Value> {
+    let fetch_for = match &req {
+        Request::DocumentGet { document, rev, .. }
+            if !rev.as_deref().is_some_and(|r| r.starts_with("label:")) =>
+        {
+            Some((document.clone(), rev.clone()))
+        }
+        Request::DocumentMove {
+            document, storage, ..
+        } if storage == "git" => Some((document.clone(), None)),
+        _ => None,
+    };
+    if let Some((document, rev)) = fetch_for {
+        let v = send(Request::DocumentLocate {
+            documents: vec![document],
+            rev,
+            storage: Some("service".into()),
+            pinned: false,
+        })?;
+        if let Some(row) = v["documents"].as_array().and_then(|r| r.first())
+            && row["cached"] == json!(false)
+        {
+            let (h, size) = (
+                row["file"]["blake3"].as_str().unwrap_or_default(),
+                row["file"]["size"].as_u64().unwrap_or(0),
+            );
+            open()?.fetch(&Cache::open()?, h, size)?;
+        }
+    }
+    let mut out = send(req)?;
+    let want: Vec<(String, u64)> = out["to_upload"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|r| Some((r["blake3"].as_str()?.to_owned(), r["size"].as_u64()?)))
+        .collect();
+    if want.is_empty() {
+        return Ok(out);
+    }
+    match open().and_then(|s| s.upload(&Cache::open()?, &want)) {
+        Ok(u) => {
+            out["uploaded"] = json!(u.uploaded);
+            if !u.held.is_empty() {
+                out["held"] = json!(u.held);
+            }
+        }
+        Err(e) if offline(&e) => {
+            warnings.push(not_uploaded_warning(&e));
+            out["not_uploaded"] = json!(want.iter().map(|(h, _)| h).collect::<Vec<_>>());
+        }
+        Err(e) => return Err(e),
+    }
+    Ok(out)
+}
+
+/// `ryuplm document upload [<document>…]`: every service-stored document
+/// named (all when none are) whose bytes the service lacks, uploaded from
+/// this machine's cache. `{uploaded, held, missing: []}`, or
+/// `document_bytes_missing` naming each document neither holds.
+pub fn upload_all(
+    send: &mut Sender,
+    open: &dyn Fn() -> Result<DocStore>,
+    documents: &[String],
+) -> Result<Value> {
+    let v = send(Request::DocumentLocate {
+        documents: documents.to_vec(),
+        rev: None,
+        storage: Some("service".into()),
+        pinned: false,
+    })?;
+    let rows = v["documents"].as_array().cloned().unwrap_or_default();
+    let want: Vec<(String, u64)> = rows
+        .iter()
+        .filter_map(|r| {
+            Some((
+                r["file"]["blake3"].as_str()?.to_owned(),
+                r["file"]["size"].as_u64()?,
+            ))
+        })
+        .collect();
+    let u = open()?.upload(&Cache::open()?, &want)?;
+    let missing: Vec<Value> = rows
+        .iter()
+        .filter(|r| {
+            r["file"]["blake3"]
+                .as_str()
+                .is_some_and(|h| u.missing.iter().any(|m| m == h))
+        })
+        .map(|r| json!({"id": r["id"], "number": r["number"], "blake3": r["file"]["blake3"]}))
+        .collect();
+    if !missing.is_empty() {
+        return Err(Error::new(
+            Code::DocumentBytesMissing,
+            format!("{} document(s) have bytes neither the service nor this machine's cache holds; upload from the machine that added them, or `document replace`", missing.len()),
+        )
+        .with("missing", &missing)
+        .with("uploaded", &u.uploaded));
+    }
+    Ok(json!({"uploaded": u.uploaded, "held": u.held, "missing": []}))
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -235,5 +361,141 @@ pub(crate) mod tests {
         let h = cache.put_bytes(b"x").unwrap();
         let e = s.upload(&cache, &[(h, 1)]).unwrap_err();
         assert!(offline(&e), "{e:?}");
+    }
+
+    #[test]
+    fn writes_upload_and_reads_fetch_through_the_cli_side() {
+        let _l = crate::documents::tests::CACHE_LOCK.lock().unwrap();
+        let _c = crate::documents::tests::cache_env();
+        let (fake, state) = Fake::start("acme/widgets");
+        let (_d, root) = crate::ledger::tests::catalogue(false);
+        let outside = tempfile::tempdir().unwrap();
+        let src = outside.path().join("a.pdf");
+        std::fs::write(&src, b"%PDF a").unwrap();
+        let open = || Ok(DocStore::at(&fake.url, "t", "acme/widgets"));
+        let mut send = crate::ledger::tests::sender(&root);
+        let mut warnings = Vec::new();
+        let add = Request::DocumentAdd {
+            file: Some(src.display().to_string()),
+            number: Some("D-1".into()),
+            next: None,
+            fields: crate::documents::New {
+                title: Some("A".into()),
+                ..Default::default()
+            },
+            storage: Some("service".into()),
+            drive: None,
+            expected_revision: None,
+        };
+        let v = around(&mut send, &open, add, &mut warnings).unwrap();
+        let h = blake3::hash(b"%PDF a").to_hex().to_string();
+        assert_eq!(v["uploaded"], json!([h]));
+        assert!(state.lock().unwrap().blobs.contains_key(&h));
+        // Another machine: an empty cache, so get fetches first.
+        let _other = crate::documents::tests::cache_env();
+        let out = outside.path().join("got.pdf");
+        let get = Request::DocumentGet {
+            document: "D-1".into(),
+            rev: None,
+            out: out.display().to_string(),
+        };
+        around(&mut send, &open, get, &mut warnings).unwrap();
+        assert_eq!(std::fs::read(&out).unwrap(), b"%PDF a");
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
+    fn an_offline_upload_is_a_warning_and_the_record_stays() {
+        let _l = crate::documents::tests::CACHE_LOCK.lock().unwrap();
+        let _c = crate::documents::tests::cache_env();
+        let (_d, root) = crate::ledger::tests::catalogue(false);
+        let outside = tempfile::tempdir().unwrap();
+        let src = outside.path().join("a.pdf");
+        std::fs::write(&src, b"%PDF a").unwrap();
+        let open = || Ok(DocStore::at("http://127.0.0.1:9", "t", "acme/widgets"));
+        let mut send = crate::ledger::tests::sender(&root);
+        let mut warnings = Vec::new();
+        let v = around(
+            &mut send,
+            &open,
+            Request::DocumentAdd {
+                file: Some(src.display().to_string()),
+                number: Some("D-1".into()),
+                next: None,
+                fields: crate::documents::New {
+                    title: Some("A".into()),
+                    ..Default::default()
+                },
+                storage: Some("service".into()),
+                drive: None,
+                expected_revision: None,
+            },
+            &mut warnings,
+        )
+        .unwrap();
+        assert_eq!(v["not_uploaded"].as_array().unwrap().len(), 1);
+        assert!(
+            warnings[0].starts_with("document_not_uploaded:"),
+            "{warnings:?}"
+        );
+        assert_eq!(v["document"]["number"], "D-1", "the record is written");
+    }
+
+    #[test]
+    fn upload_sends_what_the_service_lacks_and_names_what_no_one_has() {
+        let _l = crate::documents::tests::CACHE_LOCK.lock().unwrap();
+        let _c = crate::documents::tests::cache_env();
+        let (fake, state) = Fake::start("acme/widgets");
+        let (_d, root) = crate::ledger::tests::catalogue(false);
+        let outside = tempfile::tempdir().unwrap();
+        let mut send = crate::ledger::tests::sender(&root);
+        for (n, b) in [("D-1", b"one".as_slice()), ("D-2", b"two")] {
+            let src = outside.path().join(format!("{n}.pdf"));
+            std::fs::write(&src, b).unwrap();
+            send(Request::DocumentAdd {
+                file: Some(src.display().to_string()),
+                number: Some(n.into()),
+                next: None,
+                fields: crate::documents::New {
+                    title: Some(n.into()),
+                    ..Default::default()
+                },
+                storage: Some("service".into()),
+                drive: None,
+                expected_revision: None,
+            })
+            .unwrap();
+        }
+        let open = || Ok(DocStore::at(&fake.url, "t", "acme/widgets"));
+        let v = upload_all(&mut send, &open, &[]).unwrap();
+        assert_eq!(v["uploaded"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            upload_all(&mut send, &open, &[]).unwrap()["held"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        // A third document whose bytes left this machine before upload.
+        let src = outside.path().join("D-3.pdf");
+        std::fs::write(&src, b"three").unwrap();
+        send(Request::DocumentAdd {
+            file: Some(src.display().to_string()),
+            number: Some("D-3".into()),
+            next: None,
+            fields: crate::documents::New {
+                title: Some("D-3".into()),
+                ..Default::default()
+            },
+            storage: Some("service".into()),
+            drive: None,
+            expected_revision: None,
+        })
+        .unwrap();
+        let _empty = crate::documents::tests::cache_env();
+        let e = upload_all(&mut send, &open, &["D-3".into()]).unwrap_err();
+        assert_eq!(e.code, Code::DocumentBytesMissing);
+        assert_eq!(e.details["missing"][0]["number"], "D-3");
+        assert_eq!(state.lock().unwrap().puts, 2);
     }
 }
