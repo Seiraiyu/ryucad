@@ -3,9 +3,22 @@
 //! `ryu_copper::fill` on every build. The fill is derived, never stored.
 
 use super::file::{Contour, CopperLayer};
+use super::preset::{HoleKind, Preset};
+use super::rules::{PourRules, Rules};
+use super::shapes::{BoardShapes, HoleOf};
 use crate::error::Code;
 use crate::fault::Fault;
+use crate::footprint::ZoneConnect;
+use crate::id::Id;
+use rayon::prelude::*;
+use ryu_board::geom::Region;
+use ryu_board::model::Polarity;
+use ryu_board::shape::Shape;
+use ryu_copper::fill::{self, Ask, BOUND, ThermalPad};
+use ryu_copper::measure::{Body, BodyOptions};
+use ryu_copper::poly::{self, Polygons};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 pub use super::file::{POUR_KIND, POURS};
 
@@ -192,11 +205,333 @@ pub fn floors(p: &Pour, preset: &super::preset::Preset) -> Vec<Fault> {
     out
 }
 
+/// A pour as filled.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PourInfo {
+    pub id: Id,
+    pub net: String,
+    /// Its copper layer, by index.
+    pub layer: usize,
+    pub rules: PourRules,
+    pub polygons: Polygons,
+    /// Each kept polygon as a shape, in the polygons' order.
+    pub regions: Vec<Shape>,
+    pub islands_removed: usize,
+    /// Regions (by index) whose contact with the net's copper was uncertain.
+    pub uncertain: Vec<usize>,
+    /// Each thermal pad's reference and its kept spokes.
+    pub thermals: Vec<(String, u8)>,
+}
+
+/// A shape flattened at the fill's bound.
+fn flat(shape: &Shape) -> Polygons {
+    poly::merge_layer(&poly::flatten_shape(shape, &fill::opts()), &[])
+}
+
+/// A polygon as a region shape: its outer ring and holes as contours.
+fn region(p: &poly::Polygon) -> Option<Shape> {
+    let outer = ryu_board::shape::polygon(&p.outer).ok()?;
+    let holes = p
+        .holes
+        .iter()
+        .filter_map(|h| ryu_board::shape::polygon(h).ok())
+        .collect();
+    Some(Shape::regions(
+        Polarity::Positive,
+        [Region { outer, holes }],
+    ))
+}
+
+fn contour_polys(c: &super::file::Contour) -> Option<Polygons> {
+    let k = super::outline::ccw(super::outline::contour(c).ok()?);
+    Some(flat(&Shape::regions(
+        Polarity::Positive,
+        [Region::solid(k)],
+    )))
+}
+
+/// How far an obstacle grows: its rule, the bound and a nanometre.
+fn reach(rule: i64) -> i64 {
+    rule + BOUND + 1
+}
+
+/// One pour filled on its layer, after `done` (the layer's higher pours).
+#[allow(clippy::too_many_arguments)]
+fn fill_one(
+    id: &Id,
+    p: &Pour,
+    l: usize,
+    s: &BoardShapes,
+    rules: &Rules,
+    preset: &Preset,
+    outline: &Polygons,
+    done: &[PourInfo],
+) -> PourInfo {
+    let n = s.n();
+    let opts = fill::opts();
+    let net = p.net.as_str();
+    let r = rules.pour(p);
+    let inner = l != 0 && l + 1 != n;
+    // The area.
+    let boundary = if p.whole {
+        outline.clone()
+    } else {
+        let c = p
+            .contour
+            .as_ref()
+            .and_then(contour_polys)
+            .unwrap_or_default();
+        let cuts: Vec<Polygons> = p.cutouts.iter().filter_map(contour_polys).collect();
+        poly::difference(&c, &fill::union_all(&cuts))
+    };
+    let limit = poly::shrink(outline, reach(rules.edge_clearance(Some(net)).value), &opts);
+    let mut area = poly::intersection(&boundary, &limit);
+    let mut cut: Vec<Polygons> = Vec::new();
+    for k in &s.keepouts {
+        let keeps = k.keeps.iter().any(|x| {
+            matches!(
+                x,
+                crate::footprint::Keep::Pours | crate::footprint::Keep::Copper
+            )
+        });
+        if keeps && k.layers.contains(&l) {
+            cut.push(poly::grow(&flat(&k.shape), BOUND + 1, &opts));
+        }
+    }
+    for d in done {
+        if d.net == net {
+            cut.push(d.polygons.clone());
+        } else {
+            let need = rules
+                .pair_clearance(&[net], &[d.net.as_str()])
+                .value
+                .max(r.clearance.value);
+            cut.push(poly::grow(&d.polygons, reach(need), &opts));
+        }
+    }
+    if !cut.is_empty() {
+        area = poly::difference(&area, &fill::union_all(&cut));
+    }
+    // The obstacles, the spokes' obstacles, the thermals and the net's own copper.
+    let mut obstacles = Vec::new();
+    let mut blocked = Vec::new();
+    let mut thermals = Vec::new();
+    let mut names = Vec::new();
+    let mut own = Vec::new();
+    let body_opts = BodyOptions::default();
+    // Another net's copper grown by the pair's clearance: an obstacle,
+    // and in the spokes' way.
+    let other = |shape: &Shape, their: Option<&str>| -> Polygons {
+        let need = rules
+            .pair_clearance(&[net], &their.into_iter().collect::<Vec<_>>())
+            .value
+            .max(r.clearance.value);
+        poly::grow(&flat(shape), reach(need), &opts)
+    };
+    for pd in s.pads.iter().filter(|pd| pd.on(l, n)) {
+        if pd.net.as_deref() != Some(net) {
+            let g = other(&pd.copper, pd.net.as_deref());
+            obstacles.push(g.clone());
+            blocked.push(g);
+            continue;
+        }
+        own.push(Body::of_shape(&pd.copper, &body_opts));
+        let through = pd.top && pd.bottom;
+        let connect = match pd.connect {
+            Some(ZoneConnect::Solid) => Connect::Solid,
+            Some(ZoneConnect::ThermalThrough) if !through => Connect::Solid,
+            Some(ZoneConnect::None) => {
+                let gap = pd.thermal.map_or(r.gap.value, |t| t.0);
+                obstacles.push(poly::grow(&flat(&pd.copper), reach(gap), &opts));
+                continue;
+            }
+            Some(_) => Connect::Thermal,
+            None => p.connect,
+        };
+        if connect == Connect::Thermal {
+            let (gap, spoke) = pd.thermal.unwrap_or((r.gap.value, r.spoke.value));
+            let copper = flat(&pd.copper);
+            obstacles.push(poly::grow(&copper, reach(gap), &opts));
+            // Only a pad the area reaches within its spokes' length has
+            // thermals: another's are no starved connection.
+            let spokes_reach =
+                poly::grow(&copper, reach(gap) + spoke.max(r.min_width.value), &opts);
+            if poly::intersection(&spokes_reach, &area).is_empty() {
+                continue;
+            }
+            thermals.push(ThermalPad {
+                at: pd.at,
+                rotation_mdeg: pd.rotation_mdeg,
+                half: [pd.size[0] / 2, pd.size[1] / 2],
+                gap,
+                spoke,
+            });
+            names.push(pd.reference.clone());
+        }
+    }
+    for t in s.tracks.iter().filter(|t| t.layer.index(n) == Some(l)) {
+        if t.net == net {
+            own.push(Body::of_shape(&t.shape, &body_opts));
+        } else {
+            let g = other(&t.shape, Some(&t.net));
+            obstacles.push(g.clone());
+            blocked.push(g);
+        }
+    }
+    for v in s.vias.iter().filter(|v| v.from <= l && l <= v.to) {
+        if v.net == net {
+            own.push(Body::of_shape(&v.shape, &body_opts));
+        } else {
+            let g = other(&v.shape, Some(&v.net));
+            obstacles.push(g.clone());
+            blocked.push(g);
+        }
+    }
+    for h in s.holes.iter().filter(|h| h.span.0 <= l && l <= h.span.1) {
+        let owned = h.plated
+            && match &h.of {
+                HoleOf::Pad { occ, pad } => s.pads.iter().any(|x| {
+                    &x.occurrence == occ && &x.pad == pad && x.net.as_deref() == Some(net)
+                }),
+                HoleOf::Via(vid) => s.vias.iter().any(|x| &x.id == vid && x.net == net),
+                HoleOf::Hole(_) => false,
+            };
+        if owned {
+            continue;
+        }
+        let kind = match (&h.of, h.plated) {
+            (HoleOf::Via(_), _) => HoleKind::Via,
+            (HoleOf::Pad { .. }, true) => HoleKind::Pth,
+            _ => HoleKind::Npth,
+        };
+        let rule = rules
+            .hole_clearance(Some(net))
+            .map_or(0, |x| x.value)
+            .max(preset.hole_clearance(kind, inner));
+        let rings = poly::flatten_hole(&h.shape, &opts);
+        let g = poly::grow(
+            &poly::simplify(&rings, poly::FillRule::NonZero),
+            reach(rule),
+            &opts,
+        );
+        obstacles.push(g);
+    }
+    let f = fill::fill(&Ask {
+        area,
+        obstacles,
+        spoke_obstacles: blocked,
+        thermals,
+        min_width: r.min_width.value,
+        own,
+        keep_islands: p.islands == Islands::Keep,
+    });
+    let regions = f.polygons.polygons.iter().filter_map(region).collect();
+    PourInfo {
+        id: id.clone(),
+        net: p.net.clone(),
+        layer: l,
+        rules: r,
+        regions,
+        islands_removed: f.islands_removed,
+        uncertain: f.uncertain,
+        thermals: names.into_iter().zip(f.spokes).collect(),
+        polygons: f.polygons,
+    }
+}
+
+/// Every pour filled: on each layer by priority (higher first) then ID,
+/// layers in parallel. `pours` are the board's readable, fault-free ones.
+pub fn fill_all(
+    pours: &[(Id, Pour)],
+    s: &BoardShapes,
+    rules: &Rules,
+    preset: &Preset,
+) -> Vec<PourInfo> {
+    let n = s.n();
+    let outline = flat(&s.outline);
+    let mut by_layer: BTreeMap<usize, Vec<&(Id, Pour)>> = BTreeMap::new();
+    for x in pours {
+        if let Some(l) = x.1.layer.index(n) {
+            by_layer.entry(l).or_default().push(x);
+        }
+    }
+    let layers: Vec<(usize, Vec<&(Id, Pour)>)> = by_layer.into_iter().collect();
+    layers
+        .par_iter()
+        .flat_map_iter(|(l, list)| {
+            let mut list = list.clone();
+            list.sort_by(|a, b| b.1.priority.cmp(&a.1.priority).then_with(|| a.0.cmp(&b.0)));
+            let mut done: Vec<PourInfo> = Vec::new();
+            for (id, p) in list {
+                let f = fill_one(id, p, *l, s, rules, preset, &outline, &done);
+                done.push(f);
+            }
+            done
+        })
+        .collect()
+}
+
+/// `pour_empty`, `pour_thermal_starved` and `copper_contact_uncertain` of
+/// each fill (a DRC rule).
+pub fn findings(s: &BoardShapes, board: &str) -> Vec<super::drc::Finding> {
+    use crate::fault::Severity;
+    use serde_json::json;
+    let mut out = Vec::new();
+    for f in &s.pours {
+        let me = format!("{board}:pour/{}", f.id);
+        if f.polygons.is_empty() {
+            out.push(super::drc::finding(
+                Code::PourEmpty,
+                Severity::Warning,
+                board,
+                vec![me.clone()],
+                format!("{me} fills nothing"),
+                json!({"net": f.net, "islands_removed": f.islands_removed}),
+            ));
+        }
+        for (pad, spokes) in &f.thermals {
+            if *spokes < 2 {
+                out.push(super::drc::finding(
+                    Code::PourThermalStarved,
+                    Severity::Warning,
+                    board,
+                    vec![me.clone(), pad.clone()],
+                    format!("{pad} meets {me} by {spokes} thermal spoke(s)"),
+                    json!({"spokes": spokes}),
+                ));
+            }
+        }
+        for k in &f.uncertain {
+            out.push(super::drc::finding(
+                Code::CopperContactUncertain,
+                Severity::Warning,
+                board,
+                vec![format!("{me}#{k}")],
+                format!("whether {me}'s region {k} touches its net's copper is within the bound"),
+                json!({"region": k}),
+            ));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::board::preset::JLC_2L;
+    use crate::board::rules::Rules;
+    use crate::board::testing::{MM, UM, board};
     use crate::doc;
+    use ryu_copper::measure::{self, Body, BodyOptions, Verdict};
     use serde_json::json;
+
+    fn rules() -> Rules {
+        Rules::from_parts(std::sync::Arc::new(JLC_2L), None, Default::default())
+    }
+
+    fn plane(net: &str) -> Pour {
+        Pour::whole(net, CopperLayer::Top)
+    }
 
     #[test]
     fn a_pour_reads_writes_and_is_judged() {
@@ -259,5 +594,129 @@ mod tests {
                 .count(),
             2
         );
+    }
+
+    #[test]
+    fn a_plane_avoids_other_nets_and_reaches_its_own() {
+        let mut s = board(20 * MM, 10 * MM);
+        s.smd("r1", "1", (5 * MM, 5 * MM), (MM, MM), Some("gnd"))
+            .smd("r1", "2", (15 * MM, 5 * MM), (MM, MM), Some("sig"));
+        let pours = vec![(Id::parse("p1", "pour").unwrap(), plane("gnd"))];
+        let f = fill_all(&pours, &s, &rules(), &JLC_2L);
+        assert_eq!(f.len(), 1);
+        let p = &f[0];
+        assert!(!p.polygons.is_empty());
+        let opts = BodyOptions::default();
+        let fill = p.polygons.body();
+        let sig = Body::of_shape(&s.pads[1].copper, &opts);
+        // Exactly the clearance away from the other net's pad, at least.
+        assert_eq!(measure::closer(&fill, &sig, 100 * UM), Verdict::No);
+        // Its own pad by four spokes, and touching it.
+        assert_eq!(p.thermals, vec![("b:r1/1".to_owned(), 4)]);
+        let gnd = Body::of_shape(&s.pads[0].copper, &opts);
+        assert_ne!(measure::touches(&fill, &gnd), Verdict::No);
+        // Inside the edge clearance.
+        let edges = Body::of_shape(&s.edges, &opts);
+        assert_eq!(
+            measure::closer(&fill, &edges, JLC_2L.edge_clearance_nm),
+            Verdict::No
+        );
+    }
+
+    #[test]
+    fn higher_priority_fills_first_and_a_lower_clears_it() {
+        let mut s = board(20 * MM, 10 * MM);
+        s.smd("r1", "1", (5 * MM, 5 * MM), (MM, MM), Some("a")).smd(
+            "r1",
+            "2",
+            (15 * MM, 5 * MM),
+            (MM, MM),
+            Some("b"),
+        );
+        let hi = Pour {
+            priority: 1,
+            ..plane("a")
+        };
+        let lo = plane("b");
+        let pours = vec![
+            (Id::parse("lo", "pour").unwrap(), lo),
+            (Id::parse("hi", "pour").unwrap(), hi),
+        ];
+        let f = fill_all(&pours, &s, &rules(), &JLC_2L);
+        let a = f.iter().find(|x| x.net == "a").unwrap();
+        let b = f.iter().find(|x| x.net == "b").unwrap();
+        assert!(a.polygons.area2() > 0);
+        // The lower pour is what is left: cleared from the higher's fill.
+        assert_eq!(
+            measure::closer(&a.polygons.body(), &b.polygons.body(), 100 * UM),
+            Verdict::No
+        );
+    }
+
+    #[test]
+    fn fills_are_the_same_on_one_thread_and_eight() {
+        let mut s = board(20 * MM, 10 * MM);
+        s.smd("r1", "1", (5 * MM, 5 * MM), (MM, MM), Some("gnd"))
+            .via("v1", "sig", (12 * MM, 5 * MM), 300 * UM, 600 * UM);
+        let pours = vec![(Id::parse("p1", "pour").unwrap(), plane("gnd"))];
+        let run = |n| {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(n)
+                .build()
+                .unwrap()
+                .install(|| fill_all(&pours, &s, &rules(), &JLC_2L))
+        };
+        assert_eq!(run(1), run(8));
+    }
+    #[test]
+    fn an_empty_fill_and_a_starved_pad_are_warnings() {
+        let mut s = board(20 * MM, 10 * MM);
+        s.smd("r1", "1", (5 * MM, 5 * MM), (MM, MM), Some("gnd"));
+        // A contour too small to hold anything past its clearances.
+        let tiny = Pour {
+            whole: false,
+            contour: Some(crate::board::file::Contour {
+                start: [15 * MM, 5 * MM],
+                edges: vec![
+                    crate::board::file::Op::Line {
+                        to: [15 * MM + 100, 5 * MM],
+                    },
+                    crate::board::file::Op::Line {
+                        to: [15 * MM + 100, 5 * MM + 100],
+                    },
+                    crate::board::file::Op::Line {
+                        to: [15 * MM, 5 * MM],
+                    },
+                ],
+            }),
+            ..plane("gnd")
+        };
+        let pours = vec![(Id::parse("p1", "pour").unwrap(), tiny)];
+        s.pours = fill_all(&pours, &s, &rules(), &JLC_2L);
+        let f = findings(&s, "b");
+        assert_eq!(
+            f.iter().map(|x| x.code).collect::<Vec<_>>(),
+            [Code::PourEmpty]
+        );
+        assert_eq!(f[0].severity, crate::fault::Severity::Warning);
+    }
+
+    #[test]
+    fn a_pad_boxed_in_on_three_sides_is_starved() {
+        let mut s = board(20 * MM, 10 * MM);
+        s.smd("r1", "1", (5 * MM, 5 * MM), (MM, MM), Some("gnd"))
+            .smd("r2", "1", (34 * MM / 10, 5 * MM), (MM, MM), Some("sig"))
+            .smd("r3", "1", (5 * MM, 66 * MM / 10), (MM, MM), Some("sig"))
+            .smd("r4", "1", (5 * MM, 34 * MM / 10), (MM, MM), Some("sig"));
+        let pours = vec![(Id::parse("p1", "pour").unwrap(), plane("gnd"))];
+        s.pours = fill_all(&pours, &s, &rules(), &JLC_2L);
+        let f = findings(&s, "b");
+        let starved: Vec<_> = f
+            .iter()
+            .filter(|x| x.code == Code::PourThermalStarved)
+            .collect();
+        assert_eq!(starved.len(), 1, "{f:?}");
+        assert_eq!(starved[0].details["spokes"], 1);
+        assert!(starved[0].refs.contains(&"b:r1/1".to_owned()));
     }
 }

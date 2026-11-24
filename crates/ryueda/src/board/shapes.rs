@@ -160,6 +160,8 @@ pub struct BoardShapes {
     pub courtyards: Vec<CourtyardInfo>,
     /// The board's keepouts and its parts' (ryueda 7.C).
     pub keepouts: Vec<KeepoutInfo>,
+    /// The board's pours as filled (ryueda 7.D).
+    pub pours: Vec<super::pour::PourInfo>,
     /// The outline less its cutouts.
     pub outline: Shape,
     /// The outline's and cutouts' boundaries, zero width.
@@ -712,6 +714,28 @@ pub fn build(p: &Project, b: &BoardFiles) -> Result<BoardShapes> {
             .or_default()
             .push((format!("{board}:drawing/{did}"), shape));
     }
+    if !b.pours.is_empty() {
+        let pours: Vec<(crate::id::Id, super::pour::Pour)> = b
+            .pours
+            .iter()
+            .filter(|(_, l)| fine(&l.faults))
+            .filter_map(|(id, l)| Some((id.clone(), l.item.as_ref().ok()?.clone())))
+            .collect();
+        let (region, edges) = outline(file);
+        out.outline = region;
+        out.edges = edges;
+        let rules = super::rules::of(p, b)?;
+        out.pours = super::pour::fill_all(&pours, &out, &rules, &preset);
+        for f in &out.pours {
+            let name = &super::stackup::names(n)[f.layer];
+            for r in &f.regions {
+                out.layers
+                    .entry(name.clone())
+                    .or_default()
+                    .push((format!("{board}:pour/{}", f.id), r.clone()));
+            }
+        }
+    }
     let (region, edges) = outline(file);
     out.outline = region;
     out.edges = edges;
@@ -1175,5 +1199,35 @@ pub(crate) mod tests {
         let s = build(&p, &p.boards[&id]).unwrap();
         assert!(s.pads.iter().any(|x| x.connect == Some(ZoneConnect::Solid)));
         assert!(s.pads.iter().any(|x| x.thermal == Some((400_000, 300_000))));
+    }
+
+    #[test]
+    fn a_whole_pour_fills_its_layer() {
+        let (_d, p0, id) = placed();
+        let net = a_net(&p0);
+        let pour = super::super::pour::Pour::whole(&net, super::super::file::CopperLayer::Top);
+        let text = crate::doc::to_string(&pour, super::super::file::POUR_KIND, 1);
+        let (_d, p, _) = placed_with(&[("boards/b/pours/p1.json".into(), text)]);
+        let s = build(&p, &p.boards[&id]).unwrap();
+        assert_eq!(s.pours.len(), 1);
+        assert!(!s.pours[0].regions.is_empty());
+        assert!(
+            s.layers["copper.top"]
+                .iter()
+                .any(|(owner, _)| owner == "b:pour/p1")
+        );
+        let built = super::super::layout::build("b", &s);
+        let items: Vec<_> = built
+            .layout
+            .items
+            .iter()
+            .filter(|(k, _)| matches!(k, super::super::layout::Key::Pour { id, .. } if id == "p1"))
+            .collect();
+        assert_eq!(items.len(), s.pours[0].regions.len());
+        assert!(
+            items
+                .iter()
+                .all(|(_, it)| it.net.as_deref() == Some(net.as_str()))
+        );
     }
 }
