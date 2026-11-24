@@ -16,7 +16,7 @@ use serde_json::Value;
 use std::path::Path;
 use std::time::Duration;
 
-pub use ryu_session::daemon::DEFAULT_IDLE;
+pub use ryu_session::daemon::{DEFAULT_IDLE, TEST_HOLD_VAR};
 
 /// Seconds of idle time for daemons the CLI starts; tests shorten it.
 pub const IDLE_VAR: &str = <Cad as ryu_session::Serve>::IDLE_VAR;
