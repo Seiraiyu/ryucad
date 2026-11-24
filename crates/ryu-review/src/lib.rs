@@ -98,6 +98,7 @@ pub fn token_from(
 
 /// A client of the hosted review service: its URL, the token it sends
 /// and the HTTP agent.
+#[derive(Clone)]
 pub struct Client {
     base: String,
     token: String,
@@ -160,6 +161,35 @@ impl Client {
         self.answer(r)
     }
 
+    /// `PUT /api/v1{path}` with `bytes` as the body
+    /// (`application/octet-stream`).
+    pub fn put_bytes(&self, path: &str, bytes: &[u8]) -> Result<Value> {
+        let r = self
+            .agent
+            .put(&self.api(path))
+            .header("Authorization", &self.bearer())
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/octet-stream")
+            .send(bytes);
+        self.answer(r)
+    }
+
+    /// [`Client::put_bytes`] with the file at `file` streamed as the body,
+    /// never read whole into memory.
+    pub fn put_file(&self, path: &str, file: &std::path::Path) -> Result<Value> {
+        let mut f = std::fs::File::open(file).map_err(|e| Error::io(file, &e))?;
+        let len = f.metadata().map_err(|e| Error::io(file, &e))?.len();
+        let r = self
+            .agent
+            .put(&self.api(path))
+            .header("Authorization", &self.bearer())
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/octet-stream")
+            .header("Content-Length", &len.to_string())
+            .send(ureq::SendBody::from_reader(&mut f));
+        self.answer(r)
+    }
+
     /// The bytes at `url`: a path on the service (`/api/v1/artifacts/…`)
     /// or a full URL (a signed one it redirected to). The token goes only
     /// to the service itself.
@@ -191,7 +221,16 @@ impl Client {
             .with_config()
             .limit(limit)
             .read_to_vec()
-            .map_err(|e| self.unreachable(&e))
+            .map_err(|e| match e {
+                // A body longer than asked is the bytes' fault, not the
+                // network's: callers checking bytes read `details.limit`.
+                ureq::Error::BodyExceedsLimit(_) => Error::new(
+                    Code::ReviewFailed,
+                    format!("{full} answered more than {limit} bytes"),
+                )
+                .with("limit", limit),
+                e => self.unreachable(&e),
+            })
     }
 
     fn answer(
@@ -246,6 +285,9 @@ pub fn refusal(status: u16, body: &Value) -> Error {
         "github_unreachable" => Code::ReviewGithubUnreachable,
         // The ledger's (ryuplm 2, design 936): its own code everywhere.
         "part_number_taken" => Code::PartNumberTaken,
+        // Drive (ryuplm 3, design 937): their own codes everywhere.
+        "drive_not_connected" => Code::DriveNotConnected,
+        "drive_file_unavailable" => Code::DriveFileUnavailable,
         _ if status == 401 => Code::ReviewUnauthenticated,
         _ if status == 404 => Code::ReviewNotFound,
         _ => Code::ReviewFailed,

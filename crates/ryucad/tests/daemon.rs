@@ -24,6 +24,7 @@ fn fixture() -> Fixture {
     std::fs::create_dir_all(&project).unwrap();
     let run = dir.path().join("run");
     let st = Command::new(cargo_bin("ryucad"))
+        .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
         .arg("init")
         .current_dir(&project)
         .output()
@@ -55,6 +56,7 @@ impl Fixture {
     /// [`Fixture::start`], with `env` in the daemon's environment.
     fn start_with(&self, idle: u64, env: &[(&str, &str)]) -> Child {
         let child = Command::new(cargo_bin("ryucad"))
+            .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
             .args(["daemon", "run", "--idle-timeout", &idle.to_string()])
             .envs(env.iter().copied())
             .current_dir(&self.root)
@@ -153,6 +155,7 @@ fn one_daemon_per_project() {
     let f = fixture();
     let mut first = f.start(60);
     let second = Command::new(cargo_bin("ryucad"))
+        .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
         .args(["daemon", "run"])
         .current_dir(&f.root)
         .env(RUNTIME_DIR_VAR, &f.run)
@@ -194,6 +197,7 @@ fn a_stale_socket_is_replaced() {
 /// Runs the CLI in the fixture's project with its runtime folder.
 fn cli(f: &Fixture, args: &[&str]) -> Value {
     let out = Command::new(cargo_bin("ryucad"))
+        .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
         .args(args)
         .current_dir(&f.root)
         .env(RUNTIME_DIR_VAR, &f.run)
@@ -208,6 +212,7 @@ fn cli(f: &Fixture, args: &[&str]) -> Value {
 /// [`cli`], with `RYUCAD_APP` set to `app`.
 fn cli_with_app(f: &Fixture, app: &Path, args: &[&str]) -> (Value, Option<i32>) {
     let out = Command::new(cargo_bin("ryucad"))
+        .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
         .args(args)
         .current_dir(&f.root)
         .env(RUNTIME_DIR_VAR, &f.run)
@@ -908,6 +913,7 @@ fn an_agent_waits_for_the_human_to_select() {
         let (root, run) = (f.root.clone(), f.run.clone());
         std::thread::spawn(move || {
             let out = Command::new(cargo_bin("ryucad"))
+                .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
                 .args([
                     "watch",
                     "--topic",
@@ -1065,6 +1071,7 @@ fn the_runtime_folder_doesnt_follow_tmpdir() {
     let cli = |tmp: usize, args: &[&str]| -> Value {
         let tmp = tmps[tmp].path();
         let out = Command::new(cargo_bin("ryucad"))
+            .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
             .args(args)
             .current_dir(&f.root)
             .env_remove(RUNTIME_DIR_VAR)
@@ -1291,6 +1298,7 @@ impl Watch {
 /// `calls` through one `ryucad session --stdio`; their answers.
 fn stdio(f: &Fixture, calls: &[Value]) -> Vec<Value> {
     let mut child = Command::new(cargo_bin("ryucad"))
+        .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
         .args(["session", "--stdio"])
         .current_dir(&f.root)
         .env(RUNTIME_DIR_VAR, &f.run)

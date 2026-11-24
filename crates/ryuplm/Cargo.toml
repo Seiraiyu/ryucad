@@ -26,6 +26,8 @@ ryu-git = { path = "../ryu-git" }
 # `where-used --org` (design 938). HTTPS on rustls, as ryucad's and
 # ryueda's.
 ryu-review = { path = "../ryu-review" }
+# The document cache's whole-file writes (ryuplm 3.B).
+tempfile = "3"
 ryu-session = { path = "../ryu-session" }
 # AML names and lifecycles, shared with ryueda's part data (no project).
 ryueda-parts = { path = "../ryueda-parts" }

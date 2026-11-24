@@ -56,7 +56,8 @@ impl Workspace {
     /// The view marks the viewport draws on the glass (design 423, When):
     /// the Markup bar's, with the mark under way, in this window's colour;
     /// else the chosen annotation's, in its author's, at
-    /// [`ryucad::redline::CLOSED_ALPHA`] once closed; else none, since flat
+    /// [`ryucad::redline::CLOSED_ALPHA`] once closed (and only while the
+    /// tile shows closed ones, #1052); else none, since flat
     /// marks seen from another view mislead.
     pub fn view_marks(&self) -> Option<crate::core::markup::ViewMarks> {
         use crate::core::markup::ViewMarks;
@@ -74,6 +75,13 @@ impl Workspace {
             .annotations
             .all
             .get(self.annotations.chosen_annotation.as_ref()?)?;
+        // A closed one only when the tile shows closed ones: the person
+        // asked for it (#1052).
+        if !e.is_open()
+            && self.annotations.annotation_filter.show == crate::core::annotations::Show::Open
+        {
+            return None;
+        }
         let marks = e.marks.as_ref()?;
         // Drawn only over the part they were made on (#730), as pins are.
         if !self.model.shown().contains(&marks.part.as_str()) {

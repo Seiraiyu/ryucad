@@ -262,6 +262,42 @@ fn a_feature_seed_e5a86bea_rebuilds_quickly() {
     assert!(!bars() || s < 5.0, "{s} s");
 }
 
+/// #1071: the `feature` target's find in release 10.A's dispatch (run
+/// 45392447398, `crash-46ffea2a…`): a spotface hole whose near chamfer
+/// is as wide as its spotface. The chamfer's corner fell on the
+/// spotface floor's, and the tool's profile panicked on the empty
+/// segment between them (`hole.rs`, "a hole's corners are apart"). A
+/// near chamfer must sit inside the spotface: refused typed, at
+/// `/near/diameter`.
+#[test]
+fn a_spotface_as_wide_as_its_near_chamfer_is_refused() {
+    let seed = r#"{"format":12,"kind":"ryucad.feature","type":"hole","sketch":"t","form":"spotface","diameter":"2 mm","spotface":{"diameter":"3 mm","depth":"0.5 mm"},"near":{"diameter":"3 mm"},"depth":"through_all","targets":["b"]}"#;
+    let files = part_files(seed);
+    let project = ryucad::doc::project::Project::load_from(std::path::Path::new("/fz"), &files)
+        .expect("the project loads");
+    let pins = ryucad::assembly::pins(&project, |part, rev, _within| {
+        Err(Error::new(
+            Code::LabelNotFound,
+            format!("{part} has no {}", rev.text()),
+        ))
+    });
+    let mut r = Rebuild::new(&project, &pins, Store::default());
+    let result = r
+        .result(&Id::parse("fz", "part").unwrap())
+        .expect("the part rebuilds");
+    let f = Id::parse("f", "feature").unwrap();
+    let (_, out) = result
+        .features
+        .iter()
+        .find(|(i, _)| *i == f)
+        .expect("feature f");
+    let Err(e) = out else {
+        panic!("a spotface as wide as its near chamfer built");
+    };
+    assert_eq!(e.code, Code::InvalidParam, "{e:?}");
+    assert_eq!(e.details["pointer"], "/near/diameter", "{e:?}");
+}
+
 /// Part `fz`, the base, then `written` as its feature `f`.
 fn part_files(written: &str) -> BTreeMap<String, Vec<u8>> {
     let mut files = project_files(written);

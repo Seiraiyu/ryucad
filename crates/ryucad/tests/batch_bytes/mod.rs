@@ -180,6 +180,8 @@ pub fn check(data: &[u8]) {
             "{ops:?}: the files differ"
         ),
         (Err(e), Err((i, f))) => {
+            ryucad::error::details::check(&e);
+            ryucad::error::details::check(&f);
             assert_ne!(e.code, Code::Internal, "{ops:?}: {e:?}");
             assert_eq!(e.code, f.code, "{ops:?}: batch {e:?}, alone {f:?}");
             assert_eq!(e.details["op"], json!(i), "{ops:?}: {e:?}");

@@ -504,7 +504,7 @@ pub fn measure(ctx: &egui::Context, ws: &mut Workspace, view: egui::Rect) {
         .show(ctx, |ui| {
             let t = &ws.view.measure;
             if t.picks.is_empty() {
-                ui.label("Pick a face, edge or vertex: its properties. Pick a second: the distance and angle between them.");
+                ui.label("Pick a face, edge or vertex: its properties. Pick a second: the distance and angle between them. Two holes' edges or bores: the distance between their centres too.");
                 return;
             }
             for p in &t.picks {

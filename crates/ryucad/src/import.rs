@@ -632,6 +632,27 @@ fn shape_key(i: &Import) -> ryukei::name::OpKey {
     ryukei::name::OpKey::from_bytes(text.as_bytes())
 }
 
+/// Prints how long a stage of an import took, with `RYUCAD_IMPORT_TIMINGS=1`
+/// (#847's diagnosis), and how many shape heals ran in it.
+pub(crate) fn stage<T>(what: &str, f: impl FnOnce() -> T) -> T {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var_os("RYUCAD_IMPORT_TIMINGS").is_some()) {
+        return f();
+    }
+    let heals = HEALS.load(std::sync::atomic::Ordering::Relaxed);
+    let t = std::time::Instant::now();
+    let r = f();
+    eprintln!(
+        "import stage {what}: {:.2} s, {} heals",
+        t.elapsed().as_secs_f64(),
+        HEALS.load(std::sync::atomic::Ordering::Relaxed) - heals
+    );
+    r
+}
+
+/// Shape heals run (not taken from [`HEALED`]): for [`stage`].
+static HEALS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// How many healed file bodies are kept by shape (#813).
 const HEALED_BODIES: usize = 1024;
 
@@ -719,6 +740,7 @@ fn shape_heal(
     heal: impl Fn(ryukei::name::OpKey) -> Result<Healed> + Send + Sync,
     key: ryukei::name::OpKey,
 ) -> Result<(Healed, bool)> {
+    HEALS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(1)
         .thread_name(|_| "ryucad-shape-heal".into())
@@ -1333,13 +1355,15 @@ pub fn import(session: &mut crate::session::Session, ask: Ask) -> Result<Value> 
             root.join(p)
         }
     };
-    let bytes = std::fs::read(&source).map_err(|e| Error::io(&source, &e))?;
+    let bytes = stage("read", || std::fs::read(&source)).map_err(|e| Error::io(&source, &e))?;
     let file = ImportFile::new(bytes);
-    let opened = opened(&file).map_err(|e| unreadable(&ask.path, &e))?;
+    let opened = stage("opened", || opened(&file)).map_err(|e| unreadable(&ask.path, &e))?;
     // Every file the parts are in, found before anything is written.
     let search = search_dirs(&root, &ask.search);
-    let tree = external::resolve(&source, file.clone(), opened.clone(), &search, &ask.path)
-        .map_err(|e| refused(e, &opened, &ask.path))?;
+    let tree = stage("resolve", || {
+        external::resolve(&source, file.clone(), opened.clone(), &search, &ask.path)
+    })
+    .map_err(|e| refused(e, &opened, &ask.path))?;
     if tree.nodes.len() > 1 {
         return import_tree(session, &ask, root, &tree, None)
             .map_err(|e| refused(e, &opened, &ask.path));
@@ -1472,7 +1496,7 @@ fn import_opened(
     );
     let mut warnings = mapped_warnings(opened, &ask.path);
     warnings.extend(applied.warnings.iter().cloned());
-    let mut writes = plan::writes(project, &plan)?;
+    let mut writes = stage("plan::writes", || plan::writes(project, &plan))?;
     if !reused {
         writes.insert(stored.clone(), Some(file.bytes.to_vec()));
     }
@@ -1492,10 +1516,12 @@ fn import_opened(
     if plan.iter().any(|pl| !pl.properties.is_empty()) {
         crate::pdm::ensure_id(session)?;
     }
-    plan::apply(&root, &writes)?;
-    crate::drivers::write_attributes(&root)?;
-    session.reload()?;
-    let parts = parts_report(session, opened, &plan)?;
+    stage("plan::apply", || plan::apply(&root, &writes))?;
+    stage("write_attributes", || {
+        crate::drivers::write_attributes(&root)
+    })?;
+    stage("reload", || session.reload())?;
+    let parts = stage("parts_report", || parts_report(session, opened, &plan))?;
     let transfer = transfer_of(opened, &stored, &plan, &parts, &applied.instances);
     Ok(answer(head, opened, parts, warnings, false, transfer))
 }

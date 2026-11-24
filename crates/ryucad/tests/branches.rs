@@ -70,6 +70,8 @@ impl Repo {
     /// Runs ryucad in `dir`, through its daemon unless `direct`.
     fn run(&self, dir: &Path, direct: bool, args: &[&str]) -> (i32, Value) {
         let mut cmd = Command::cargo_bin("ryucad").unwrap();
+        // No repository above the test's folder is found (#1004).
+        cmd.env("GIT_CEILING_DIRECTORIES", std::env::temp_dir());
         cmd.args(args)
             .current_dir(dir)
             .env("HOME", self.home())
@@ -114,6 +116,7 @@ impl Drop for Repo {
     fn drop(&mut self) {
         let _ = Command::cargo_bin("ryucad")
             .unwrap()
+            .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
             .args(["daemon", "stop", "--all"])
             .env("RYUCAD_RUNTIME_DIR", self.dir.path().join("run"))
             .output();

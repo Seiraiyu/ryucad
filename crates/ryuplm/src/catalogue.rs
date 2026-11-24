@@ -36,6 +36,9 @@ pub struct Manifest {
     pub forked_from: Option<ForkedFrom>,
     pub default_unit: Unit,
     pub classes: BTreeMap<String, Class>,
+    /// New documents' storage unless `--storage` says (design 937): Git by
+    /// default, written only when `service`.
+    pub document_storage: crate::document::Storage,
 }
 
 impl Manifest {
@@ -45,6 +48,7 @@ impl Manifest {
             forked_from: None,
             default_unit,
             classes: BTreeMap::new(),
+            document_storage: crate::document::Storage::Git,
         }
     }
 
@@ -71,6 +75,9 @@ impl Manifest {
                 })
                 .collect();
             v["classes"] = Value::Object(c);
+        }
+        if self.document_storage != crate::document::Storage::Git {
+            v["documents"] = json!({"storage": self.document_storage.as_str()});
         }
         v
     }
@@ -141,8 +148,20 @@ impl Manifest {
                 classes.insert(name.clone(), Class { properties });
             }
         }
+        let mut document_storage = crate::document::Storage::Git;
+        if let Some(d) = o.take_opt("documents") {
+            let mut d_o = Obj::new(&d, "/documents")?;
+            if let Some(s) = d_o.take_opt("storage") {
+                document_storage = s
+                    .as_str()
+                    .and_then(crate::document::Storage::parse)
+                    .ok_or_else(|| invalid("/documents/storage", "storage is git or service"))?;
+            }
+            d_o.finish()?;
+        }
         o.finish()?;
         Ok(Manifest {
+            document_storage,
             project,
             forked_from,
             default_unit,
@@ -220,5 +239,24 @@ pub(crate) mod tests {
         let e = Manifest::read(crate::canonical::to_string(&newer).as_bytes()).unwrap_err();
         assert_eq!(e.code, crate::error::Code::FormatTooNew);
         assert!(e.message.contains("Upgrade ryuplm"), "{}", e.message);
+    }
+
+    #[test]
+    fn the_default_storage_is_git_unless_written() {
+        let p = ProjectId::parse(&"01".repeat(16)).unwrap();
+        let mut m = Manifest::new(p, Unit::Mm);
+        assert_eq!(m.document_storage, crate::document::Storage::Git);
+        assert!(m.to_json().get("documents").is_none(), "git is unwritten");
+        m.document_storage = crate::document::Storage::Service;
+        let v = m.to_json();
+        assert_eq!(v["documents"], json!({"storage": "service"}));
+        assert_eq!(v["format"], 1, "widened before any release, as items were");
+        assert_eq!(Manifest::read(m.to_text().as_bytes()).unwrap(), m);
+        let mut bad = v.clone();
+        bad["documents"]["storage"] = json!("lfs");
+        assert_eq!(
+            Manifest::from_json(&bad).unwrap_err().details["pointer"],
+            "/documents/storage"
+        );
     }
 }

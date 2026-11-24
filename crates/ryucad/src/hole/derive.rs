@@ -485,6 +485,23 @@ fn wider_than_what_they_cut(s: &Sizes) -> Result<()> {
     {
         return refuse("/near/diameter", "a near chamfer", d, s.near_under() * 2.0);
     }
+    // A near chamfer on a spotface chamfers the drill in the spotface's
+    // floor: it must fit inside the spotface, or its corner falls on the
+    // floor's (#1071: the tool's profile had an empty segment) or past
+    // the spotface's wall.
+    if let (Some((d, _)), Some((sd, _))) = (&s.near, &s.spotface)
+        && d.si >= sd.si
+    {
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!(
+                "a near chamfer {} is no narrower than the spotface {} it sits in",
+                d.text, sd.text
+            ),
+        )
+        .with("pointer", "/near/diameter")
+        .with("value", d.text.clone()));
+    }
     let far = match &s.far {
         Some(FarSizes::Countersink(d, _)) => Some(("/far/countersink/diameter", d)),
         Some(FarSizes::Counterbore(d, _)) => Some(("/far/counterbore/diameter", d)),
@@ -1246,6 +1263,19 @@ pub(crate) mod tests {
         )
         .unwrap_err();
         assert_eq!(e.details["pointer"], "/near/diameter");
+        // And on a spotface, one no narrower than the spotface it sits in
+        // (#1071): as wide, and wider.
+        for near in ["12 mm", "13 mm"] {
+            let e = derive(
+                &hole(json!({"format": 25, "form": "spotface", "diameter": "5 mm",
+                             "spotface": {"diameter": "12 mm"}, "depth": "through_all",
+                             "near": {"diameter": near}})),
+                None,
+            )
+            .unwrap_err();
+            assert_eq!(e.code, Code::InvalidParam, "{near}");
+            assert_eq!(e.details["pointer"], "/near/diameter", "{near}");
+        }
         // From a fastener: a counterdrill takes its counterbore entry, a
         // spotface its spotface; missing, named in needs_project_table.
         let t = tables();

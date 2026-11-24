@@ -181,7 +181,7 @@ fn read_source(path: &Path) -> Result<(String, Vec<u8>)> {
         return Err(Error::new(
             Code::DocumentTooLarge,
             format!(
-                "{} is {} bytes, over the 100 MiB GitHub takes in a file",
+                "{} is {} bytes, over the 100 MiB GitHub takes in a file: add it with --storage service",
                 path.display(),
                 meta.len()
             ),
@@ -256,40 +256,143 @@ fn set_type(d: &mut Document, t: Option<String>) -> Result<()> {
     Ok(())
 }
 
+/// The storage `asked` names, or the catalogue's default.
+fn storage_for(session: &Session, asked: Option<&str>) -> Result<Storage> {
+    match asked {
+        None => Ok(session.catalogue().manifest.document_storage),
+        Some(s) => Storage::parse(s).ok_or_else(|| {
+            Error::new(Code::InvalidParam, "storage is git or service").with("storage", s)
+        }),
+    }
+}
+
+/// The source file `path` put into the local cache: its safe name, the
+/// record's `file`, and nothing read into memory.
+fn cached_source(path: &Path, media: Option<&str>) -> Result<File> {
+    let meta = std::fs::metadata(path).map_err(|e| Error::io(path, &e))?;
+    if !meta.is_file() {
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!("{} isn't a file", path.display()),
+        )
+        .with("file", path));
+    }
+    let (blake3, size) = crate::store::Cache::open()?.put_file(path)?;
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut f = File::of(&name, b"", media)?;
+    f.size = size;
+    f.blake3 = blake3;
+    Ok(f)
+}
+
+/// What a write leaves to upload.
+fn to_upload(id: &Id, d: &Document) -> Value {
+    json!([{"document": id, "blake3": d.file.blake3, "size": d.file.size}])
+}
+
+/// The record's `file` for a Drive pin, and for Git storage the bytes from
+/// the cache, which the CLI has filled.
+fn pinned_file(
+    pin: &crate::docstore::DrivePin,
+    storage: Storage,
+) -> Result<(File, Option<Arc<[u8]>>)> {
+    let mut f = File::of(&pin.name, b"", Some(&pin.media_type))
+        .or_else(|_| File::of(&pin.name, b"", None))?;
+    f.size = pin.size;
+    f.blake3 = pin.blake3.clone();
+    let bytes = match storage {
+        Storage::Service => None,
+        Storage::Git => {
+            if pin.size > TOO_LARGE {
+                return Err(Error::new(
+                    Code::DocumentTooLarge,
+                    format!(
+                        "Drive file {} is {} bytes, over the 100 MiB GitHub takes: add it with --storage service",
+                        pin.drive_id, pin.size
+                    ),
+                ));
+            }
+            Some(
+                crate::store::Cache::open()?
+                    .get(&pin.blake3, pin.size)?
+                    .ok_or_else(|| {
+                        Error::new(
+                            Code::DocumentBytesMissing,
+                            format!(
+                                "Drive file {}'s bytes aren't in this machine's cache",
+                                pin.drive_id
+                            ),
+                        )
+                        .with("blake3", &pin.blake3)
+                    })?,
+            )
+        }
+    };
+    Ok((f, bytes))
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn add(
     session: &mut Session,
-    file: &Path,
+    file: Option<&Path>,
     number: Option<String>,
     next: Option<String>,
     fields: New,
+    storage: Option<&str>,
+    drive: Option<crate::docstore::DrivePin>,
     expected: Option<&str>,
 ) -> Result<Value> {
     check_expected("the catalogue", &session.revision(), expected)?;
-    let title = fields
-        .title
-        .clone()
-        .ok_or_else(|| Error::new(Code::Usage, "a document needs --title"))?;
+    let storage = storage_for(session, storage)?;
+    let title = match (&fields.title, &drive) {
+        (Some(t), _) => t.clone(),
+        (None, Some(p)) => p.name.clone(),
+        (None, None) => return Err(Error::new(Code::Usage, "a document needs --title")),
+    };
     let number = number_for(session, number, next)?;
-    let (name, bytes) = read_source(file)?;
-    let mut d = Document::new(
-        &number,
-        &title,
-        File::of(&name, &bytes, fields.media_type.as_deref())?,
-    );
+    let (file_rec, git_bytes): (File, Option<Arc<[u8]>>) = match (file, &drive, storage) {
+        (Some(p), None, Storage::Git) => {
+            let (name, bytes) = read_source(p)?;
+            (
+                File::of(&name, &bytes, fields.media_type.as_deref())?,
+                Some(Arc::from(bytes)),
+            )
+        }
+        (Some(p), None, Storage::Service) => {
+            (cached_source(p, fields.media_type.as_deref())?, None)
+        }
+        (None, Some(pin), _) => pinned_file(pin, storage)?,
+        _ => return Err(Error::new(Code::Usage, "give a file or --drive, not both")),
+    };
+    let mut d = Document::new(&number, &title, file_rec);
+    d.storage = storage;
+    d.pin = drive.as_ref().map(|p| crate::document::Pin {
+        drive_id: p.drive_id.clone(),
+        revision: p.revision.clone(),
+    });
     d.description = fields.description;
     set_type(&mut d, fields.doc_type)?;
-    // One ID space with items (Decision 1).
     let id = crate::ids::random(|s| {
         Id::parse(s, "document").is_ok_and(|i| session.catalogue().holds(&i))
     })?;
     let text = text_of(&id, &d)?;
+    let bytes = git_bytes
+        .map(|b| vec![(bytes_path(&id, &d.file.name), b)])
+        .unwrap_or_default();
     commit_with(
         session,
         &format!("adding document {number}"),
         Writes(vec![(document_path(&id), Some(text))]),
-        vec![(bytes_path(&id, &d.file.name), Arc::from(bytes))],
+        bytes,
     )?;
-    Ok(shown(session, &id))
+    let mut v = shown(session, &id);
+    if storage == Storage::Service {
+        v["to_upload"] = to_upload(&id, &d);
+    }
+    Ok(v)
 }
 
 pub fn show(session: &mut Session, document: &str) -> Result<Value> {
@@ -433,13 +536,17 @@ pub fn replace(
 ) -> Result<Value> {
     let (id, mut d) = current(session, document, expected)?;
     if d.storage == Storage::Service {
-        // 3.A writes only Git storage (Decision 7): 3.B uploads.
-        return Err(Error::new(
-            Code::InvalidParam,
-            format!("document {id}'s bytes are on the service, which this build doesn't write"),
-        )
-        .with("document", &id)
-        .with("storage", "service"));
+        // The new bytes go into the cache; the CLI uploads them (3.B).
+        d.file = cached_source(file, media_type.as_deref())?;
+        let text = text_of(&id, &d)?;
+        commit(
+            session,
+            &format!("replacing document {id}'s bytes"),
+            Writes(vec![(document_path(&id), Some(text))]),
+        )?;
+        let mut v = shown(session, &id);
+        v["to_upload"] = to_upload(&id, &d);
+        return Ok(v);
     }
     let (name, bytes) = read_source(file)?;
     let old = bytes_path(&id, &d.file.name);
@@ -526,9 +633,9 @@ fn files_at(
     id: &Id,
     rev: &str,
 ) -> Result<std::collections::BTreeMap<String, Vec<u8>>> {
-    let (repo, releases) = crate::release::history(session)?;
+    let (_, releases) = crate::release::history(session)?;
     let commit = match rev.strip_prefix("label:") {
-        None => rev.to_owned(),
+        None => return files_at_rev(session, rev),
         Some(label) => {
             let config =
                 ryupdm::config::Config::read_in(&session.snapshot(), crate::catalogue::NAME)?;
@@ -546,7 +653,16 @@ fn files_at(
                 })?
         }
     };
-    ryupdm::history::files_for::<crate::Plm>(repo.gix(), &commit, repo.prefix())
+    files_at_rev(session, &commit)
+}
+
+/// The files of the catalogue at Git revision `rev`.
+fn files_at_rev(
+    session: &mut Session,
+    rev: &str,
+) -> Result<std::collections::BTreeMap<String, Vec<u8>>> {
+    let (repo, _) = crate::release::history(session)?;
+    ryupdm::history::files_for::<crate::Plm>(repo.gix(), rev, repo.prefix())
 }
 
 pub fn get(session: &mut Session, document: &str, rev: Option<&str>, out: &Path) -> Result<Value> {
@@ -574,13 +690,14 @@ pub fn get(session: &mut Session, document: &str, rev: Option<&str>, out: &Path)
             (id, d, b)
         }
     };
-    if d.storage == Storage::Service {
-        return Err(Error::new(
-            Code::DocumentBytesMissing,
-            format!("document {id}'s bytes are on the service, which this build doesn't fetch"),
-        )
-        .with("document", &id));
-    }
+    let bytes = match d.storage {
+        Storage::Git => bytes,
+        Storage::Service => Some(
+            crate::store::Cache::open()?
+                .get(&d.file.blake3, d.file.size)?
+                .ok_or_else(|| not_cached(&id, &d))?,
+        ),
+    };
     let b = bytes.ok_or_else(|| {
         Error::new(
             Code::DocumentBytesMissing,
@@ -605,7 +722,7 @@ pub fn get(session: &mut Session, document: &str, rev: Option<&str>, out: &Path)
     crate::source::write_atomic(out, &*b)?;
     Ok(
         json!({"document": id, "number": d.number, "path": out, "size": d.file.size,
-              "blake3": d.file.blake3, "rev": rev.unwrap_or("working")}),
+              "blake3": d.file.blake3, "storage": d.storage.as_str(), "rev": rev.unwrap_or("working")}),
     )
 }
 
@@ -881,6 +998,200 @@ pub fn elsewhere(cat: &Catalogue, others: &[std::path::PathBuf]) -> Vec<Fault> {
     out
 }
 
+/// `document.locate`: for each document named (every one when none are),
+/// at `rev` or in the working files, `{id, number, storage, file, pin?,
+/// cached?}`; `cached` (service storage only) is whether this machine's
+/// cache holds the bytes.
+pub fn locate(
+    session: &mut Session,
+    documents: &[String],
+    rev: Option<&str>,
+    storage: Option<&str>,
+    pinned: bool,
+) -> Result<Value> {
+    let cat = match rev {
+        None => session.catalogue().clone(),
+        Some(r) => Catalogue::load(&files_at_rev(session, r)?)?,
+    };
+    let ids: Vec<Id> = if documents.is_empty() {
+        cat.documents.keys().cloned().collect()
+    } else {
+        documents
+            .iter()
+            .map(|s| cat.find_document(s))
+            .collect::<Result<_>>()?
+    };
+    let cache = crate::store::Cache::open().ok();
+    let rows: Vec<Value> = ids
+        .iter()
+        .filter_map(|id| {
+            let d = &cat.documents[id];
+            if storage.is_some_and(|s| s != d.storage.as_str()) || (pinned && d.pin.is_none()) {
+                return None;
+            }
+            let mut v = json!({"id": id, "number": d.number, "storage": d.storage.as_str(),
+                               "file": d.to_json()["file"]});
+            if let Some(p) = &d.pin {
+                v["pin"] = json!({"drive_id": p.drive_id, "revision": p.revision});
+            }
+            if d.storage == Storage::Service {
+                v["cached"] = json!(
+                    cache
+                        .as_ref()
+                        .is_some_and(|c| c.has(&d.file.blake3, d.file.size))
+                );
+            }
+            Some(v)
+        })
+        .collect();
+    Ok(json!({"documents": rows}))
+}
+
+/// `document_bytes_missing` for service-stored bytes this machine's cache
+/// lacks: what the CLI fetches before it sends the request.
+fn not_cached(id: &Id, d: &Document) -> Error {
+    Error::new(
+        Code::DocumentBytesMissing,
+        format!("document {id}'s bytes ({}) aren't in this machine's cache, and the service wasn't asked", d.file.blake3),
+    )
+    .with("document", id)
+    .with("blake3", &d.file.blake3)
+    .with("size", d.file.size)
+    .with("storage", "service")
+}
+
+/// `document.move`: to the service (the Git file's bytes into the cache,
+/// the file deleted, `storage` set) or to Git (the cache's bytes written
+/// as the Git file, at most 100 MiB), in one write. The content hash
+/// leaves `storage` out, so a released document stays released.
+pub fn move_to(
+    session: &mut Session,
+    document: &str,
+    storage: &str,
+    expected: Option<&str>,
+) -> Result<Value> {
+    let (id, mut d) = current(session, document, expected)?;
+    let to = Storage::parse(storage).ok_or_else(|| {
+        Error::new(Code::InvalidParam, "storage is git or service").with("storage", storage)
+    })?;
+    if to == d.storage {
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!("document {id} is already stored in {storage}"),
+        )
+        .with("document", &id));
+    }
+    let at = bytes_path(&id, &d.file.name);
+    d.storage = to;
+    let text = text_of(&id, &d)?;
+    match to {
+        Storage::Service => {
+            let b = session.files().get(&at).cloned().ok_or_else(|| {
+                Error::new(Code::DocumentBytesMissing, format!("no {at} to move"))
+                    .with("document", &id)
+                    .with("path", &at)
+            })?;
+            crate::store::Cache::open()?.put_bytes(&b)?;
+            commit(
+                session,
+                &format!("moving document {id} to the service"),
+                Writes(vec![(document_path(&id), Some(text)), (at, None)]),
+            )?;
+            let mut v = shown(session, &id);
+            v["to_upload"] = to_upload(&id, &d);
+            Ok(v)
+        }
+        Storage::Git => {
+            if d.file.size > TOO_LARGE {
+                return Err(Error::new(
+                    Code::DocumentTooLarge,
+                    format!(
+                        "document {id} is {} bytes, over the 100 MiB GitHub takes in a file",
+                        d.file.size
+                    ),
+                )
+                .with("document", &id)
+                .with("size", d.file.size));
+            }
+            let b = crate::store::Cache::open()?
+                .get(&d.file.blake3, d.file.size)?
+                .ok_or_else(|| not_cached(&id, &d))?;
+            commit_with(
+                session,
+                &format!("moving document {id} into Git"),
+                Writes(vec![(document_path(&id), Some(text))]),
+                vec![(at, b)],
+            )?;
+            Ok(shown(session, &id))
+        }
+    }
+}
+
+/// `document.sync`: the document's `file` and `pin` from a Drive pin of
+/// its own Drive file, and for Git storage its bytes. A pin of the
+/// revision and hash it has writes nothing (`unchanged`); `dry_run`
+/// answers what would change.
+pub fn sync(
+    session: &mut Session,
+    document: &str,
+    pin: crate::docstore::DrivePin,
+    dry_run: bool,
+    expected: Option<&str>,
+) -> Result<Value> {
+    let (id, mut d) = current(session, document, expected)?;
+    let Some(had) = d.pin.clone() else {
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!("document {id} has no Drive file to sync"),
+        )
+        .with("document", &id));
+    };
+    if had.drive_id != pin.drive_id {
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!("document {id} is pinned to Drive file {}", had.drive_id),
+        )
+        .with("document", &id));
+    }
+    let unchanged = had.revision == pin.revision && d.file.blake3 == pin.blake3;
+    if unchanged || dry_run {
+        let mut v = shown(session, &id);
+        v["unchanged"] = json!(unchanged);
+        v["written"] = json!(false);
+        if !unchanged {
+            v["would"] = json!({"revision": pin.revision, "blake3": pin.blake3, "size": pin.size});
+        }
+        return Ok(v);
+    }
+    let old = bytes_path(&id, &d.file.name);
+    let (f, bytes) = pinned_file(&pin, d.storage)?;
+    d.file = f;
+    d.pin = Some(crate::document::Pin {
+        drive_id: pin.drive_id.clone(),
+        revision: pin.revision.clone(),
+    });
+    let text = text_of(&id, &d)?;
+    let new = bytes_path(&id, &d.file.name);
+    let mut writes = vec![(document_path(&id), Some(text))];
+    if d.storage == Storage::Git && old != new {
+        writes.push((old, None));
+    }
+    let b = bytes.map(|b| vec![(new, b)]).unwrap_or_default();
+    commit_with(
+        session,
+        &format!("syncing document {id} to Drive revision {}", pin.revision),
+        Writes(writes),
+        b,
+    )?;
+    let mut v = shown(session, &id);
+    v["unchanged"] = json!(false);
+    v["written"] = json!(true);
+    if d.storage == Storage::Service {
+        v["to_upload"] = to_upload(&id, &d);
+    }
+    Ok(v)
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -1031,7 +1342,7 @@ pub(crate) mod tests {
         let made = ask(
             &root,
             Request::DocumentAdd {
-                file: file.clone(),
+                file: Some(file.clone()),
                 number: Some("DOC-1".into()),
                 next: None,
                 fields: New {
@@ -1039,6 +1350,8 @@ pub(crate) mod tests {
                     doc_type: Some("specification".into()),
                     ..Default::default()
                 },
+                storage: None,
+                drive: None,
                 expected_revision: None,
             },
         )
@@ -1185,13 +1498,15 @@ pub(crate) mod tests {
         let e = ask(
             &root,
             Request::DocumentAdd {
-                file: big.display().to_string(),
+                file: Some(big.display().to_string()),
                 number: Some("D-1".into()),
                 next: None,
                 fields: New {
                     title: Some("Big".into()),
                     ..Default::default()
                 },
+                storage: None,
+                drive: None,
                 expected_revision: None,
             },
         )
@@ -1201,7 +1516,7 @@ pub(crate) mod tests {
         let e = ask(
             &root,
             Request::DocumentAdd {
-                file: small,
+                file: Some(small),
                 number: Some("D-1".into()),
                 next: None,
                 fields: New {
@@ -1209,6 +1524,8 @@ pub(crate) mod tests {
                     media_type: Some("PDF".into()),
                     ..Default::default()
                 },
+                storage: None,
+                drive: None,
                 expected_revision: None,
             },
         )
@@ -1229,13 +1546,15 @@ pub(crate) mod tests {
         let made = ask(
             &a,
             Request::DocumentAdd {
-                file,
+                file: Some(file),
                 number: Some("DOC-1".into()),
                 next: None,
                 fields: New {
                     title: Some("Spec".into()),
                     ..Default::default()
                 },
+                storage: None,
+                drive: None,
                 expected_revision: None,
             },
         )
@@ -1339,13 +1658,15 @@ pub(crate) mod tests {
         let doc = ask(
             &a,
             Request::DocumentAdd {
-                file,
+                file: Some(file),
                 number: Some("DOC-1".into()),
                 next: None,
                 fields: New {
                     title: Some("Spec".into()),
                     ..Default::default()
                 },
+                storage: None,
+                drive: None,
                 expected_revision: None,
             },
         )
@@ -1407,32 +1728,30 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_service_stored_document_is_never_replaced_here() {
+    fn a_service_stored_documents_new_bytes_go_to_the_cache() {
+        let _l = CACHE_LOCK.lock().unwrap();
+        let cache = cache_env();
         let (_d, root) = catalogue();
         let outside = tempfile::tempdir().unwrap();
         let file = source(outside.path(), "a.pdf", b"%PDF a");
-        let made = ask(
+        ask(
             &root,
             Request::DocumentAdd {
-                file,
+                file: Some(file),
                 number: Some("D-1".into()),
                 next: None,
                 fields: New {
                     title: Some("A".into()),
                     ..Default::default()
                 },
+                storage: Some("service".into()),
+                drive: None,
                 expected_revision: None,
             },
         )
         .unwrap();
-        let path = root.join(made["path"].as_str().unwrap());
-        let mut v: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        v["storage"] = json!("service");
-        std::fs::write(&path, crate::canonical::to_string(&v)).unwrap();
-        std::fs::remove_file(root.join(made["bytes"].as_str().unwrap())).unwrap();
-        let other = source(outside.path(), "b.pdf", b"%PDF b");
-        let e = ask(
+        let other = source(outside.path(), "b.pdf", b"%PDF bb");
+        let v = ask(
             &root,
             Request::DocumentReplace {
                 document: "D-1".into(),
@@ -1441,10 +1760,454 @@ pub(crate) mod tests {
                 expected_revision: None,
             },
         )
+        .unwrap();
+        let h = blake3::hash(b"%PDF bb").to_hex().to_string();
+        assert_eq!(
+            (
+                v["document"]["file"]["blake3"].as_str(),
+                v["document"]["file"]["name"].as_str()
+            ),
+            (Some(h.as_str()), Some("b.pdf"))
+        );
+        assert_eq!(v["to_upload"][0]["blake3"], json!(h));
+        assert!(crate::store::Cache::at(cache.path()).has(&h, 7));
+        assert!(
+            !root
+                .join("documents")
+                .join(&v["document"]["id"].as_str().unwrap()[..2])
+                .join(v["document"]["id"].as_str().unwrap())
+                .exists()
+        );
+    }
+
+    #[test]
+    fn locate_says_where_each_documents_bytes_are() {
+        let (_d, root) = catalogue();
+        let outside = tempfile::tempdir().unwrap();
+        let file = source(outside.path(), "a.pdf", b"%PDF a");
+        ask(
+            &root,
+            Request::DocumentAdd {
+                file: Some(file),
+                number: Some("D-1".into()),
+                next: None,
+                fields: New {
+                    title: Some("A".into()),
+                    ..Default::default()
+                },
+                storage: None,
+                drive: None,
+                expected_revision: None,
+            },
+        )
+        .unwrap();
+        let v = ask(
+            &root,
+            Request::DocumentLocate {
+                documents: vec![],
+                rev: None,
+                storage: None,
+                pinned: false,
+            },
+        )
+        .unwrap();
+        let row = &v["documents"][0];
+        assert_eq!(
+            (row["number"].as_str(), row["storage"].as_str()),
+            (Some("D-1"), Some("git"))
+        );
+        assert_eq!(row["file"]["size"], 6);
+        assert!(row.get("cached").is_none(), "only service-stored rows say");
+        let none = ask(
+            &root,
+            Request::DocumentLocate {
+                documents: vec![],
+                rev: None,
+                storage: Some("service".into()),
+                pinned: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(none["documents"], json!([]));
+    }
+
+    /// Points ryuplm's cache at a fresh folder for this test's process:
+    /// the session reads it through `store::dir`. Tests in one process
+    /// share the variable, so each test sets it before every call that
+    /// reads the cache and the folders never collide (they are tempdirs).
+    pub(crate) fn cache_env() -> tempfile::TempDir {
+        let d = tempfile::tempdir().unwrap();
+        // SAFETY: tests that touch RYUPLM_CACHE_DIR hold CACHE_LOCK.
+        unsafe { std::env::set_var(crate::store::DIR_VAR, d.path()) };
+        d
+    }
+
+    pub(crate) static CACHE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn a_service_stored_document_is_a_record_and_a_cache_entry() {
+        let _l = CACHE_LOCK.lock().unwrap();
+        let cache = cache_env();
+        let (_d, root) = catalogue();
+        let outside = tempfile::tempdir().unwrap();
+        let file = source(outside.path(), "Big.pdf", b"%PDF big");
+        let v = ask(
+            &root,
+            Request::DocumentAdd {
+                file: Some(file),
+                number: Some("D-1".into()),
+                next: None,
+                fields: New {
+                    title: Some("Big".into()),
+                    ..Default::default()
+                },
+                storage: Some("service".into()),
+                drive: None,
+                expected_revision: None,
+            },
+        )
+        .unwrap();
+        let h = blake3::hash(b"%PDF big").to_hex().to_string();
+        assert_eq!(v["document"]["storage"], "service");
+        assert_eq!(v["bytes"], json!(null), "nothing in Git");
+        assert_eq!(
+            v["to_upload"],
+            json!([{"document": v["document"]["id"], "blake3": h, "size": 8}])
+        );
+        assert!(crate::store::Cache::at(cache.path()).has(&h, 8));
+        assert!(
+            !root
+                .join(format!(
+                    "documents/{}",
+                    &v["document"]["id"].as_str().unwrap()[..2]
+                ))
+                .join(v["document"]["id"].as_str().unwrap())
+                .exists()
+        );
+        let c = ask(
+            &root,
+            Request::Check {
+                within: vec![],
+                against: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(c["errors"], 0, "{c}");
+        // The manifest's default applies when --storage isn't given.
+        ask(
+            &root,
+            Request::SettingsEdit {
+                change: crate::settings::Change {
+                    document_storage: Some("service".into()),
+                    ..Default::default()
+                },
+                expected_revision: None,
+            },
+        )
+        .unwrap();
+        let file = source(outside.path(), "b.txt", b"b");
+        let v = ask(
+            &root,
+            Request::DocumentAdd {
+                file: Some(file),
+                number: Some("D-2".into()),
+                next: None,
+                fields: New {
+                    title: Some("B".into()),
+                    ..Default::default()
+                },
+                storage: None,
+                drive: None,
+                expected_revision: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(v["document"]["storage"], "service");
+    }
+
+    #[test]
+    fn a_git_file_over_the_limit_names_service_storage() {
+        let (_d, root) = catalogue();
+        let outside = tempfile::tempdir().unwrap();
+        let big = outside.path().join("big.bin");
+        std::fs::File::create(&big)
+            .unwrap()
+            .set_len(TOO_LARGE + 1)
+            .unwrap();
+        let e = ask(
+            &root,
+            Request::DocumentAdd {
+                file: Some(big.display().to_string()),
+                number: Some("D-1".into()),
+                next: None,
+                fields: New {
+                    title: Some("Big".into()),
+                    ..Default::default()
+                },
+                storage: None,
+                drive: None,
+                expected_revision: None,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::DocumentTooLarge);
+        assert!(e.message.contains("--storage service"), "{}", e.message);
+    }
+
+    #[test]
+    fn a_document_moves_both_ways_and_stays_released() {
+        let _l = CACHE_LOCK.lock().unwrap();
+        let _cache = cache_env();
+        let (_d, root) = catalogue();
+        let outside = tempfile::tempdir().unwrap();
+        let file = source(outside.path(), "a.pdf", b"%PDF a");
+        let made = ask(
+            &root,
+            Request::DocumentAdd {
+                file: Some(file),
+                number: Some("D-1".into()),
+                next: None,
+                fields: New {
+                    title: Some("A".into()),
+                    ..Default::default()
+                },
+                storage: None,
+                drive: None,
+                expected_revision: None,
+            },
+        )
+        .unwrap();
+        let git_file = root.join(made["bytes"].as_str().unwrap());
+        let id = made["document"]["id"].as_str().unwrap().to_owned();
+        let files = crate::session::Session::open(&root).unwrap().snapshot();
+        let content = <crate::Plm as ryupdm::product::Product>::content(
+            &files,
+            &Id::parse(&id, "document").unwrap(),
+        )
+        .unwrap();
+        let v = ask(
+            &root,
+            Request::DocumentMove {
+                document: id.clone(),
+                storage: "service".into(),
+                expected_revision: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(v["document"]["storage"], "service");
+        assert!(!git_file.exists(), "the Git file goes in the same write");
+        assert_eq!(v["to_upload"][0]["size"], 6);
+        let files = crate::session::Session::open(&root).unwrap().snapshot();
+        assert_eq!(
+            <crate::Plm as ryupdm::product::Product>::content(
+                &files,
+                &Id::parse(&id, "document").unwrap()
+            )
+            .unwrap(),
+            content
+        );
+        let v = ask(
+            &root,
+            Request::DocumentMove {
+                document: id.clone(),
+                storage: "git".into(),
+                expected_revision: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(v["document"]["storage"], "git");
+        assert_eq!(std::fs::read(&git_file).unwrap(), b"%PDF a");
+        assert!(v.get("to_upload").is_none());
+        let same = ask(
+            &root,
+            Request::DocumentMove {
+                document: id,
+                storage: "git".into(),
+                expected_revision: None,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(same.code, Code::InvalidParam);
+    }
+
+    #[test]
+    fn moving_to_git_needs_the_bytes_in_the_cache() {
+        let _l = CACHE_LOCK.lock().unwrap();
+        let _cache = cache_env();
+        let (_d, root) = catalogue();
+        let outside = tempfile::tempdir().unwrap();
+        let file = source(outside.path(), "a.pdf", b"%PDF a");
+        let made = ask(
+            &root,
+            Request::DocumentAdd {
+                file: Some(file),
+                number: Some("D-1".into()),
+                next: None,
+                fields: New {
+                    title: Some("A".into()),
+                    ..Default::default()
+                },
+                storage: Some("service".into()),
+                drive: None,
+                expected_revision: None,
+            },
+        )
+        .unwrap();
+        let _other = cache_env(); // another machine's empty cache
+        let e = ask(
+            &root,
+            Request::DocumentMove {
+                document: made["document"]["id"].as_str().unwrap().into(),
+                storage: "git".into(),
+                expected_revision: None,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::DocumentBytesMissing);
+    }
+
+    #[test]
+    fn a_service_stored_document_is_got_from_the_cache_or_said_missing() {
+        let _l = CACHE_LOCK.lock().unwrap();
+        let _cache = cache_env();
+        let (_d, root) = catalogue();
+        let outside = tempfile::tempdir().unwrap();
+        let file = source(outside.path(), "a.pdf", b"%PDF a");
+        ask(
+            &root,
+            Request::DocumentAdd {
+                file: Some(file),
+                number: Some("D-1".into()),
+                next: None,
+                fields: New {
+                    title: Some("A".into()),
+                    ..Default::default()
+                },
+                storage: Some("service".into()),
+                drive: None,
+                expected_revision: None,
+            },
+        )
+        .unwrap();
+        let out = outside.path().join("got.pdf");
+        let got = ask(
+            &root,
+            Request::DocumentGet {
+                document: "D-1".into(),
+                rev: None,
+                out: out.display().to_string(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            (got["size"].as_u64(), got["storage"].as_str()),
+            (Some(6), Some("service"))
+        );
+        assert_eq!(std::fs::read(&out).unwrap(), b"%PDF a");
+        let _other = cache_env();
+        let e = ask(
+            &root,
+            Request::DocumentGet {
+                document: "D-1".into(),
+                rev: None,
+                out: out.display().to_string(),
+            },
+        )
         .unwrap_err();
         assert_eq!(
             (e.code, e.details["storage"].clone()),
-            (Code::InvalidParam, json!("service"))
+            (Code::DocumentBytesMissing, json!("service"))
+        );
+    }
+
+    fn pin(revision: &str, bytes: &[u8]) -> crate::docstore::DrivePin {
+        crate::docstore::DrivePin {
+            drive_id: "1AbC_d-9".into(),
+            revision: revision.into(),
+            name: "Spec: A.pdf".into(),
+            media_type: "application/pdf".into(),
+            size: bytes.len() as u64,
+            blake3: blake3::hash(bytes).to_hex().to_string(),
+        }
+    }
+
+    #[test]
+    fn a_drive_pin_makes_and_moves_a_document() {
+        let _l = CACHE_LOCK.lock().unwrap();
+        let cache = cache_env();
+        let (_d, root) = catalogue();
+        let c = crate::store::Cache::at(cache.path());
+        c.put_bytes(b"one").unwrap();
+        let v = ask(
+            &root,
+            Request::DocumentAdd {
+                file: None,
+                number: Some("D-1".into()),
+                next: None,
+                fields: New::default(),
+                storage: None,
+                drive: Some(pin("r1", b"one")),
+                expected_revision: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(v["document"]["title"], "Spec: A.pdf");
+        assert_eq!(v["document"]["file"]["name"], "Spec_ A.pdf");
+        assert_eq!(
+            v["document"]["pin"],
+            json!({"drive_id": "1AbC_d-9", "revision": "r1"})
+        );
+        assert_eq!(
+            std::fs::read(root.join(v["bytes"].as_str().unwrap())).unwrap(),
+            b"one"
+        );
+        let id = v["document"]["id"].as_str().unwrap().to_owned();
+        let same = ask(
+            &root,
+            Request::DocumentSync {
+                document: id.clone(),
+                pin: pin("r1", b"one"),
+                dry_run: false,
+                expected_revision: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(same["unchanged"], true);
+        c.put_bytes(b"two!").unwrap();
+        let dry = ask(
+            &root,
+            Request::DocumentSync {
+                document: id.clone(),
+                pin: pin("r2", b"two!"),
+                dry_run: true,
+                expected_revision: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            (dry["unchanged"].as_bool(), dry["written"].as_bool()),
+            (Some(false), Some(false))
+        );
+        let v = ask(
+            &root,
+            Request::DocumentSync {
+                document: id,
+                pin: pin("r2", b"two!"),
+                dry_run: false,
+                expected_revision: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                v["document"]["pin"]["revision"].as_str(),
+                v["document"]["file"]["size"].as_u64()
+            ),
+            (Some("r2"), Some(4))
+        );
+        assert_eq!(
+            std::fs::read(root.join(v["bytes"].as_str().unwrap())).unwrap(),
+            b"two!"
         );
     }
 }

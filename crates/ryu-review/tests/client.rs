@@ -268,3 +268,52 @@ fn the_fake_ledger_hands_out_reserves_and_answers() {
     );
     assert_eq!(ledger.lock().unwrap().next_calls, 2);
 }
+
+#[test]
+fn bytes_go_up_by_put_and_their_refusals_say_why() {
+    use ryu_doc::error::Code;
+    use ryu_review::testing::{Reply, not_found};
+    let fake = Fake::serve(|s| -> Reply {
+        match (s.method.as_str(), s.path.as_str()) {
+            ("PUT", "/api/v1/repos/acme/w/documents/ok") => {
+                assert_eq!(s.bytes, b"\x00\xffbytes");
+                (
+                    201,
+                    "application/json",
+                    br#"{"schema":1,"held":false}"#.to_vec(),
+                )
+            }
+            ("PUT", _) => (
+                413,
+                "application/json",
+                br#"{"error":{"code":"limit_exceeded","message":"over the limit"}}"#.to_vec(),
+            ),
+            ("POST", "/api/v1/repos/acme/w/drive/files/x/pin") => (
+                409,
+                "application/json",
+                br#"{"error":{"code":"drive_not_connected","message":"no connection"}}"#.to_vec(),
+            ),
+            _ => not_found(),
+        }
+    });
+    let c = Client::new(&fake.url, "t");
+    let v = c
+        .put_bytes("/repos/acme/w/documents/ok", b"\x00\xffbytes")
+        .unwrap();
+    assert_eq!(v["held"], false);
+    let e = c
+        .put_bytes("/repos/acme/w/documents/big", b"x")
+        .unwrap_err();
+    assert_eq!(
+        (e.code, e.details["status"].clone()),
+        (Code::ReviewLimitExceeded, j!(413))
+    );
+    let e = c
+        .post("/repos/acme/w/drive/files/x/pin", &j!({"schema": 1}))
+        .unwrap_err();
+    assert_eq!(e.code, Code::DriveNotConnected);
+    let file = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(file.path(), b"\x00\xffbytes").unwrap();
+    c.put_file("/repos/acme/w/documents/ok", file.path())
+        .unwrap();
+}

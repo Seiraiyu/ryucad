@@ -585,6 +585,70 @@ fn a_chosen_annotations_marks_go_when_another_part_is_shown() {
     assert!(ws.view_marks().is_some());
 }
 
+/// #1052: an annotation the agent resolves stops drawing its marks in the
+/// person's window, though it was chosen, and the choice goes; chosen
+/// again under Show Done, it draws faded.
+#[test]
+fn a_resolved_annotations_marks_go_until_it_is_chosen_again() {
+    use ryucad_app::core::annotations::Show;
+    let p = Project::new().with_part();
+    p.ok(&[
+        "view",
+        "save",
+        "p",
+        "above",
+        "--eye",
+        "10,5,1000",
+        "--target",
+        "10,5,2.5",
+        "--up",
+        "0,1,0",
+        "--ortho",
+        "30 mm",
+    ]);
+    let mut ws = Workspace::open(&p.root, ryucad(), "Dana", Arc::new(|| {})).unwrap();
+    ws.set_mode(Mode::Annotate);
+    ws.set_focus(Some("p".into()));
+    assert!(ws.wait_until(WAIT, |ws| ws.idle()
+        && ws.annotations.loaded
+        && ws.model.focus.as_deref() == Some("p")));
+    let a = p.ok(&[
+        "annotations",
+        "add",
+        "--comment",
+        "move this",
+        "--model",
+        "p",
+        "--of",
+        "above",
+        "--arrow",
+        "-5,-3:-3,-1",
+    ]);
+    let id = a["annotation"]["id"].as_str().unwrap().to_owned();
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.annotations
+            .all
+            .get(&id)
+            .is_some_and(|e| e.mark_count() == 1)
+    }));
+    ws.choose_annotation(Some(&id));
+    assert!(ws.view_marks().is_some());
+    p.ok(&["annotations", "resolve", &id, "--note", "moved"]);
+    assert!(ws.wait_until(WAIT, |ws| {
+        ws.annotations.all.get(&id).is_some_and(|e| !e.is_open())
+    }));
+    assert!(
+        ws.view_marks().is_none(),
+        "a resolved annotation's marks are hidden"
+    );
+    assert!(ws.annotations.chosen_annotation.is_none());
+    // On request: shown under Show Done and chosen again, faded.
+    ws.annotations.annotation_filter.show = Show::Done;
+    ws.choose_annotation(Some(&id));
+    let m = ws.view_marks().expect("drawn when asked for");
+    assert_eq!(m.alpha, ryucad::redline::CLOSED_ALPHA);
+}
+
 /// #776: choosing an annotation made on a part that isn't shown shows
 /// that part, so its marks are drawn.
 #[test]
