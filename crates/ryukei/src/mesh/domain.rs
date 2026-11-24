@@ -681,6 +681,19 @@ impl Domain {
                             fit(g, k, &mut flat)?;
                             pieces.extend(cut(g, 1 - k, flat, wind[1 - k])?);
                         }
+                        // A ring winding round neither way that fits
+                        // neither way's period (a disc on a torus whose
+                        // lift runs more than a turn both ways, and the
+                        // torus less it, #838) is cut at both ways' seams:
+                        // at `u`'s, and each piece at `v`'s.
+                        (false, false) if wind == [0, 0] && g.collapsed == [[false; 2]; 2] => {
+                            for (piece, closed) in cut(g, U, flat, 0)? {
+                                if closed {
+                                    return Err(BadDomain);
+                                }
+                                pieces.extend(cut_open(g, V, piece)?);
+                            }
+                        }
                         (false, false) => {
                             return Err(BadDomain);
                         }
@@ -964,6 +977,51 @@ impl Domain {
         self.inside = label.into_iter().map(|l| l.unwrap_or(!has_rings)).collect();
         Ok(())
     }
+}
+
+/// Cuts an open piece (one of [`cut`]'s in the other direction) at its
+/// points on the seam lines of direction `d`, and shifts each part into
+/// the period: its seam points then lie exactly on the rectangle's sides,
+/// and its others strictly between them.
+fn cut_open(g: &FaceGeom, d: usize, piece: Vec<Flat>) -> Result<Vec<(Vec<Flat>, bool)>, BadDomain> {
+    let (period, seam) = (
+        g.periods[d].expect("periodic"),
+        g.seam(d).expect("periodic"),
+    );
+    let n = piece.len();
+    let mut ends: Vec<usize> = (1..n - 1).filter(|&i| piece[i].line[d].is_some()).collect();
+    ends.insert(0, 0);
+    ends.push(n - 1);
+    let mut out = Vec::new();
+    for w in ends.windows(2) {
+        let mut part = piece[w[0]..=w[1]].to_vec();
+        // Whole periods to move it by, from its points off the seam lines
+        // (its middle, where it has none).
+        let off: Vec<f64> = part
+            .iter()
+            .filter(|p| p.line[d].is_none())
+            .map(|p| p.x[d])
+            .collect();
+        let at = match off[..] {
+            [] => 0.5 * (part[0].x[d] + part[part.len() - 1].x[d]),
+            _ => off.iter().sum::<f64>() / off.len() as f64,
+        };
+        let m = ((at - seam) / period).floor() as i64;
+        for p in part.iter_mut() {
+            p.x[d] -= m as f64 * period;
+            match p.line[d].map(|l| l - m) {
+                Some(l @ (0 | 1)) => {
+                    p.line[d] = Some(l);
+                    p.x[d] = seam + l as f64 * period;
+                }
+                Some(_) => return Err(BadDomain),
+                None if p.x[d] > seam && p.x[d] < seam + period => {}
+                None => return Err(BadDomain),
+            }
+        }
+        out.push((part, false));
+    }
+    Ok(out)
 }
 
 /// Cuts an unwrapped ring at its points on the seam lines of direction
