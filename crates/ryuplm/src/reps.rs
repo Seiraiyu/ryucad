@@ -192,10 +192,7 @@ fn projects_under(dir: &Path, active: [bool; 2], out: &mut [Vec<PathBuf>; 2]) {
 /// (its own folder outside one), then `folders`.
 pub fn tops(here: &Path, folders: &[PathBuf]) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    match gix::discover(here)
-        .ok()
-        .and_then(|r| r.workdir().map(Path::to_path_buf))
-    {
+    match ryu_git::discover_upwards(here, false).and_then(|r| r.workdir().map(Path::to_path_buf)) {
         Some(w) => out.push(w.canonicalize().unwrap_or(w)),
         None => out.push(here.to_path_buf()),
     }
@@ -466,7 +463,7 @@ pub struct Disk {
 impl Disk {
     /// A reader over `index` for the catalogue at `here`.
     pub fn new(index: Index, here: &Path) -> Disk {
-        let repo = gix::discover(here).ok();
+        let repo = ryu_git::discover_upwards(here, false);
         let workdir = repo
             .as_ref()
             .and_then(|r| r.workdir().map(Path::to_path_buf))

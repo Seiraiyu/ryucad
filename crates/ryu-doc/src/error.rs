@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::fmt;
 
+pub mod details;
+
 /// A stable error code. Agents branch on these, so a code is never renamed
 /// or reused; new failures get new codes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1270,6 +1272,15 @@ pub enum Code {
     /// current content (an error of release readiness); release the document
     /// in the same proposal, or first.
     DocumentUnreleased,
+    /// A service-stored document's bytes weren't uploaded (a warning): the
+    /// service couldn't be asked; `ryuplm document upload` sends them.
+    DocumentNotUploaded,
+    /// The organization has no Google Drive connection on the service
+    /// (ryuplm 3, design 937): an owner connects one on its page.
+    DriveNotConnected,
+    /// A Drive file the organization's connection can't read: not picked
+    /// for the service, deleted, or no longer shared.
+    DriveFileUnavailable,
     /// ryuplm check finding (a warning): the label an item's legacy
     /// history carried isn't one of the catalogue's revision scheme, so its
     /// first release takes the scheme's first label (design 935).
@@ -1715,6 +1726,9 @@ impl Code {
         Code::DocumentInUse,
         Code::DocumentReleased,
         Code::DocumentUnreleased,
+        Code::DocumentNotUploaded,
+        Code::DriveNotConnected,
+        Code::DriveFileUnavailable,
         Code::ItemHistoryLabelForeign,
         Code::PartNumberTaken,
         Code::LedgerUnavailable,
@@ -1738,9 +1752,16 @@ impl Code {
             | Code::PartsSourceUnreachable
             | Code::PartsRateLimited
             | Code::Cancelled
-            | Code::LedgerUnavailable => 4,
+            | Code::LedgerUnavailable
+            | Code::DriveNotConnected => 4,
             _ => 1,
         }
+    }
+
+    /// The keys this code's details declare, beside the common ones
+    /// ([`details::COMMON`]); `None` while it is undeclared (design 698).
+    pub fn keys(self) -> Option<&'static [details::Key]> {
+        details::keys(self)
     }
 }
 
@@ -1763,12 +1784,20 @@ impl Error {
         }
     }
 
-    /// Adds `key: value` to the details object.
+    /// Adds `key: value` to the details object. When `key` is an older
+    /// spelling this code declares as an alias (`ref` of `reference`), the
+    /// declared key gets the same value too, unless it is already there.
     pub fn with(mut self, key: &str, value: impl Serialize) -> Self {
         if !self.details.is_object() {
             self.details = json!({});
         }
-        self.details[key] = serde_json::to_value(value).unwrap_or(Value::Null);
+        let value = serde_json::to_value(value).unwrap_or(Value::Null);
+        if let Some(of) = details::alias_of(self.code, key)
+            && self.details.get(of).is_none()
+        {
+            self.details[of] = value.clone();
+        }
+        self.details[key] = value;
         self
     }
 
@@ -1821,6 +1850,19 @@ mod tests {
             &Code::ALL[Code::ALL.len() - 2..],
             &[Code::PartNumberTaken, Code::LedgerUnavailable]
         );
+    }
+
+    #[test]
+    fn store_and_drive_codes() {
+        for (c, s, exit) in [
+            (Code::DocumentNotUploaded, "document_not_uploaded", 1),
+            (Code::DriveNotConnected, "drive_not_connected", 4),
+            (Code::DriveFileUnavailable, "drive_file_unavailable", 1),
+        ] {
+            assert_eq!(json!(c), json!(s));
+            assert_eq!(c.exit_code(), exit);
+            assert!(Code::ALL.contains(&c), "{c:?} in ALL");
+        }
     }
 
     #[test]
@@ -2533,5 +2575,27 @@ mod tests {
         );
         let bare = serde_json::to_value(Error::new(Code::Internal, "x")).unwrap();
         assert_eq!(bare, json!({"code": "internal", "message": "x"}));
+    }
+
+    /// An older spelling brings its declared key with the same value
+    /// (design 698, question 1015); the call sites don't change.
+    #[test]
+    fn an_alias_brings_its_declared_key() {
+        let e = Error::new(Code::InvalidParam, "x").with("field", "radius");
+        assert_eq!(e.details, json!({"field": "radius", "param": "radius"}));
+        let e = Error::new(Code::NotFound, "x").with("ref", "p/f1");
+        assert_eq!(e.details, json!({"ref": "p/f1", "reference": "p/f1"}));
+        let e = Error::new(Code::Internal, "x").with("file", "a.step");
+        assert_eq!(e.details, json!({"file": "a.step", "path": "a.step"}));
+        // A declared key already there is kept.
+        let e = Error::new(Code::InvalidParam, "x")
+            .with("param", "a")
+            .with("parameter", "b");
+        assert_eq!(e.details, json!({"param": "a", "parameter": "b"}));
+        // An undeclared code gets only what it was given.
+        let e = Error::new(Code::Conflict, "x").with("expected", "r1");
+        assert_eq!(e.details, json!({"expected": "r1"}));
+        assert!(Code::InvalidParam.keys().is_some());
+        assert!(Code::Conflict.keys().is_none());
     }
 }

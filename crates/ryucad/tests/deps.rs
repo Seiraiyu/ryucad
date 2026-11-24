@@ -36,6 +36,7 @@ fn git(dir: &Path, args: &[&str]) -> String {
 fn run(dir: &Path, cache: &Path, args: &[&str]) -> Value {
     let out = Command::cargo_bin("ryucad")
         .unwrap()
+        .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
         .current_dir(dir)
         .args(args)
         .env("RYUCAD_NO_DAEMON", "1")

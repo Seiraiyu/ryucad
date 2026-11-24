@@ -126,7 +126,8 @@ pub fn shown_value(q: &Value, unit: Unit) -> Option<String> {
 }
 
 /// The field a daemon's refusal names: the last step of its `pointer`
-/// (`/params/length`), else its `param`, `field` or `name`.
+/// (`/params/length`), else its `param`. Older spellings (`field`,
+/// `parameter`) arrive with `param` beside them (design 698).
 pub fn field_of(e: &Error) -> Option<String> {
     let d = &e.details;
     if let Some(p) = d["pointer"].as_str() {
@@ -136,9 +137,7 @@ pub fn field_of(e: &Error) -> Option<String> {
             .filter(|s| !s.is_empty())
             .map(str::to_owned);
     }
-    ["param", "field", "parameter", "name"]
-        .iter()
-        .find_map(|k| d[*k].as_str().map(str::to_owned))
+    d["param"].as_str().map(str::to_owned)
 }
 
 /// One feature kind's part of the property panel's form (design 541,
@@ -2360,5 +2359,26 @@ mod tests {
         assert!(!f.dirty());
         // Read again after a conflict, it stays in millimetres.
         assert_eq!(read(&f.reloaded(&v).origin), ["50 mm", "8 mm", "-12.5 mm"]);
+    }
+
+    /// The older spellings come with `param` beside them (design 698), and
+    /// a `name` is a value, never a field: `invalid_param` on a material
+    /// names the material.
+    #[test]
+    fn a_refusals_field_is_its_pointer_or_param() {
+        use ryucad::error::Code;
+        let field = |e: Error| field_of(&e);
+        assert_eq!(
+            field(Error::new(Code::InvalidParam, "x").with("field", "depth")).as_deref(),
+            Some("depth")
+        );
+        assert_eq!(
+            field(Error::new(Code::InvalidParam, "x").with("name", "Steel 1")),
+            None
+        );
+        assert_eq!(
+            field(Error::new(Code::InvalidParam, "x").with("pointer", "/params/length")).as_deref(),
+            Some("length")
+        );
     }
 }

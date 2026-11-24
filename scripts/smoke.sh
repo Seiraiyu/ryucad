@@ -15,6 +15,8 @@ exe=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 app=""
 [ $# -ge 2 ] && app=$(cd "$(dirname "$2")" && pwd)/$(basename "$2")
 work=$(mktemp -d)
+# no repository above the smoke project (#1004)
+export GIT_CEILING_DIRECTORIES="$work"
 trap 'rm -rf "$work"' EXIT
 mkdir "$work/project"
 cd "$work/project"

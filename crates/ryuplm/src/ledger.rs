@@ -450,7 +450,7 @@ pub fn number(send: &mut Sender, open: &dyn Fn() -> Result<Ledger>, ask: Ask) ->
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use ryu_review::testing::Ledger as Fake;
     use serde_json::json;

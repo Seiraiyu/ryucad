@@ -48,6 +48,8 @@ struct Session {
 
 fn ryucad(root: &Path, scratch: &Path) -> Command {
     let mut c = Command::new(assert_cmd::cargo::cargo_bin("ryucad"));
+    // No repository above the test's folder is found (#1004).
+    c.env("GIT_CEILING_DIRECTORIES", std::env::temp_dir());
     c.current_dir(root)
         .env("RYUCAD_RUNTIME_DIR", scratch.join("run"))
         .env("RYUCAD_CONFIG_DIR", scratch.join("config"))

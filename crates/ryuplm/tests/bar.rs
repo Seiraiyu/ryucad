@@ -40,6 +40,25 @@ fn within(what: &str, took: Duration, limit: Duration) {
     );
 }
 
+/// [`within`] for a first import's bar. Windows syncs each of a first
+/// import's 100,000 files with `FlushFileBuffers`, and has no one flush of
+/// a whole volume without admin rights. So on hosted windows-latest a
+/// first import took 192 to 253 s against its loose 200 s, every file kept
+/// as durable as on the other platforms. There the loose bar is half as
+/// large again, 300 s, until it is measured how much of it is the flushes
+/// and how much the writes (#1054; #1044, the owner's decision,
+/// 2026-11-24, keeping full durability). Strict bars stay as they are,
+/// and no other bar moves.
+fn within_first_import(what: &str, took: Duration, limit: Duration) {
+    let allowed = if cfg!(windows) && !strict() {
+        bar(limit) * 3 / 2
+    } else {
+        bar(limit)
+    };
+    println!("{what}: {took:?} (bar {allowed:?})");
+    assert!(took <= allowed, "{what} took {took:?}, over {allowed:?}");
+}
+
 /// `n` items written to `root` as a catalogue: `ryuplm init`'s manifest,
 /// then each seeded item's file as it is. The seed shares thirteen numbers
 /// out among three in seven items, so at 100,000 items about 43,000 of
@@ -173,7 +192,7 @@ fn a_hundred_thousand_row_import() {
     };
     let t = Instant::now();
     let first = ask(&mut slot, &root, req());
-    within(
+    within_first_import(
         "first import of 100,000 rows",
         t.elapsed(),
         Duration::from_secs(20),
@@ -412,7 +431,7 @@ fn a_hundred_thousand_tree_records() {
                 expected_revision: None,
             },
         );
-        within(
+        within_first_import(
             &format!("first import of 100,000 {ext} records"),
             t.elapsed(),
             Duration::from_secs(20),
@@ -631,7 +650,7 @@ fn a_hundred_thousand_numbers_from_the_ledger() {
     };
     let t = Instant::now();
     let v = ryuplm::ledger::import_run(&mut send, &open, req, &mut Vec::new()).unwrap();
-    within(
+    within_first_import(
         "first import of 100,000 rows, numbers from the ledger",
         t.elapsed(),
         Duration::from_secs(20),
