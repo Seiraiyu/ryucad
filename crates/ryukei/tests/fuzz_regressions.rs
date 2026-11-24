@@ -373,6 +373,33 @@ fn the_runaway_sweeps_build_and_check_clean() {
     }
 }
 
+/// #918: the sweep corpus seed 143f5e74 (removed from the corpus by
+/// #949) took 88 s plain release in along's self-check
+/// (`general::Tracer::subdivide`, cox-worker-4). It must build sound or
+/// refuse typed, under 10 s on one thread under the bars.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release only")]
+fn the_sweep_143f5e74_checks_itself_quickly() {
+    let _timed = timed();
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    let s = pool.install(|| {
+        let t = std::time::Instant::now();
+        let (made, _, _) =
+            ryukei_testkit::along_bytes::outcome(&bytes("ffff598888888888888888888888888888"))
+                .expect("a sweep");
+        if let Ok(body) = made {
+            assert_eq!(check(&body), []);
+            assert_eq!(check_intersections(&body), []);
+        }
+        t.elapsed().as_secs_f64()
+    });
+    eprintln!("143f5e74: {s:.1} s");
+    assert!(!bars() || s < 10.0, "{s} s");
+}
+
 /// #260's two sweep finds, whose self-intersection check ran past 600 s,
 /// and the boolean whose trace's clusters did: each ends under the
 /// kernel's caps, built (and sound) or refused as uncertain. What ends
