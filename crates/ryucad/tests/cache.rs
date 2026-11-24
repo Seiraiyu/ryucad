@@ -299,6 +299,7 @@ fn cli(root: &Path, run: &Path, cache: &Path, args: &[&str]) -> Value {
 /// [`cli`] with more of the environment set: the whole envelope.
 fn cli_with(root: &Path, run: &Path, cache: &Path, env: &[(&str, &str)], args: &[&str]) -> Value {
     let out = std::process::Command::new(assert_cmd::cargo::cargo_bin("ryucad"))
+        .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
         .args(args)
         .current_dir(root)
         .env("RYUCAD_RUNTIME_DIR", run)
@@ -585,6 +586,7 @@ fn a_token_is_stored_checked_and_removed_from_the_cli() {
     assert_eq!(std::fs::read_to_string(&token).unwrap(), "read-token\n");
     // From standard input, as a person types it.
     let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("ryucad"))
+        .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
         .args(["cache", "login"])
         .current_dir(&a)
         .env("RYUCAD_RUNTIME_DIR", &run)

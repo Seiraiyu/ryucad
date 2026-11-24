@@ -545,6 +545,21 @@ details! {
         key("why", Str, "Why the ledger can't be asked, as a code (`ledger_off`, `review_unreachable`)."),
         key("cause", Obj, "The error asking it gave."),
     ],
+    // A warning's code only (`ryuplm::docstore::not_uploaded_warning`):
+    // no error carries it, so it has no keys (#1074).
+    DocumentNotUploaded => [],
+    // The service's Drive answers (ryuplm 3, design 937), mapped by
+    // ryu-review's `refusal` as the ledger's are (#1074).
+    DriveNotConnected => [
+        key("status", Num, "The HTTP status the service answered."),
+        key("service_code", Str, "The service's own code."),
+        key("service", Any, "The service's details."),
+    ],
+    DriveFileUnavailable => [
+        key("status", Num, "The HTTP status the service answered."),
+        key("service_code", Str, "The service's own code."),
+        key("service", Any, "The service's details: which file, and why."),
+    ],
     ReleaseTagClash => [
         key("tag", Str, "The tag that couldn't be written."),
         key("clashes", Str, "The tag Git already holds that it clashes with."),
@@ -1128,6 +1143,9 @@ mod tests {
             Code::ItemHistoryLabelForeign,
             Code::PartNumberTaken,
             Code::LedgerUnavailable,
+            Code::DocumentNotUploaded,
+            Code::DriveNotConnected,
+            Code::DriveFileUnavailable,
         ] {
             assert!(keys(c).is_some(), "{c:?}");
         }

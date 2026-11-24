@@ -25,6 +25,8 @@ if [ -n "${3:-}" ]; then
     app=$(cd "$(dirname "$3")" && pwd)/$(basename "$3")
 fi
 work=$(mktemp -d)
+# no repository above the smoke project (#1004)
+export GIT_CEILING_DIRECTORIES="$work"
 trap 'rm -rf "$work"' EXIT
 mkdir "$work/project"
 cp -R "$kicad" "$work/project/kicad"

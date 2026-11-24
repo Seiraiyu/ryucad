@@ -171,6 +171,7 @@ fn the_race_imports_rebuilds_and_exports_within_its_bars() {
         let t = Instant::now();
         let out = Command::cargo_bin("ryucad")
             .unwrap()
+            .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
             .current_dir(&root)
             .args(args)
             .env("RYUCAD_RUNTIME_DIR", &run)

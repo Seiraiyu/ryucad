@@ -34,6 +34,8 @@ fn replace_root(v: &mut Value, forms: &[&str]) {
 /// its own.
 fn ryueda(run: &Path) -> Command {
     let mut cmd = Command::cargo_bin("ryueda").unwrap();
+    // No repository above the test's folder is found (#1004).
+    cmd.env("GIT_CEILING_DIRECTORIES", std::env::temp_dir());
     cmd.env("RYUEDA_RUNTIME_DIR", run)
         .env("RYUEDA_IDLE_TIMEOUT", "60")
         .env("RYUEDA_CONFIG_DIR", run.with_file_name("config"))
@@ -228,6 +230,7 @@ fn open_starts_the_app_named_by_ryueda_app() {
 fn version_names_ryueda() {
     let out = Command::cargo_bin("ryueda")
         .unwrap()
+        .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
         .arg("version")
         .output()
         .unwrap();
@@ -243,6 +246,7 @@ fn version_names_ryueda() {
     assert!(r.get("ryucad").is_none());
     let flag = Command::cargo_bin("ryueda")
         .unwrap()
+        .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
         .arg("--version")
         .output()
         .unwrap();
@@ -253,6 +257,7 @@ fn version_names_ryueda() {
 fn bad_arguments_are_a_usage_error_in_json() {
     let out = Command::cargo_bin("ryueda")
         .unwrap()
+        .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
         .arg("no-such-command")
         .output()
         .unwrap();
@@ -968,6 +973,7 @@ fn every_protocol_method_has_a_command() {
         };
         let out = Command::cargo_bin("ryueda")
             .unwrap()
+            .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
             .args(*args)
             .arg("--help")
             .output()
@@ -3737,6 +3743,8 @@ fn a_sync_is_cancelled_by_its_token_and_keeps_the_old_catalogue() {
     // Started without waiting: assert_cmd's commands only run to the end.
     #[allow(deprecated)]
     let mut running = std::process::Command::new(assert_cmd::cargo::cargo_bin("ryueda"));
+    // No repository above the test's folder is found (#1004).
+    running.env("GIT_CEILING_DIRECTORIES", std::env::temp_dir());
     running
         .current_dir(p.daemon.join("board"))
         .args(["parts", "sync", "jlc", "--token", "sync1", "--progress"])
