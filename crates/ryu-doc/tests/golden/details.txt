@@ -367,6 +367,13 @@ drc_keepout exit 1 "DRC keepout"
 
 board_contour_invalid exit 1 "Board contour invalid"
 
+pour_empty exit 1 "Pour empty"
+  net str The pour's net.
+  islands_removed num How many islands its net's copper doesn't reach were dropped.
+
+pour_thermal_starved exit 1 "Pour thermal starved"
+  spokes num The thermal spokes that reach the pad.
+
 drc_failed exit 1 "DRC failed"
   report obj The board's DRC report: `board`, `findings` and `drc`.
 

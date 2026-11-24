@@ -6,8 +6,8 @@
 # released (PDM) in a repository of its own, undo and redo through the
 # daemon, the activity log, a board placed, routed, checked, rendered and
 # exported, made four layers with a track on in1 and exported again, a
-# part turned over to the bottom and back, the daemon's status and stop,
-# and a run in process.
+# part turned over to the bottom and back, a ground plane poured and
+# deleted, the daemon's status and stop, and a run in process.
 #
 #   scripts/smoke-ryueda.sh path/to/ryueda [path/to/kicad] [path/to/ryueda-app]
 #
@@ -195,6 +195,13 @@ run board keepout add main --rect 0,0,1,1 --keep vias --id k1
 run board text add main --layer silk.top --at 4.5,8.5 --text SMOKE
 run board drc main
 run board keepout delete main k1
+# Pours (ryueda 7.D): a ground plane on the bottom of the small board,
+# shown and DRC clean, then deleted.
+run board pour add main --net rail:gnd --layer bottom --whole --id gnd
+run board show main --pours
+has '"reference":"main:pour/gnd"' "the plane is shown"
+run board drc main
+run board pour delete main gnd
 if [ -n "$app" ]; then
     out=$("$app" --smoke "$work/project") || true
     case "$out" in

@@ -591,6 +591,13 @@ details! {
         key("keeps", Arr, "What the keepout keeps out."),
     ],
     BoardContourInvalid => [],
+    PourEmpty => [
+        key("net", Str, "The pour's net."),
+        key("islands_removed", Num, "How many islands its net's copper doesn't reach were dropped."),
+    ],
+    PourThermalStarved => [
+        key("spokes", Num, "The thermal spokes that reach the pad."),
+    ],
     DocumentNotFound => [
         key("document", Str, "The document asked for, by ID or number."),
     ],
