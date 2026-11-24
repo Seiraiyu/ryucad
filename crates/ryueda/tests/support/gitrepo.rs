@@ -47,6 +47,8 @@ pub fn git(dir: &Path, args: &[&str]) {
 /// `ryueda` in `dir`, in process or through a daemon run from `run`.
 pub fn ryueda_cmd(dir: &Path, run: &Path, daemon: bool, args: &[&str]) -> Command {
     let mut cmd = Command::cargo_bin("ryueda").unwrap();
+    // No repository above the test's folder is found (#1004).
+    cmd.env("GIT_CEILING_DIRECTORIES", std::env::temp_dir());
     cmd.env("RYUEDA_RUNTIME_DIR", run)
         .env("RYUEDA_IDLE_TIMEOUT", "60")
         .env("RYUEDA_CONFIG_DIR", run.with_file_name("config"))

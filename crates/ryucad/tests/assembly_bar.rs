@@ -110,6 +110,7 @@ fn a_cold_daemon_over_a_warm_cache_answers_within_two_seconds() {
     let ryucad = |args: &[&str]| -> Value {
         let out = Command::cargo_bin("ryucad")
             .unwrap()
+            .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
             .current_dir(&root)
             .args(args)
             .env("RYUCAD_RUNTIME_DIR", &run)

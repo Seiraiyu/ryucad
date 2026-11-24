@@ -200,6 +200,7 @@ fn git_diff_reads_values() {
     assert!(!diff.contains('{'), "values, not JSON: {diff}");
     // Printed as Git reads it: plain text, never the JSON envelope.
     let printed = std::process::Command::new(assert_cmd::cargo::cargo_bin("ryueda"))
+        .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
         .args(["git", "textconv", comp.to_str().unwrap()])
         .output()
         .unwrap();

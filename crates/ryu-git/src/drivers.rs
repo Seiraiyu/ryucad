@@ -92,11 +92,7 @@ pub const HOOK_CHECK: &str = "merge status --hook";
 /// its own config (tests: the user's global config, where installers put
 /// the drivers, must not decide what they see).
 pub fn discover(here: &Path, isolated: bool) -> Option<gix::Repository> {
-    if isolated {
-        gix::discover_opts(here, Default::default(), gix::open::Options::isolated()).ok()
-    } else {
-        gix::discover(here).ok()
-    }
+    crate::discover_upwards(here, isolated)
 }
 
 /// How Git, as configured for the repository at `root`, is set up for a
