@@ -617,6 +617,92 @@ pub fn apply_waivers(
         .collect()
 }
 
+/// A pour's resolved rules.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PourRules {
+    pub clearance: Resolved,
+    pub min_width: Resolved,
+    pub gap: Resolved,
+    pub spoke: Resolved,
+}
+
+/// KiCad's zone defaults: a 0.5 mm thermal gap and spoke.
+pub const THERMAL_NM: i64 = 500_000;
+
+impl Rules {
+    /// A pour's rules: its own values, else its net's class's or the
+    /// board's `pour` rules, else the net's clearance and least width and
+    /// 0.5 mm thermals; a gap never under the clearance, a spoke never
+    /// under the least width.
+    pub fn pour(&self, p: &super::pour::Pour) -> PourRules {
+        let net = Some(p.net.as_str());
+        let rule = |get: fn(&PourRule) -> Option<i64>| -> Option<(i64, String)> {
+            self.class_set(net)
+                .and_then(|(id, s)| {
+                    s.pour
+                        .as_ref()
+                        .and_then(get)
+                        .map(|v| (v, format!("class:{id}")))
+                })
+                .or_else(|| {
+                    self.file
+                        .defaults
+                        .pour
+                        .as_ref()
+                        .and_then(get)
+                        .map(|v| (v, "board".to_owned()))
+                })
+        };
+        let own = |v: Option<i64>| {
+            v.map(|v| Resolved {
+                value: v,
+                source: "pour".into(),
+            })
+        };
+        let or = |found: Option<(i64, String)>, fallback: Resolved| {
+            found
+                .map(|(value, source)| Resolved { value, source })
+                .unwrap_or(fallback)
+        };
+        let floor = self.clearance(net);
+        let width_floor = self.track_width_min(net);
+        let clearance =
+            own(p.clearance_nm).unwrap_or_else(|| or(rule(|r| r.clearance_nm), floor.clone()));
+        let clearance = if clearance.value < floor.value {
+            floor
+        } else {
+            clearance
+        };
+        let min_width = own(p.min_width_nm)
+            .unwrap_or_else(|| or(rule(|r| r.min_width_nm), width_floor.clone()));
+        let min_width = if min_width.value < width_floor.value {
+            width_floor
+        } else {
+            min_width
+        };
+        let ryueda = |v: i64| Resolved {
+            value: v,
+            source: "ryueda".into(),
+        };
+        let mut gap = own(p.thermal.map(|t| t.gap_nm))
+            .unwrap_or_else(|| or(rule(|r| r.thermal_gap_nm), ryueda(THERMAL_NM)));
+        if gap.value < clearance.value {
+            gap = clearance.clone();
+        }
+        let mut spoke = own(p.thermal.map(|t| t.spoke_nm))
+            .unwrap_or_else(|| or(rule(|r| r.thermal_spoke_nm), ryueda(THERMAL_NM)));
+        if spoke.value < min_width.value {
+            spoke = min_width.clone();
+        }
+        PourRules {
+            clearance,
+            min_width,
+            gap,
+            spoke,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -947,5 +1033,46 @@ mod tests {
                 .any(|x| x.error.code == Code::FindingNotWaivable),
             "{faults:?}"
         );
+    }
+    #[test]
+    fn pour_rules_come_from_the_pour_then_the_rules_then_defaults() {
+        use crate::board::pour::{Pour, ThermalRule};
+        let p = Pour::whole("rail:vin", crate::board::file::CopperLayer::Top);
+        let r = Rules::from_parts(std::sync::Arc::new(JLC_2L), None, Default::default());
+        let x = r.pour(&p);
+        assert_eq!(
+            (x.clearance.value, x.clearance.source.as_str()),
+            (100_000, "preset:jlc-2l")
+        );
+        assert_eq!(x.min_width.value, JLC_2L.track_width_min_nm);
+        assert_eq!((x.gap.value, x.gap.source.as_str()), (500_000, "ryueda"));
+        assert_eq!(x.spoke.value, 500_000);
+        let mut f = RulesFile::default();
+        f.defaults.pour = Some(PourRule {
+            clearance_nm: Some(300_000),
+            thermal_gap_nm: Some(200_000),
+            ..PourRule::default()
+        });
+        let r = Rules::from_parts(std::sync::Arc::new(JLC_2L), Some(f), Default::default());
+        let x = r.pour(&p);
+        assert_eq!(
+            (x.clearance.value, x.clearance.source.as_str()),
+            (300_000, "board")
+        );
+        assert_eq!(x.gap.value, 300_000, "never under the clearance");
+        let own = Pour {
+            clearance_nm: Some(400_000),
+            thermal: Some(ThermalRule {
+                gap_nm: 600_000,
+                spoke_nm: 350_000,
+            }),
+            ..p
+        };
+        let x = r.pour(&own);
+        assert_eq!(
+            (x.clearance.value, x.clearance.source.as_str()),
+            (400_000, "pour")
+        );
+        assert_eq!((x.gap.value, x.spoke.value), (600_000, 350_000));
     }
 }

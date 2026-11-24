@@ -40,6 +40,10 @@ pub struct PadInfo {
     pub copper: Shape,
     /// Its solder mask openings on the top and bottom, placed.
     pub mask: [Option<Shape>; 2],
+    /// The footprint pad's own pour connection, when it sets one.
+    pub connect: Option<crate::footprint::ZoneConnect>,
+    /// The footprint pad's own thermal: (gap, spoke).
+    pub thermal: Option<(i64, i64)>,
 }
 
 /// A drilled hole and what owns it.
@@ -413,6 +417,8 @@ fn one(
             net: p.number.as_ref().and_then(|n| o.nets.get(n)).cloned(),
             copper: copper.placed(&place, Polarity::Positive),
             mask,
+            connect: p.margins.zone_connect,
+            thermal: p.thermal.as_ref().map(|t| (t.gap_nm, t.spoke_nm)),
         });
     }
     let refdes = o.label().to_owned();
@@ -1143,5 +1149,31 @@ pub(crate) mod tests {
                 .iter()
                 .any(|n| n.error.code == Code::BoardFootprintUnsupported)
         );
+    }
+
+    #[test]
+    fn pads_carry_their_own_pour_connections() {
+        use crate::footprint::{Thermal, ZoneConnect};
+        let (_dir, mut p, id) = placed();
+        for lib in p.libraries.values_mut().flatten() {
+            for f in lib.footprints.values_mut() {
+                if let Ok(f) = f.item.as_mut() {
+                    let mut pads = f.pads.values_mut();
+                    if let Some(a) = pads.next() {
+                        a.margins.zone_connect = Some(ZoneConnect::Solid);
+                    }
+                    if let Some(b) = pads.next() {
+                        b.thermal = Some(Thermal {
+                            spoke_nm: 300_000,
+                            gap_nm: 400_000,
+                            angle_mdeg: None,
+                        });
+                    }
+                }
+            }
+        }
+        let s = build(&p, &p.boards[&id]).unwrap();
+        assert!(s.pads.iter().any(|x| x.connect == Some(ZoneConnect::Solid)));
+        assert!(s.pads.iter().any(|x| x.thermal == Some((400_000, 300_000))));
     }
 }
