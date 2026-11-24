@@ -275,10 +275,11 @@ const CORNER_X: [[[f64; 2]; 3]; 2] = [
     ],
 ];
 
-fn corner_face<'a>(a: &'a Surface, b: &'a Surface, m: &'a Meter<'a>) -> Face<'a> {
+fn corner_face<'a, 'j>(jets: &'j Jets<'a>, m: &'a Meter<'a>) -> Face<'a, 'j> {
     Face {
-        sheets: [Sheet::of(a), Sheet::of(b)],
+        sheets: jets.sheets,
         meter: m,
+        jets,
         side: 0,
         param: 1,
         at: CORNER_AT,
@@ -290,7 +291,8 @@ fn corner_face<'a>(a: &'a Surface, b: &'a Surface, m: &'a Meter<'a>) -> Face<'a>
 fn a_face_crossing_rounding_hides_is_certified_by_inflation() {
     let (a, b) = crate::testing::footed_corner_pair();
     let m = Meter::free(); // unmetered: a test
-    let face = corner_face(&a, &b, &m);
+    let jets = Jets::new([Sheet::of(&a), Sheet::of(&b)], m.enclosures());
+    let face = corner_face(&jets, &m);
     let x = CORNER_X[0];
     let (em, jac) = face.enclose(x).unwrap();
     let (at, _) = face
@@ -321,7 +323,8 @@ fn a_face_crossing_rounding_hides_is_certified_by_inflation() {
 fn inflation_stays_within_the_faces_reach() {
     let (a, b) = crate::testing::footed_corner_pair();
     let m = Meter::free(); // unmetered: a test
-    let mut face = corner_face(&a, &b, &m);
+    let jets = Jets::new([Sheet::of(&a), Sheet::of(&b)], m.enclosures());
+    let mut face = corner_face(&jets, &m);
     let x = CORNER_X[0];
     let (_, b) = face.inflated(x).expect("certified");
     // The certified box reaches past `x`: held to `x`, inflation gives up
@@ -338,7 +341,8 @@ fn inflation_stays_within_the_faces_reach() {
 fn neighbouring_boxes_claim_an_inflated_crossing_once() {
     let (a, b) = crate::testing::footed_corner_pair();
     let m = Meter::free(); // unmetered: a test
-    let face = corner_face(&a, &b, &m);
+    let jets = Jets::new([Sheet::of(&a), Sheet::of(&b)], m.enclosures());
+    let face = corner_face(&jets, &m);
     for order in [[0, 1], [1, 0]] {
         let shared = Inflated::default();
         let claims = order.map(|i| face.claim(CORNER_X[i], &shared).expect("certified"));

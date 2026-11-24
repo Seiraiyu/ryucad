@@ -2698,6 +2698,68 @@ fn the_measure_tool_measures_two_faces_and_esc_leaves_it() {
     assert!(h.query_by_label("8 mm (exact)").is_none());
 }
 
+/// #1053: Measure on two holes' bores reads the distance between their
+/// centres and draws it as a second dimension line.
+#[test]
+fn the_measure_tool_reads_two_holes_centres() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let p = Project::new().with_part();
+    for (id, at) in [("h1", "4,5,0"), ("h2", "16,5,0")] {
+        p.ok(&[
+            "feature",
+            "add",
+            "p",
+            "cylinder",
+            "--id",
+            id,
+            "--param",
+            "radius=1",
+            "--param",
+            "height=5",
+            "--origin",
+            at,
+            "--operation",
+            "cut",
+            "--target",
+            "base",
+        ]);
+    }
+    let body = p.ok(&["inspect", "p"])["bodies"][0].clone();
+    let bore = |feature: &str| {
+        body["faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["origin"]["feature"] == feature && f["surface"]["type"] == "cylinder")
+            .map(|f| format!("p/base/{}", f["name"].as_str().unwrap()))
+            .unwrap_or_else(|| panic!("no bore of {feature}: {body}"))
+    };
+    let (b1, b2) = (bore("h1"), bore("h2"));
+    let mut h = window(&p);
+    frames(&mut h, loaded);
+    menu(&mut h, "Tools", "Measure");
+    frames(&mut h, |a| a.opened().ws.view.measure.on);
+    // Picked as a click picks them (`ui::view`): the tool takes each.
+    h.state_mut().opened_mut().ws.measure_pick(&b1);
+    h.state_mut().opened_mut().ws.measure_pick(&b2);
+    frames(&mut h, |a| {
+        a.opened()
+            .ws
+            .view
+            .measure
+            .reading
+            .as_ref()
+            .is_some_and(|r| r.centre_line.is_some())
+    });
+    let r = h.state().opened().ws.view.measure.reading.clone().unwrap();
+    assert_eq!(r.centre_label.as_deref(), Some("12 mm"), "{r:?}");
+    shown(&mut h, "Centres");
+    shown(&mut h, "12 mm (exact)");
+}
+
 #[test]
 fn tools_appearance_colours_a_face_and_ctrl_z_undoes_it() {
     let _one = one_at_a_time();
@@ -6189,7 +6251,18 @@ fn a_dependency_is_added_from_its_tab_and_its_part_placed_from_the_picker() {
             .is_some_and(|r| r.fetched)
     });
     shown(&mut h, "fasteners");
-    shown(&mut h, &format!("from {url}"));
+    // The source said in full in the model; the label may be elided
+    // (#1039), so only its start is looked for.
+    let source = h
+        .state()
+        .opened()
+        .ws
+        .deps
+        .row("fasteners")
+        .unwrap()
+        .source();
+    assert_eq!(source, format!("from {url}"));
+    h.get_by_label_contains("from file://");
     // Project > Place from dependency…: the dependency, its part, Place.
     menu(&mut h, "Project", "Place from dependency…");
     shown(&mut h, "Place in frame");
@@ -6253,7 +6326,9 @@ fn an_update_that_breaks_a_mate_says_so_before_it_writes() {
     if !gpu() {
         return;
     }
-    let (lib, url) = common::library();
+    // Under a deep folder, so the source line is wider than the window
+    // whatever the target folder (#1039).
+    let (lib, url) = common::deep_library(160);
     let p = Project::new().committed();
     p.ok(&["deps", "add", &url]);
     p.ok(&["part", "create", "frame", "--assembly"]);

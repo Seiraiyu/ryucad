@@ -577,6 +577,15 @@ pub fn driven_keys(
     };
     let points: Vec<Id> = match (at.features.get(&on.feature), listed) {
         (Some(Ok(Feature::Pattern(x))), None) => {
+            // As the rebuild refuses it (`places::resolve`): a pattern's
+            // seed is at its own place (#848).
+            if from.is_some() {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    "a pattern's seed is at its own place, [0, 0]; leave from out",
+                )
+                .with("pointer", "/from"));
+            }
             // A fill's copies only a rebuild knows (ryucad 28.C).
             if matches!(x.kind, ryucad_doc::doc::pattern::Kind::Fill { .. }) {
                 return Err(missing(format!(
@@ -940,6 +949,72 @@ pub(crate) mod tests {
         assert_eq!(occ.len(), 2, "{occ:?}");
         assert_eq!(problems.len(), 1, "{problems:?}");
         assert!(problems[0].message.contains("is a fill"), "{problems:?}");
+    }
+
+    #[test]
+    fn a_following_pattern_from_a_place_is_a_problem() {
+        use ryu_doc::canonical;
+        use serde_json::json;
+        // On a pattern driver, as the rebuild refuses it (`places::resolve`):
+        // a pattern's seed is at its own place (#848).
+        let p = json!({"type": "instance_pattern", "form": "feature", "instances": ["s0"],
+                       "on": {"instance": ["lid"], "feature": "grid"}, "from": "p1"});
+        let mut f = files(&[
+            ("screw", &[("b", block())]),
+            ("lid", &[("b", block())]),
+            (
+                "pack",
+                &[
+                    ("lid", instance("lid", json!("working"))),
+                    ("s0", instance("screw", json!("working"))),
+                    ("p", p),
+                ],
+            ),
+        ]);
+        let mut put = |path: &str, v: serde_json::Value| {
+            f.insert(path.to_owned(), canonical::to_string(&v).into_bytes());
+        };
+        put(
+            "parts/lid/part.json",
+            json!({"features": ["b", "layout", "row", "grid"], "format": 1,
+                   "kind": "ryucad.part"}),
+        );
+        put(
+            "parts/lid/features/layout.json",
+            json!({"format": 2, "kind": "ryucad.feature",
+            "type": "sketch", "plane": "xy", "constraints": {},
+            "entities": {"p1": {"m": [0, 0], "type": "point"},
+                         "p2": {"m": [0.01, 0], "type": "point"}}}),
+        );
+        put(
+            "parts/lid/features/row.json",
+            json!({"format": 3, "kind": "ryucad.feature",
+            "type": "hole", "form": "simple", "sketch": "layout", "diameter": "3 mm",
+            "depth": "through_all", "targets": ["b"]}),
+        );
+        put(
+            "parts/lid/features/grid.json",
+            json!({"format": 3, "kind": "ryucad.feature",
+            "type": "pattern", "form": "linear", "features": ["row"], "direction": "x",
+            "spacing": "30 mm", "count": "3", "targets": ["b"]}),
+        );
+        let mut pv: serde_json::Value =
+            serde_json::from_slice(&f["parts/pack/features/p.json"]).unwrap();
+        pv["format"] = json!(24);
+        f.insert(
+            "parts/pack/features/p.json".into(),
+            canonical::to_string(&pv).into_bytes(),
+        );
+        let project = Project::load_from(Path::new(""), &f).unwrap();
+        let pack = project.part(&id("pack")).unwrap();
+        let mut cache = Cache::new();
+        let mut reader = Reader::new(&f, &project, None, None, &mut cache);
+        let (occ, problems) = occurrences_with(pack, &mut |_, x| driven_keys(&mut reader, pack, x));
+        // Its copies aren't counted: `from` is named as the problem.
+        assert_eq!(occ.len(), 2, "{occ:?}");
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert_eq!(problems[0].code, Code::InvalidParam, "{problems:?}");
+        assert_eq!(problems[0].details["pointer"], "/from", "{problems:?}");
     }
 
     /// A library (`[1; 16]`, named `lib`) whose `kit` places two of its own

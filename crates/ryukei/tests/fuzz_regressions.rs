@@ -7,7 +7,7 @@
 
 use ryukei::Error;
 use ryukei::boolean::boolean;
-use ryukei::check::{check, check_intersections};
+use ryukei::check::{Fault, check, check_intersections};
 use ryukei::geom::{KnotVector, NurbsSurface, Point3};
 use ryukei::heal::{HealOptions, heal};
 use ryukei::mesh::{MeshParams, check_mesh, tessellate};
@@ -371,6 +371,67 @@ fn the_runaway_sweeps_build_and_check_clean() {
         eprintln!("{}…: {s:.1} s", &hex[..8]);
         assert!(!bars() || s < 30.0, "{}: {s} s", &hex[..8]);
     }
+}
+
+/// #918: the sweep corpus seed 143f5e74 (removed from the corpus by
+/// #949) took 88 s plain release in along's self-check
+/// (`general::Tracer::subdivide`, cox-worker-4). It must build sound or
+/// refuse typed, under 10 s on one thread under the bars.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release only")]
+fn the_sweep_143f5e74_checks_itself_quickly() {
+    let _timed = timed();
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    let s = pool.install(|| {
+        let t = std::time::Instant::now();
+        let (made, _, _) =
+            ryukei_testkit::along_bytes::outcome(&bytes("ffff598888888888888888888888888888"))
+                .expect("a sweep");
+        if let Ok(body) = made {
+            assert_eq!(check(&body), []);
+            assert_eq!(check_intersections(&body), []);
+        }
+        t.elapsed().as_secs_f64()
+    });
+    eprintln!("143f5e74: {s:.1} s");
+    assert!(!bars() || s < 10.0, "{s} s");
+}
+
+/// #919: the sweep corpus seed 56382b47 (removed from the corpus by
+/// #949) took 17-20 s plain release in `general::Face::search`
+/// (cox-worker-4). As the `sweep` target reads it, a sweep and a sweep
+/// along a path, each checked: sound or refused typed, under 5 s on one
+/// thread under the bars.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release only")]
+fn the_sweep_56382b47_searches_quickly() {
+    let _timed = timed();
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    let s = pool.install(|| {
+        let t = std::time::Instant::now();
+        let data = bytes("5b001d7a00000000000000080000fb002b");
+        if let Some((body, _)) = sweep(&data) {
+            assert_eq!(check(&body), []);
+            for fault in check_intersections(&body) {
+                assert!(matches!(fault, Fault::CannotCheck { .. }), "{fault:?}");
+            }
+        }
+        if let Some((Ok(body), _, _)) = ryukei_testkit::along_bytes::outcome(&data) {
+            assert_eq!(check(&body), []);
+            for fault in check_intersections(&body) {
+                assert!(matches!(fault, Fault::CannotCheck { .. }), "{fault:?}");
+            }
+        }
+        t.elapsed().as_secs_f64()
+    });
+    eprintln!("56382b47: {s:.1} s");
+    assert!(!bars() || s < 5.0, "{s} s");
 }
 
 /// #260's two sweep finds, whose self-intersection check ran past 600 s,
@@ -940,6 +1001,19 @@ fn a_tolerant_boolean_whose_face_lost_its_domain() {
         "1a4949ebebebebebebebebebebebebebebebebebebebebebebebebebebebebebebebeb",
         "ebebebebebebebebebebebebebebebff05ebebebebebebebebebebebebeb",
     )));
+    assert!(!matches!(out, TolerantRun::NoCase), "{out:?}");
+}
+
+/// #1029: the `tolerant` target's find of 2026-11-20 (run 44655303525,
+/// at 9f3d30420): an intersect with a tolerance move of 1e-5, of a
+/// three-face target and two six-face tools. The result passed `check`
+/// and the self-intersection check but meshed with face 2's domain bad
+/// (`BadDomain`). It must refuse typed or build a sound body that meshes.
+#[test]
+fn a_tolerant_intersect_whose_face_meshed_with_a_bad_domain() {
+    let out = tolerant_run(&bytes(
+        "3a35376362326432396238343735613938616463376163613262373732663935332505",
+    ));
     assert!(!matches!(out, TolerantRun::NoCase), "{out:?}");
 }
 

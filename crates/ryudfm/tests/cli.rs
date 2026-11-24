@@ -667,3 +667,27 @@ fn every_protocol_method_has_a_command() {
         assert!(out.status.success(), "ryudfm {args:?} --help");
     }
 }
+
+#[test]
+fn errors_lists_every_code_and_its_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = |no_daemon: bool, args: &[&str]| {
+        let mut cmd = ryudfm(&dir.path().join("run"));
+        cmd.current_dir(dir.path()).args(args);
+        if no_daemon {
+            cmd.env("RYUDFM_NO_DAEMON", "1");
+        }
+        parse(cmd.output().unwrap(), dir.path())
+    };
+    let (code, v) = run(false, &["errors"]);
+    assert_eq!(run(true, &["errors"]), (code, v.clone()));
+    assert_eq!(code, 0, "{v}");
+    let codes = v["result"]["codes"].as_array().unwrap();
+    let odb = codes
+        .iter()
+        .find(|c| c["code"] == "odb_layer_unreadable")
+        .unwrap();
+    assert_eq!(odb["title"], "ODB++ layer unreadable");
+    let (code, bad) = run(false, &["errors", "nope"]);
+    assert_eq!((code, &bad["error"]["code"]), (1, &json!("invalid_param")));
+}

@@ -69,6 +69,12 @@ fn lines(v: &Value) -> Vec<Line> {
     ] {
         add(&mut out, label, &v[key]);
     }
+    // Two holes' edges or bores: how far apart their centres are (#1053).
+    let centres = &v["centres"];
+    add(&mut out, "Centres", &centres["distance"]);
+    if centres["parallel"] == true {
+        out.push(("Axes".to_owned(), "parallel".to_owned()));
+    }
     let shape = &v["shape"];
     if let Some(t) = shape["type"].as_str() {
         out.push(("Shape".to_owned(), t.to_owned()));
@@ -110,16 +116,24 @@ pub struct Reading {
     pub line: Option<([f64; 3], [f64; 3])>,
     /// The distance as the dimension line's label writes it.
     pub label: Option<String>,
+    /// Between two holes' edges or bores, their centres' points (#1053):
+    /// a second dimension line, with its label.
+    pub centre_line: Option<([f64; 3], [f64; 3])>,
+    pub centre_label: Option<String>,
 }
 
 impl Reading {
     pub fn of(v: &Value) -> Reading {
         let pts = v["points"].as_array();
         let line = pts.and_then(|p| Some((point(p.first()?)?, point(p.get(1)?)?)));
+        let c = &v["centres"];
+        let cpts = c["points"].as_array();
         Reading {
             lines: lines(v),
             line,
             label: v["distance"]["value"].as_str().map(str::to_owned),
+            centre_line: cpts.and_then(|p| Some((point(p.first()?)?, point(p.get(1)?)?))),
+            centre_label: c["distance"]["value"].as_str().map(str::to_owned),
         }
     }
 }
@@ -412,6 +426,39 @@ mod tests {
         assert_eq!(t.pick("p/b/3"), ["p/b/3"]);
         t.set(false);
         assert!(t.picks.is_empty() && !t.on);
+    }
+
+    /// #1053: two bores' answer reads their centres' distance, and draws it.
+    #[test]
+    fn two_holes_read_their_centres() {
+        let v = json!({
+            "distance": {"value": "16 mm", "m": 0.016, "exact": true},
+            "points": [{"m": [0.012, 0.01, 0.0], "value": "(12 mm, 10 mm, 0 mm)"},
+                       {"m": [0.028, 0.01, 0.0], "value": "(28 mm, 10 mm, 0 mm)"}],
+            "centres": {
+                "distance": {"value": "20 mm", "m": 0.02, "exact": true},
+                "axis_distance": {"value": "20 mm", "m": 0.02, "exact": true},
+                "parallel": true,
+                "points": [{"m": [0.01, 0.01, 0.0], "value": "(10 mm, 10 mm, 0 mm)"},
+                           {"m": [0.03, 0.01, 0.0], "value": "(30 mm, 10 mm, 0 mm)"}],
+            },
+        });
+        let r = Reading::of(&v);
+        assert!(
+            r.lines
+                .contains(&("Centres".to_owned(), "20 mm (exact)".to_owned())),
+            "{:?}",
+            r.lines
+        );
+        assert!(
+            r.lines
+                .contains(&("Axes".to_owned(), "parallel".to_owned()))
+        );
+        assert_eq!(r.centre_line, Some(([0.01, 0.01, 0.0], [0.03, 0.01, 0.0])));
+        assert_eq!(r.centre_label.as_deref(), Some("20 mm"));
+        // An answer without centres draws one line.
+        let r = Reading::of(&json!({"distance": {"value": "1 mm", "m": 0.001, "exact": true}}));
+        assert!(r.centre_line.is_none() && !r.lines.iter().any(|(l, _)| l == "Centres"));
     }
 
     #[test]

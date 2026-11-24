@@ -29,6 +29,22 @@ use fifo::{Fifo, FifoGuard};
 /// How long a daemon waits for a request before it exits.
 pub const DEFAULT_IDLE: Duration = Duration::from_secs(30 * 60);
 
+/// How long a daemon asked to shut down waits for the session's lock
+/// before it goes anyway (#1028): under the client's 30 s stop wait, so a
+/// stop that was answered sees the daemon gone.
+const SHUTDOWN_WAIT: Duration = Duration::from_secs(25);
+
+/// Set (to anything) in a daemon's environment, it takes `daemon.hold`
+/// `{ms}`: the session's lock held for `ms`, deaf to cancels, as a request
+/// stuck in work that never reaches a boundary would be (#1028). For
+/// tests of the shutdown; read once, at the first request.
+pub const TEST_HOLD_VAR: &str = "RYU_SESSION_TEST_HOLD";
+
+fn test_hold() -> bool {
+    static HOLD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *HOLD.get_or_init(|| std::env::var_os(TEST_HOLD_VAR).is_some())
+}
+
 /// What the loop does with a request before the product sees it.
 pub enum Control {
     /// `daemon.status`: answered by the loop. With `timings`, what the
@@ -309,6 +325,17 @@ fn status<P: Serve>(state: &State<P>, timings: bool) -> Value {
         v["last_activity"] = last_activity(&c.live);
         if timings {
             v["timings"] = c.live.timings.to_json();
+            // The deferred syncer's work (#1050): whether a slow write
+            // waited behind its flushes.
+            let s = ryu_doc::source::sync_stats();
+            let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
+            v["timings"]["syncer"] = json!({
+                "batches": s.batches,
+                "files": s.files,
+                "total_ms": ms(s.total),
+                "longest_batch_ms": ms(s.longest_batch),
+                "longest_file_ms": ms(s.longest_file),
+            });
         }
     }
     match core.as_ref().map(|c| c.session.as_ref()) {
@@ -425,6 +452,14 @@ fn serve<P: Serve>(
         *lock(&state.last) = Instant::now();
         *lock(&state.asked) = Instant::now();
         let (id, req) = parse_request_line(line.trim_end());
+        if let Ok((m, params)) = &req
+            && m == "daemon.hold"
+            && test_hold()
+        {
+            let ms = params.as_ref().and_then(|p| p["ms"].as_u64()).unwrap_or(0);
+            let _core = state.core.lock();
+            std::thread::sleep(Duration::from_millis(ms));
+        }
         // A long method's `progress` and `token` are the loop's.
         let req = req.and_then(|(method, mut params)| {
             let ask = match P::LONG.contains(&method.as_str()) {
@@ -558,6 +593,21 @@ fn serve<P: Serve>(
                 waiting_for(state)
             ));
             cancel_all(state);
+            // A request that never reaches a cancel boundary would hold
+            // the lock, and this daemon with its socket, forever (#1028):
+            // after the stop wait it goes anyway. `stop` flushes what was
+            // written first; whichever of the two gets there exits.
+            let late = Arc::clone(state);
+            std::thread::spawn(move || {
+                std::thread::sleep(SHUTDOWN_WAIT);
+                stop(
+                    &late,
+                    &format!(
+                        "asked to shut down; the lock wasn't free after {} s, going anyway",
+                        SHUTDOWN_WAIT.as_secs()
+                    ),
+                );
+            });
             let _busy = state.core.lock();
             stop(state, "asked to shut down, nothing left running");
         }

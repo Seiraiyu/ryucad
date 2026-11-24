@@ -66,6 +66,9 @@ pub struct Session {
     /// most recently used first: dropped whenever the project is read
     /// again ([`Session::set_project`]).
     netlists: Vec<(crate::id::Id, std::sync::Arc<crate::netlist::Netlist>)>,
+    /// What the request's writes spent by phase (#1050), taken by the
+    /// daemon into its timings.
+    phases: Vec<(&'static str, std::time::Duration)>,
 }
 
 /// How many designs' working netlists a session keeps (#976).
@@ -166,6 +169,7 @@ impl Session {
             boards: Vec::new(),
             checks: Vec::new(),
             netlists: Vec::new(),
+            phases: Vec::new(),
         })
     }
 
@@ -340,6 +344,16 @@ impl Session {
         Ok(n)
     }
 
+    /// Notes that a write's phase `name` took `took` (#1050).
+    pub(crate) fn phase(&mut self, name: &'static str, took: std::time::Duration) {
+        self.phases.push((name, took));
+    }
+
+    /// The phases noted since the last call.
+    pub(crate) fn take_phases(&mut self) -> Vec<(&'static str, std::time::Duration)> {
+        std::mem::take(&mut self.phases)
+    }
+
     /// The project read again: what was derived from the old one goes.
     fn set_project(&mut self, project: Project) {
         self.project = project;
@@ -349,7 +363,16 @@ impl Session {
     /// Brings the session up to date with the files, returning those that
     /// changed (relative, with `/`) and how.
     pub fn refresh_changes(&mut self) -> Result<Vec<(String, &'static str)>> {
-        let changes = self.stamps.scan(&self.root, listed(&self.root))?;
+        // The walk, the scan and how many files it read, apart (#1050).
+        let t = std::time::Instant::now();
+        let files = listed(&self.root);
+        self.phase("refresh.list", t.elapsed());
+        let t = std::time::Instant::now();
+        let changes = self.stamps.scan(&self.root, files)?;
+        self.phase("refresh.scan", t.elapsed());
+        for _ in 0..self.stamps.last_reads() {
+            self.phase("refresh.reads", std::time::Duration::ZERO);
+        }
         if !changes.is_empty() {
             self.set_project(load(&self.root, &self.stamps, &*self.pins)?);
             self.pins_key = pins_key(&self.root, &self.project.manifest);

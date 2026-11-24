@@ -71,6 +71,8 @@ fn ten_thousand_occurrences_flatten_and_check_within_the_bars() {
     let run = dir.path().join("run");
     let ryueda = |args: &[&str]| {
         let mut cmd = Command::cargo_bin("ryueda").unwrap();
+        // No repository above the test's folder is found (#1004).
+        cmd.env("GIT_CEILING_DIRECTORIES", std::env::temp_dir());
         cmd.current_dir(&board)
             .env("RYUEDA_RUNTIME_DIR", &run)
             .env("RYUEDA_CONFIG_DIR", dir.path().join("config"))
@@ -123,15 +125,28 @@ fn ten_thousand_occurrences_flatten_and_check_within_the_bars() {
         )
     };
     println!("a write and the next read through a warm daemon: {worst:?} at worst of five");
+    let sync = &spent["result"]["timings"]["syncer"];
     println!(
-        "  rounds (bare CLI/write/read, ms): {}; daemon: {}; {}; {}",
+        "  rounds (bare CLI/write/read, ms): {}; daemon: {}; {}; {}; {}; {}; {}; {}; {}; files read {}; syncer: {} batches, {} files, {:.1} ms, longest batch {:.1} ms, longest file {:.1} ms",
         rounds.join(" "),
         method("net.rename"),
         method("net.show"),
-        method("session.refresh")
+        method("session.refresh"),
+        method("write.prepare"),
+        method("write.files"),
+        method("write.adopt"),
+        method("refresh.list"),
+        method("refresh.scan"),
+        spent["result"]["timings"]["methods"]["refresh.reads"]["count"],
+        sync["batches"],
+        sync["files"],
+        sync["total_ms"].as_f64().unwrap_or(0.0),
+        sync["longest_batch_ms"].as_f64().unwrap_or(0.0),
+        sync["longest_file_ms"].as_f64().unwrap_or(0.0)
     );
     let _ = Command::cargo_bin("ryueda")
         .unwrap()
+        .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
         .current_dir(&board)
         .env("RYUEDA_RUNTIME_DIR", &run)
         .args(["daemon", "stop"])
@@ -356,6 +371,8 @@ fn an_edited_sheet_is_drawn_again_within_its_bar() {
     let run = dir.path().join("run");
     let ryueda = |args: &[&str]| {
         let mut cmd = Command::cargo_bin("ryueda").unwrap();
+        // No repository above the test's folder is found (#1004).
+        cmd.env("GIT_CEILING_DIRECTORIES", std::env::temp_dir());
         cmd.current_dir(&board)
             .env("RYUEDA_RUNTIME_DIR", &run)
             .env("RYUEDA_CONFIG_DIR", dir.path().join("config"))
@@ -444,6 +461,8 @@ fn warm<'a>(
 ) -> impl Fn(&[&str]) -> serde_json::Value + 'a {
     move |args: &[&str]| {
         let mut cmd = Command::cargo_bin("ryueda").unwrap();
+        // No repository above the test's folder is found (#1004).
+        cmd.env("GIT_CEILING_DIRECTORIES", std::env::temp_dir());
         cmd.current_dir(board)
             .env("RYUEDA_RUNTIME_DIR", run)
             .env("RYUEDA_CONFIG_DIR", top.join("config"))
@@ -641,6 +660,8 @@ fn boms_releases_and_where_used_are_within_their_bars() {
     let run = dir.path().join("run");
     let at = |cwd: &std::path::Path, args: &[&str]| -> serde_json::Value {
         let mut cmd = Command::cargo_bin("ryueda").unwrap();
+        // No repository above the test's folder is found (#1004).
+        cmd.env("GIT_CEILING_DIRECTORIES", std::env::temp_dir());
         cmd.current_dir(cwd)
             .env("RYUEDA_RUNTIME_DIR", &run)
             .env("RYUEDA_CONFIG_DIR", dir.path().join("config"))
@@ -761,6 +782,7 @@ fn boms_releases_and_where_used_are_within_their_bars() {
     for cwd in [&board, &lib] {
         let _ = Command::cargo_bin("ryueda")
             .unwrap()
+            .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
             .current_dir(cwd)
             .env("RYUEDA_RUNTIME_DIR", &run)
             .args(["daemon", "stop"])

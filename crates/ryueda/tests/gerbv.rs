@@ -409,6 +409,7 @@ fn check_package(root: &Path, board: &str, out: &Path) {
 fn ryueda(dir: &Path, args: &[&str]) -> serde_json::Value {
     let o = Cli::cargo_bin("ryueda")
         .unwrap()
+        .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
         .current_dir(dir)
         .env("RYUEDA_NO_DAEMON", "1")
         .env("RYUEDA_ID_SEED", "1")

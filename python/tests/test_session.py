@@ -81,12 +81,16 @@ def statuses(answer):
 
 
 def in_repository(folder):
+    """The repository holding folder, found as Git finds it: upward, never
+    into a folder GIT_CEILING_DIRECTORIES names (#1004)."""
+    ceilings = {os.path.realpath(c)
+                for c in os.environ.get("GIT_CEILING_DIRECTORIES", "").split(os.pathsep) if c}
     here = os.path.abspath(folder)
     while True:
         if os.path.exists(os.path.join(here, ".git")):
             return here
         up = os.path.dirname(here)
-        if up == here:
+        if up == here or os.path.realpath(up) in ceilings:
             return None
         here = up
 

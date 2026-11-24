@@ -100,6 +100,7 @@ pub fn proposed(session: &Session, writes: &Writes) -> Result<Project> {
 /// Puts `writes` on disk if they add no error to the project, and takes
 /// them in; refused with the first new fault's code otherwise.
 pub fn commit(session: &mut Session, what: &str, mut writes: Writes) -> Result<()> {
+    let t = std::time::Instant::now();
     let mut after = proposed(session, &writes)?;
     // Blocks laid out whose drawing this changes are laid out again, in
     // the same change, so no agent meets a stale sheet.
@@ -116,6 +117,8 @@ pub fn commit(session: &mut Session, what: &str, mut writes: Writes) -> Result<(
     if !added.is_empty() {
         return Err(refused(what, &added));
     }
+    session.phase("write.prepare", t.elapsed());
+    let t = std::time::Instant::now();
     let root = session.root().to_path_buf();
     let written: Vec<String> = writes.paths().into_iter().map(str::to_owned).collect();
     for (path, text) in writes.0 {
@@ -126,8 +129,12 @@ pub fn commit(session: &mut Session, what: &str, mut writes: Writes) -> Result<(
             None => {}
         }
     }
+    session.phase("write.files", t.elapsed());
+    let t = std::time::Instant::now();
     // The project just judged is the project on disk now.
-    session.adopt(after, &written)
+    let adopted = session.adopt(after, &written);
+    session.phase("write.adopt", t.elapsed());
+    adopted
 }
 
 /// A block a request names, or `not_found`.

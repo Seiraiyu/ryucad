@@ -137,11 +137,14 @@ pub fn parse_request_line(line: &str) -> (Value, Result<(String, Option<Value>)>
 pub fn rpc_response(id: Value, result: &Result<Value>) -> String {
     match result {
         Ok(r) => json!({"jsonrpc": "2.0", "id": id, "result": r}),
-        Err(e) => json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "error": {"code": RPC_ERROR, "message": e.message, "data": e},
-        }),
+        Err(e) => {
+            ryu_doc::error::details::check(e);
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": {"code": RPC_ERROR, "message": e.message, "data": e},
+            })
+        }
     }
     .to_string()
 }
@@ -167,6 +170,7 @@ pub fn write_raw_response(
             message,
             details,
         } => {
+            ryu_doc::error::details::check_raw(*code, details);
             let code = serde_json::to_string(code).map_err(std::io::Error::other)?;
             let message = Value::from(message.as_str()).to_string();
             write!(
@@ -246,7 +250,7 @@ mod tests {
     fn raw_answers_write_the_lines_values_do() {
         let result =
             json!({"parts": [{"b": 1.5, "a": "x\"y\u{1}é"}], "commit": "c", "warnings": []});
-        let e = Error::new(Code::NotFound, "no \"such\" thing")
+        let e = Error::new(Code::Conflict, "no \"such\" thing")
             .with("part", "p")
             .with("parts", json!([1, {"z": null, "y": -0.0}]));
         let bare = Error::new(Code::Cancelled, "stopped");
@@ -281,5 +285,31 @@ mod tests {
         let a = Answer::bytes(json!({}), "ryucad.mesh.1", vec![1, 2, 3]);
         assert_eq!(Answer::announced(&a.result), Some(3));
         assert_eq!(Answer::announced(&Answer::json(json!({})).result), None);
+    }
+
+    /// Every refusal is checked against its code's declared keys as it is
+    /// written (design 698): a debug build panics on an undeclared key.
+    #[test]
+    fn a_refusal_is_checked_as_it_is_written() {
+        if !cfg!(debug_assertions) || std::env::var_os(ryu_doc::error::details::RECORD).is_some() {
+            return;
+        }
+        let bad = Error::new(Code::LabelNotFound, "x").with("colour", "red");
+        let panic =
+            std::panic::catch_unwind(|| rpc_response(json!(1), &Err(bad.clone()))).unwrap_err();
+        assert!(panic.downcast_ref::<String>().unwrap().contains("`colour`"));
+        let raw = Raw::Error {
+            code: Code::LabelNotFound,
+            message: "x".into(),
+            details: r#"{"colour":"red"}"#.into(),
+        };
+        let written = std::panic::catch_unwind(|| {
+            let mut out = Vec::new();
+            write_raw_response(&mut out, &json!(1), &raw)
+        });
+        assert!(written.is_err());
+        // A declared one is written as before.
+        let good = Error::new(Code::LabelNotFound, "x").with("label", "v1");
+        assert!(rpc_response(json!(1), &Err(good)).contains(r#""label":"v1""#));
     }
 }

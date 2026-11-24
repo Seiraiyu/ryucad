@@ -1768,7 +1768,6 @@ fuzz_target!(|data: &[u8]| {
                          "replies": {"r1": {"by": {"participant": "agent", "kind": "agent"},
                                             "at": "2026-11-05T14:05:00Z", "text": "ok"}},
                          "resolution": null}),
-            // A split when the edits leave no odd byte over, else a mirror.
             // A base flange when the edits leave no odd byte over, else a
             // flange.
             24 if rest.len() % 2 == 0 => json!({"format": 11, "kind": "ryucad.feature",
@@ -1777,6 +1776,7 @@ fuzz_target!(|data: &[u8]| {
             24 => json!({"format": 11, "kind": "ryucad.feature", "type": "flange", "target": "b",
                 "edges": [{"feature": "b", "name": format!("{:032x}", 1)}], "angle": "90 deg",
                 "length": "20 mm"}),
+            // A split when the edits leave no odd byte over, else a mirror.
             22 if rest.len() % 2 == 0 => {
                 json!({"format": 10, "kind": "ryucad.feature", "type": "split", "target": "b",
                        "plane": {"feature": "d"}})

@@ -256,6 +256,72 @@ fn a_torus_and_a_cone_mesh() {
     identities(sa, sb).unwrap();
 }
 
+/// Issue #838: a cone and a torus, then a torus and a holed plate, whose
+/// booleans meshed with `RefinementStalled` (9p1-F2, cox-worker-4, and
+/// again at d0a46b6b), pinned by value.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "slow in a debug build: CI runs it in release"
+)]
+fn a_cone_and_a_torus_and_a_holed_plate_mesh() {
+    let cases = [
+        (
+            Spec {
+                kind: 2,
+                a: 0.4,
+                b: 0.7765277177395851,
+                axis: (0.7681636728979764, 0.1333355268476494, 0.9729687312416125),
+                angle: 2.7752264762092325,
+                at: (
+                    -0.11627518509908294,
+                    -0.6311049694832683,
+                    -0.5414175214523862,
+                ),
+            },
+            Spec {
+                kind: 5,
+                a: 0.6511632819633731,
+                b: 0.4,
+                axis: (
+                    0.24772204896594213,
+                    -0.01337052126470934,
+                    0.6755316436402413,
+                ),
+                angle: 1.4923897006642184,
+                at: (
+                    0.4042548647060417,
+                    -0.16359674217000936,
+                    -0.08927981709966494,
+                ),
+            },
+        ),
+        (
+            Spec {
+                kind: 5,
+                a: 0.4,
+                b: 0.4,
+                axis: (0.5801840372443327, -0.9090804426305693, 0.5548618226516664),
+                angle: 0.0,
+                at: (0.0, 0.0, 0.0996615510745352),
+            },
+            Spec {
+                kind: 6,
+                a: 0.9511637802952502,
+                b: 0.4,
+                axis: (0.677948155606818, 0.8931199305793375, 0.33076557624612135),
+                angle: 2.6491394096952208,
+                at: (0.0, -0.38291616524011446, 0.2525516283966691),
+            },
+        ),
+    ];
+    for (i, (sa, sb)) in cases.into_iter().enumerate() {
+        if let Err(e) = identities(sa, sb) {
+            panic!("case {i}: {e}");
+        }
+    }
+}
+
 #[test]
 fn the_same_on_one_thread_and_many() {
     let plate = primitive::block(OpKey(1), 6.0, 2.0, 1.0, &Rigid::IDENTITY)

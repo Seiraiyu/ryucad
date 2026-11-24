@@ -110,6 +110,7 @@ fn built(s: &mut Session, id: &str, out: &Path) {
     let first = match get(s) {
         Ok(v) => v,
         Err(e) => {
+            ryucad::error::details::check(&e);
             assert_ne!(e.code, Code::Internal, "{e}");
             return;
         }
@@ -123,10 +124,14 @@ fn built(s: &mut Session, id: &str, out: &Path) {
             json!({"part": "p", "drawing": id, "format": format, "out": f.to_str().unwrap()}),
         ) {
             Ok(_) => assert!(std::fs::metadata(&f).unwrap().len() > 0, "{format} is empty"),
-            Err(e) => assert_ne!(e.code, Code::Internal, "{format}: {e}"),
+            Err(e) => {
+                ryucad::error::details::check(&e);
+                assert_ne!(e.code, Code::Internal, "{format}: {e}")
+            }
         }
     }
     if let Err(e) = call(s, "drawing.render", json!({"part": "p", "drawing": id, "scale": 1.0})) {
+        ryucad::error::details::check(&e);
         assert_ne!(e.code, Code::Internal, "png: {e}");
     }
 }

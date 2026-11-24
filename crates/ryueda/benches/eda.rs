@@ -135,6 +135,16 @@ fn kicad_read(b: divan::Bencher) {
 #[divan::bench]
 fn kicad_import_dry_run(b: divan::Bencher) {
     let dir = tempfile::tempdir().unwrap();
+    // Its own repository, so the install lands there and never in one
+    // above the temp folder (#1004).
+    assert!(
+        ryu_git::git_env::isolated()
+            .args(["init", "-q"])
+            .arg(dir.path())
+            .status()
+            .unwrap()
+            .success()
+    );
     ryueda::server::init(dir.path(), None, false).unwrap();
     let mut s = ryueda::session::Session::open(dir.path()).unwrap();
     let d = kicad_data();

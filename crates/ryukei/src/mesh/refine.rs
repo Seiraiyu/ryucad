@@ -352,7 +352,7 @@ fn refine_pass(
         let short = |i: usize| len(i) < floor && xyz[next(i)].distance(xyz[prev(i)]) < floor;
         let i = chord.unwrap_or_else(|| {
             let i = edge_to_split(verdict, uv, g.metric);
-            if !short(i) || !matches!(verdict, Verdict::Turned { .. }) {
+            if !short(i) {
                 return i;
             }
             // The edge the normal turns most along is below the floor,
@@ -362,7 +362,11 @@ fn refine_pass(
             // would stall the face. Split its longest edge instead: the
             // triangle shrinks towards the waiver's size, below which its
             // turn is waived. Only a triangle that would stall its face
-            // comes here, so every face that meshed meshes as it did.
+            // comes here, so every face that meshed meshes as it did. A
+            // long triangle may come here too: the plane's scale can put
+            // every edge below the floor while two run centimetres across
+            // the surface (#838: a boolean of a cone and a torus, two
+            // corners 0.14 mm apart and a third 3 cm from them).
             (0..3)
                 .filter(|&j| !short(j))
                 .fold(None, |best: Option<usize>, j| match best {

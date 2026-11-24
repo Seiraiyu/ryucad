@@ -112,6 +112,8 @@ impl Repo {
     /// Runs ryucad in the project, in process; its exit code and envelope.
     fn ryucad_status(&self, args: &[&str]) -> (i32, Value) {
         let mut cmd = Command::cargo_bin("ryucad").unwrap();
+        // No repository above the test's folder is found (#1004).
+        cmd.env("GIT_CEILING_DIRECTORIES", std::env::temp_dir());
         // No GIT_DIR or kin inherited (#721).
         for v in ryupdm::git_env::inherited() {
             cmd.env_remove(v);
