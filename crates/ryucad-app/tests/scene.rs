@@ -506,6 +506,7 @@ fn a_thousand_occurrences_are_one_mesh() {
 /// shows through the cap, and the same frame twice is the same pixels.
 #[test]
 fn a_section_cuts_and_caps() {
+    let _one = one_at_a_time();
     let Some((adapter, device, queue)) = gpu() else {
         return;
     };
