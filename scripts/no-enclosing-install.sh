@@ -10,7 +10,10 @@ git -C "$outer" init -q
 mkdir "$outer/tmp"
 before=$(git -C "$outer" config --local --list | sort)
 code=0
-TMPDIR="$outer/tmp" "$@" || code=$?
+# Fenced as the tests fence their own commands: in-process code and
+# children see no repository above the temp folder. Whatever ignores the
+# ceiling (or strips it) and installs anyway shows below.
+TMPDIR="$outer/tmp" GIT_CEILING_DIRECTORIES="$outer/tmp" "$@" || code=$?
 after=$(git -C "$outer" config --local --list | sort)
 status=0
 if [ "$before" != "$after" ]; then
