@@ -220,7 +220,11 @@ main() {
     # Daemons from the old version must not keep running.
     # One still running after the wait (#1023) is said, not hidden.
     stopped=$("$bin/ryucad" daemon stop --all 2>/dev/null) || true
+    # One that took the connection and never answered (#1042) is said too.
     case $stopped in
+    *'"answered":false'*)
+        say "warning: a ryucad daemon didn't stop (not answering) and still runs the old version; end it, then run: ryucad daemon stop --all"
+        ;;
     *still_running*)
         say "warning: a ryucad daemon didn't stop and still runs the old version; close its window, or end it, then run: ryucad daemon stop --all"
         ;;

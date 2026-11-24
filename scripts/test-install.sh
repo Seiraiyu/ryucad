@@ -68,6 +68,18 @@ STUCK
 chmod 755 "$work/stuck-ryucad"
 stuck="$work/stuck"
 release "$stuck" "$work/stuck-ryucad"
+# One that took the connection and never answered (#1042).
+cat >"$work/mute-ryucad" <<MUTE
+#!/bin/sh
+if [ "\$*" = "daemon stop --all" ]; then
+    echo '{"ok":true,"result":{"stopped":1,"still_running":[{"address":"a","log":"l","answered":false}]},"warnings":[]}'
+    exit 0
+fi
+exec "$binary" "\$@"
+MUTE
+chmod 755 "$work/mute-ryucad"
+mute="$work/mute"
+release "$mute" "$work/mute-ryucad"
 
 # run NAME BASE [VAR=VALUE...]: run the installer in a fresh HOME (kept
 # across runs of the same NAME), capturing output and status.
@@ -167,6 +179,8 @@ check "RYUCAD_NO_APP registers nothing" '[ ! -e "$work/home-noapp/.local/share/a
 # A daemon still running after the stop is said, and the install goes on.
 run stuck "$stuck"
 check "a daemon that didn't stop is said" '[ "$status" -eq 0 ] && grep -q "warning: a ryucad daemon didn.t stop" "$work/out"'
+run mute "$mute"
+check "a daemon that never answered is said" '[ "$status" -eq 0 ] && grep -q "warning: a ryucad daemon didn.t stop (not answering)" "$work/out"'
 
 # Pinned versions.
 run pinned "$good" RYUCAD_VERSION=0.0.9
