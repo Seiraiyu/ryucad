@@ -74,16 +74,20 @@ impl Index {
     /// Every ryucad and ryueda project at or under `tops`, in order; a
     /// project ID found twice (two checkouts) keeps its first folder.
     pub fn scan(tops: &[PathBuf]) -> Index {
+        Index::scan_with(tops, &Scans::default())
+    }
+
+    /// [`Index::scan`], each top's projects taken from `scans` when an
+    /// earlier scan through it walked that top already: the same answer,
+    /// in the same order.
+    pub fn scan_with(tops: &[PathBuf], scans: &Scans) -> Index {
         let mut ix = Index::default();
         for t in tops {
             ix.searched.push(t.clone());
-            for (product, manifest) in PRODUCTS {
-                for dir in ryupdm::dependents::projects_under(t, manifest).unwrap_or_default() {
-                    let dir = dir.canonicalize().unwrap_or(dir);
-                    if let Some(pid) = project_id(&crate::source::Folder(&dir), manifest) {
-                        ix.found.entry((product.to_owned(), pid)).or_insert(dir);
-                    }
-                }
+            for (product, pid, dir) in scans.of(t).iter() {
+                ix.found
+                    .entry((product.clone(), pid.clone()))
+                    .or_insert_with(|| dir.clone());
             }
         }
         ix
@@ -99,6 +103,88 @@ impl Index {
         self.found
             .get(&(product.to_owned(), project.clone()))
             .map(PathBuf::as_path)
+    }
+}
+
+/// Each top folder's representation projects, walked once and shared by
+/// the scans that ask for it. `where-used` scans the same `--in` folders
+/// once for its own catalogue and again for each other checkout; walking
+/// them each time read every catalogue's item shards ten times over
+/// (#1044).
+#[derive(Default)]
+pub struct Scans(std::sync::Mutex<BTreeMap<PathBuf, std::sync::Arc<Vec<Found>>>>);
+
+/// A project found under a top: its product, project ID and folder.
+type Found = (String, ProjectId, PathBuf);
+
+impl Scans {
+    /// The projects at or under `top`, by product in [`PRODUCTS`]'s order
+    /// and then by folder, as [`Index::scan`] meets them.
+    fn of(&self, top: &Path) -> std::sync::Arc<Vec<Found>> {
+        let lock = || self.0.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(f) = lock().get(top) {
+            return f.clone();
+        }
+        let mut under = [Vec::new(), Vec::new()];
+        projects_under(top, [true, true], &mut under);
+        let mut found = Vec::new();
+        for ((product, manifest), dirs) in PRODUCTS.iter().zip(under) {
+            for dir in dirs {
+                let dir = dir.canonicalize().unwrap_or(dir);
+                if let Some(pid) = project_id(&crate::source::Folder(&dir), manifest) {
+                    found.push(((*product).to_owned(), pid, dir));
+                }
+            }
+        }
+        lock()
+            .entry(top.to_path_buf())
+            .or_insert_with(|| std::sync::Arc::new(found))
+            .clone()
+    }
+
+    /// How many tops have been walked.
+    pub fn walked(&self) -> usize {
+        self.0.lock().unwrap_or_else(|p| p.into_inner()).len()
+    }
+}
+
+/// `ryupdm::dependents::projects_under` for both [`PRODUCTS`] in one walk:
+/// into `out[k]` the folders at or under `dir` holding product `k`'s
+/// manifest, sorted, never looking inside one of that product's projects,
+/// a hidden folder, `target` or `node_modules`. Also never inside a
+/// catalogue's `items` and `documents` folders, which hold only ryuplm's
+/// own files (anything else there is a load fault): a catalogue of
+/// 10,000 items has a thousand shards (#1044).
+fn projects_under(dir: &Path, active: [bool; 2], out: &mut [Vec<PathBuf>; 2]) {
+    let mut active = active;
+    for (k, (_, manifest)) in PRODUCTS.iter().enumerate() {
+        if active[k] && dir.join(manifest).is_file() {
+            out[k].push(dir.to_path_buf());
+            active[k] = false;
+        }
+    }
+    if !active.contains(&true) {
+        return;
+    }
+    let catalogue = dir.join(crate::catalogue::MANIFEST).is_file();
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut entries: Vec<PathBuf> = read
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .filter(|e| {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            !name.starts_with('.')
+                && !ryupdm::dependents::SKIPPED.contains(&name.as_ref())
+                && !(catalogue && (name == crate::ids::ITEMS || name == crate::ids::DOCUMENTS))
+        })
+        .map(|e| e.path())
+        .collect();
+    entries.sort();
+    for d in entries {
+        projects_under(&d, active, out);
     }
 }
 
@@ -574,6 +660,69 @@ pub(crate) mod tests {
                 serde_json::json!({"features": ids, "format": 2, "kind": "ryucad.part", "part_kind": "assembly"}),
             );
         }
+    }
+
+    /// #1044: scans sharing their walks answer what separate scans do, in
+    /// the same order, and walk each top once.
+    #[test]
+    fn shared_scans_answer_as_separate_ones_and_walk_each_top_once() {
+        let d = tempfile::tempdir().unwrap();
+        let top = d.path().canonicalize().unwrap();
+        let (a, b) = (top.join("a"), top.join("b"));
+        cad_project(&a.join("mech"), &pid(3), &["bolt"], &[]);
+        cad_project(&b.join("mech"), &pid(3), &["nut"], &[]);
+        cad_project(&b.join("other"), &pid(5), &["pin"], &[]);
+        let scans = Scans::default();
+        for tops in [vec![a.clone(), top.clone()], vec![b.clone(), top.clone()]] {
+            let shared = Index::scan_with(&tops, &scans);
+            let alone = Index::scan(&tops);
+            assert_eq!(shared.found, alone.found, "{tops:?}");
+            assert_eq!(shared.searched, alone.searched);
+        }
+        // a and the top, then b: the top's walk was shared.
+        assert_eq!(scans.walked(), 3);
+        // The first folder holding an ID wins, as before.
+        let ix = Index::scan_with(&[b.clone(), top.clone()], &scans);
+        assert_eq!(ix.dir("ryucad", &pid(3)), Some(b.join("mech").as_path()));
+    }
+
+    /// #1044: the one walk finds what ryupdm's walk per manifest does,
+    /// in its order, except inside a catalogue's items and documents.
+    #[test]
+    fn one_walk_finds_both_products_and_skips_a_catalogues_shards() {
+        let d = tempfile::tempdir().unwrap();
+        let top = d.path().canonicalize().unwrap();
+        let put = |rel: &str| {
+            let p = top.join(rel);
+            fs::create_dir_all(p.parent().unwrap()).unwrap();
+            fs::write(p, "{}").unwrap();
+        };
+        for f in [
+            "a/ryucad.json",
+            "a/inner/ryucad.json",
+            "a/inner/ryueda.json",
+            "b/c/ryueda.json",
+            "b/ryucad.json",
+            ".hidden/ryucad.json",
+            "target/ryueda.json",
+            "z/ryueda.json",
+        ] {
+            put(f);
+        }
+        let mut out = [Vec::new(), Vec::new()];
+        projects_under(&top, [true, true], &mut out);
+        for (k, (_, manifest)) in PRODUCTS.iter().enumerate() {
+            let theirs = ryupdm::dependents::projects_under(&top, manifest).unwrap();
+            assert_eq!(out[k], theirs, "{manifest}");
+        }
+        // A catalogue's shards aren't looked in; the rest of it is.
+        put("cat/ryuplm.json");
+        put("cat/items/ab/ryucad.json");
+        put("cat/documents/ab/x/ryueda.json");
+        put("cat/mech/ryucad.json");
+        let mut out = [Vec::new(), Vec::new()];
+        projects_under(&top.join("cat"), [true, true], &mut out);
+        assert_eq!(out, [vec![top.join("cat/mech")], vec![]]);
     }
 
     #[test]

@@ -43,6 +43,12 @@ pub fn status(root: &Path) -> Result<Value> {
     ryu_session::client::status::<Eda>(root)
 }
 
+/// [`status`], with the daemon's timings by method when `timings`: time
+/// waiting for its lock, holding it, and publishing (#981).
+pub fn status_with(root: &Path, timings: bool) -> Result<Value> {
+    ryu_session::client::status_with::<Eda>(root, timings)
+}
+
 /// Stops the project's daemon, if one is running.
 pub fn stop(root: &Path) -> Result<Value> {
     ryu_session::client::stop::<Eda>(root)

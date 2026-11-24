@@ -1,12 +1,13 @@
 //! Direct edits from bytes ([`ryukei_testkit::edit_bytes`]): faces and
 //! features deleted, topology-changing tweaks, blends deleted and
-//! resized. Every result must be a typed refusal
-//! ([`Error::InvalidTweak`]), or a body that passes the checker, doesn't
-//! cross or overlap itself, meshes with no faults, and whose journal
-//! accounts for every face the body had. The edit (recognition and
-//! feature finding included), its checks and its mesh share one
-//! [`ryukei_testkit::FUZZ_BUDGET`] and are cancelled at
-//! [`ryukei_testkit::FUZZ_DEADLINE`]; past either is a typed refusal.
+//! resized, and (a first byte `0xFE`) blends deleted partially. Every
+//! result must be a typed refusal ([`Error::InvalidTweak`]), or a body
+//! that passes the checker, doesn't cross or overlap itself, meshes with
+//! no faults, and whose journal accounts for every face the body had.
+//! The edit (recognition and feature finding included), its checks and
+//! its mesh share one [`ryukei_testkit::FUZZ_BUDGET`] and are cancelled
+//! at [`ryukei_testkit::FUZZ_DEADLINE`]; past either is a typed refusal
+//! (a partial delete past its budget keeps the units not yet settled).
 //! Any panic, and any other error, is a bug.
 
 #![no_main]
@@ -16,14 +17,28 @@ use ryukei::Error;
 use ryukei::check::{Fault, check, check_intersections_with};
 use ryukei::mesh::{MeshParams, check_mesh, tessellate_with};
 use ryukei::name::{Event, OpKey};
-use ryukei_testkit::edit_bytes::{edit_case, run};
+use ryukei_testkit::edit_bytes::{edit_case, partial_case, run, run_partial};
 
 fuzz_target!(|data: &[u8]| {
-    let Some(case) = edit_case(data) else {
+    // A first byte 0xFE makes the case a partial blend delete (plan 23.C).
+    let partial = data.first() == Some(&0xfe);
+    let case = if partial {
+        partial_case(&data[1..])
+    } else {
+        edit_case(data)
+    };
+    let Some(case) = case else {
         return;
     };
     ryukei_testkit::fuzz_case(|work| {
-        let body = match work.run(|w| run(&case, OpKey(0xed1), w)) {
+        let made = work.run(|w| {
+            if partial {
+                run_partial(&case, OpKey(0xed1), w).map(|(b, j, _)| (b, j))
+            } else {
+                run(&case, OpKey(0xed1), w)
+            }
+        });
+        let body = match made {
             Ok((body, journal)) => {
                 for f in case.body.faces() {
                     let n = case.body.face(f).expect("a face").name;

@@ -9,7 +9,7 @@
 # ledger turned on and asked offline (the local number and its warning),
 # the daemon's status and stop, a check in process, and the hosted
 # service's contract (version's schema_outputs, a list window, git
-# attributes, reps, resolve and index).
+# attributes, reps, resolve and index), and the daemon stopped again.
 #
 #   scripts/smoke-ryuplm.sh path/to/ryuplm [path/to/ryuplm-app]
 #
@@ -184,6 +184,8 @@ if [ -n "$app" ]; then
             exit 1
             ;;
     esac
-    "$exe" daemon stop >/dev/null 2>&1 || true
 fi
+# The contract's requests started a daemon again: stop it, or on Windows it
+# holds the catalogue's folder and the exit trap can't remove it.
+run daemon stop
 echo "ryuplm smoke test passed"

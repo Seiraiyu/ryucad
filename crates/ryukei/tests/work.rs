@@ -463,6 +463,63 @@ fn a_refused_delete_is_bounded() {
     println!("a slab's side: {spent} units");
 }
 
+/// The partial_deletes twin (plan 23.C): bounded like any call. The same
+/// units and body on one thread and eight; a budget of what it spends
+/// answers as unbudgeted; a cancel answers `Cancelled`. One unit short
+/// keeps the unit being settled with `BudgetExceeded` (the partial delete
+/// settles its own budget), so `bounded`'s `BudgetExceeded` rule is
+/// replaced by that check here.
+#[test]
+fn the_partial_deletes_twin_is_bounded() {
+    use ryukei::tweak::{DeleteBlends, delete_blends_partial_with};
+    use ryukei_testkit::partial_deletes::{MAX_SIZE, body};
+    let b = body();
+    let spec = DeleteBlends {
+        max_size: Some(MAX_SIZE),
+        ..Default::default()
+    };
+    let key = OpKey(0x23cb);
+    let free = Work::unlimited();
+    let (o, j, r) = delete_blends_partial_with(key, &b, &spec, &free).unwrap();
+    let spent = free.spent();
+    for threads in [1, 8] {
+        let w = Work::unlimited();
+        let (o2, j2, r2) = pool(threads)
+            .install(|| delete_blends_partial_with(key, &b, &spec, &w))
+            .unwrap();
+        assert_eq!(w.spent(), spent, "{threads} threads");
+        assert_eq!(o.dump(), o2.dump(), "{threads} threads");
+        assert_eq!((&j, &r), (&j2, &r2), "{threads} threads");
+        let w = Work::unlimited().with_budget(spent);
+        let (o3, _, r3) = pool(threads)
+            .install(|| delete_blends_partial_with(key, &b, &spec, &w))
+            .unwrap();
+        assert_eq!(
+            (o.dump(), &r),
+            (o3.dump(), &r3),
+            "{threads} threads: a budget of all"
+        );
+        let w = Work::unlimited().with_budget(spent - 1);
+        let (_, _, r1) = pool(threads)
+            .install(|| delete_blends_partial_with(key, &b, &spec, &w))
+            .unwrap();
+        assert!(
+            r1.kept
+                .iter()
+                .any(|k| matches!(k.cause, Error::BudgetExceeded { .. })),
+            "{threads} threads: {:?}",
+            r1.kept
+        );
+    }
+    let flag = AtomicBool::new(true);
+    let w = Work::unlimited().with_cancel(&flag);
+    assert!(matches!(
+        delete_blends_partial_with(key, &b, &spec, &w),
+        Err(Error::Cancelled)
+    ));
+    println!("partial_deletes twin: {spent} units");
+}
+
 #[test]
 fn thickening_a_sheet_is_bounded() {
     use ryukei::name::{FaceRole, Name, Role};

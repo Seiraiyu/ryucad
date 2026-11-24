@@ -705,3 +705,88 @@ Design 919, plan 23.B (#658).
   Two survive, as expected: M8, a gap check that ignores whether there is a gap, which only matters for a re-trim inside another cap, and none exists today; and M10, `grow` without a gap, which changes nothing at `1 << 26`.
 - **Testing.** `work`'s `a_gap_is_a_scope_its_rungs_share` and `a_meter_is_exhausted_past_its_innermost_cap_only`; `retrim::tests`' `a_ladder_stops_at_its_gap_with_its_last_finished_rungs_cause`, `a_retrim_within_its_gap_builds_and_past_it_refuses_at_the_least_face` and `a_narrowed_rung_past_its_gap_starts_no_more_builds`; `delete::tests`' `a_set_past_its_gap_refuses_with_its_last_finished_rungs_cause` and `a_set_that_builds_spends_what_it_did_under_its_gap`; `tests/work.rs`' `a_refused_delete_is_bounded`; ryustep's `PINNED_REFUSED`.
 - **Limits.** A refusal past a gap may name its set's least face instead of the pair it would have stopped at. Today no set reaches `1 << 26`. ryukei 24's CTC 02 with PMI and 23.C's partial deletes inherit the refusals' cost: a refused unit can spend up to 27 M units, about a minute on cox-worker-2.
+
+## Partial blend deletes (decided in ryukei phase 23.C)
+
+Design 919, plan 23.C (#658).
+
+- **The operation.** `tweak::delete_blends_partial` and `delete_blends_partial_with` delete what `delete_blends` picks, where they can, and answer `(Body, Journal, PartialDelete)`. The report holds the recognition its indices point into, the units deleted (`BlendUnit`: blend indices and sorted face names) and the units kept (`KeptUnit`: the unit and the last error it refused with), each by least face name.
+- **Units.** A unit is `remake::close` of one picked blend alone: the blend, its whole chain and every corner it reaches, with their faces (`partial::units`). Closure is symmetric, so units partition the closed picks. A unit may hold blends that weren't picked: a picked blend's chain, which `delete_blends` deletes too.
+- **The order.**
+  1. Picking is `delete_blends`' own: `remake::pick` is the part both share.
+  2. Each edge-connected set is grown whole, as `delete_faces_in` grows it: the same key, in order of least name, journals merged the same way. A set `delete_faces_in` would refuse before building (no boundary: `GapNotHealed`; closable: `GrowWouldCap`) refuses here likewise. A set whose faces an earlier growth took refuses `GapNotHealed`, and its units then find their faces gone and count as deleted.
+  3. A unit is deleted where every set holding its faces built. The rest are tried one by one in passes, each a `delete_faces_in` with `Heal::Grow` over the unit's faces still present. A unit that refused is tried again only after a step that built touched a face sharing a vertex with it at that try (`touched`: `Modified`, `Deleted`, a `Split` or `Merged` parent, a `Replaced` old). Passes repeat while one deletes something.
+  4. A set of one unit that refused waits for a neighbour like a unit that refused: trying it again at once would repeat its refusal at its whole cost.
+- **The journal.** Where every set builds, the body and journal are `delete_blends`' bit for bit. Otherwise the journal is `remake::net` of every step that built (now `pub(crate)`).
+- **Budgets and cancels.** `work::run_keeping` is `work::run` for a call that settles its own budget. It counts what the call spent and still answers `Cancelled` for a cancel, but past the budget the call's answer stands. After every step, `Meter::stop_cause` says what halted the meter. A cancel answers `Err(Cancelled)`. A budget keeps the unit being tried, and every unit that would have been tried again, with `BudgetExceeded { spent, budget }`; a unit nothing changed round since it refused keeps its own cause. Before anything is built, the call refuses only as `delete_blends` refuses first: a bad size, `NotABlend`, recognition, `NotASolid`.
+- **Steps.** `partial::partial_with` takes its steps as `Steps` (a set's growth, a unit's delete). `delete_blends_partial` gives the kernel's; the unit tests give steps that refuse where they choose, so the unit path is tested in a debug build.
+- **The twin** (`ryukei_testkit::partial_deletes`). The plan's twin was a slab's full round, which can't work: recognition reads no fillet within `FULL_ROUND` (0.01 rad) of a half turn, and that also rules out the plan's fallback, a slot's round floor. The twin used instead is an extruded profile:
+  - a slab 60 × 10 mm, 40 mm deep, with a disc of radius 10 mm floating 2 mm above it;
+  - two concave 4 mm bridges joining them, each rolling on the slab's top and the disc's cylinder, which never meet;
+  - a 2 mm fillet on the slab's bottom −x edge.
+
+  The disc reads as a 10 mm fillet on the bridges, so the twin deletes up to 5 mm (`MAX_SIZE`). `delete_blends` refuses it whole. The partial delete deletes the fillet and keeps both bridges, each `HealAmbiguous`, one valid solid at the profile's closed-form volume (`the_partial_deletes_twin_keeps_its_bridges`, 1.7 s in debug). A second twin, the front cap's outline chained round the bridges, was tried and dropped: its chain unit refuses `GapNotHealed` alone, and a bridge tried as a unit runs minutes in debug.
+
+- **Census VIII (23.C)** (cox-worker-4, AMD Opteron 6380, 8 threads, shared, host load 10 to 40; 2026-11-23; release, one thread a delete; times indicative only). The picks under 2 mm are design 919's: 101, 94, 108 and 101 faces. `delete_blends` refuses each, as on main: 414, 200, 236 and 273 s here (26.9, 17.1, 24.0 and 20.0 M units).
+  - **FTC 07 rd** has 14 units in 12 sets. Two sets build (16 faces each, about 1 s). The other 10 refuse whole, 9 `Uncertain` and 1 `GapNotHealed`, at 13 to 57 M units, 200 to 1,470 s each. Its two two-unit sets refuse again unit by unit.
+  - **FTC 10 rb** has 19 units in 4 sets. Three sets build (28 faces). The 66-face set refuses whole (`HealAmbiguous` at ball `d0eb13c5`). Its 12 units then each refuse alone: the 55-face chain `GapNotHealed`, and 11 one-face units, 9 `Uncertain` and 2 `GapNotHealed` at the full gap of 67 M units.
+  - **STC 10 #3044** has 33 units in 18 sets. 16 sets build (38 faces). The 66-face set (`GapNotHealed`) and a 4-face set refuse, and so do all 13 of their units.
+  - **FTC 07 AP242 #13541** has 12 sets, each one unit, and every one refuses: 8 `Uncertain` and 4 `GapNotHealed`.
+  - No unit was tried again: nothing built after a refusal. Every unit kept refuses when grown on its own, as its set does. So the shortfall is the growth on these bodies (#652's family, mostly `Uncertain` near the gap), not the partial order. Decision 7 found no local fix inside design 919, and the units are left for 23.D's verdict.
+- **The bars.** The strict timing run was skipped: the bar is unmet by hours.
+
+  | Body | Faces deleted / picked | SolidWorks | Units kept | Time here (indicative) | Units |
+  |---|---|---|---|---|---|
+  | ftc_07_rd #0 | 32 / 101 | 75 | 12 | 4564 s | 360 M |
+  | ftc_10_rb #0 | 28 / 94 | 90 | 12 | 6204 s | 446 M |
+  | stc_10_ap242-e2 #3044 | 38 / 108 | 104 | 13 | 5672 s | 503 M |
+  | ftc_07_ap242-e2 #13541 | 0 / 101 | 68 | 12 | 4259 s | 202 M |
+
+  nist_ftc_07_asme1_rd.stp #0 kept units (least face, faces, cause at):
+    01527275 (7) Uncertain f19ffa9e; 02a3b1aa (32) Uncertain f49cf26a; 03e97af8 (3) Uncertain 4c438b27; 03f34111 (7) Uncertain 91c18dc3; 0b3042ff (3) Uncertain 5d8fa7a1; 18dae4b7 (7) Uncertain 7b87a448; 329d5878 (3) Uncertain 7c08e2a4; 3df48ac1 (1) Uncertain 6d97665d; 4ba17bef (1) GapNotHealed 4ba17bef; 5b3cccfa (3) Uncertain 198b85cc; 61997ddf (1) Uncertain 00811440; 6d97665d (1) GapNotHealed 6d97665d
+  nist_ftc_10_asme1_rb.stp #0 kept units (least face, faces, cause at):
+    03b2bb89 (55) GapNotHealed 03b2bb89; 0cb649b9 (1) Uncertain 679672a6; 1243e143 (1) Uncertain 8d2adb72; 23245417 (1) GapNotHealed 23245417; 37cc83f2 (1) Uncertain ad2e0ac4; 64de7c94 (1) Uncertain a788f7e6; 842065ef (1) Uncertain 92fd47f5; 8d2adb72 (1) Uncertain 6b5f0a1d; 90463484 (1) Uncertain 9b8bbbd0; aa952183 (1) Uncertain c1c6e129; afa615ca (1) Uncertain cdfa357a; db7b779a (1) GapNotHealed db7b779a
+  nist_stc_10_asme1_ap242-e2.stp #3044 kept units (least face, faces, cause at):
+    05bec1f4 (55) Uncertain fbee4c71; 0aee4cf0 (1) Uncertain 6bd6eae9; 1290492e (1) Uncertain d5c4b387; 2b4e55a9 (1) Uncertain 8d256e01; 3924a21c (1) Uncertain 1196d7c6; 58b9211c (1) Uncertain 64ab9a11; 75e68553 (1) Uncertain 64ab9a11; 92a47293 (4) GapNotHealed 92a47293; 9dc11aeb (1) GapNotHealed 9dc11aeb; aae7ec9e (1) Uncertain 4a1836a5; c5aad21d (1) GapNotHealed c5aad21d; c9c43809 (1) Uncertain 6bd6eae9; f415980d (1) Uncertain 800dec20
+  nist_ftc_07_asme1_ap242-e2.stp #13541 kept units (least face, faces, cause at):
+    00bfdebd (32) Uncertain 784aeb19; 03889865 (16) GapNotHealed 03889865; 05bc25ef (16) GapNotHealed 05bc25ef; 091cff54 (7) Uncertain 86c6019c; 1e79ff65 (7) Uncertain 97dbbc86; 29b73843 (3) Uncertain cfb33267; 3cb9b231 (3) Uncertain 1803e40f; 49d0545c (7) Uncertain 784aeb19; 4d2ecb9e (3) Uncertain 0360cd1d; 54ee68b0 (3) Uncertain 813cab6f; 5fcc6252 (2) GapNotHealed 5fcc6252; 638ac96d (2) Uncertain d0f156e6
+
+  Every result is one valid solid: `check` clean, no intersection fault the input didn't have, a clean mesh, every kept face under its name, every cause typed (`InvalidTweak`). SolidWorks' counts are unmet on all four, and the 120 s bar too, by hours. The hand tests assert today's counts as a ratchet (the coxswain, 2026-11-23, as `KNOWN_REFUSED` does), with SolidWorks' printed beside them: `SOLIDWORKS_DELETES`, `the_refused_bodies_are_deleted_partially` and `pinned_refused_bodies_are_deleted_partially`.
+
+- **Against main** (cox-worker-4, 2026-11-23, main `908510e7` and the branch run one after the other, release):
+
+  | Check | Result |
+  |---|---|
+  | No delete changed | Met: `delete_blends` refactored to `pick` changes nothing. The committed `defeature` suite passes as on main. The pinned corpus, with a local deadline of 1,800 s and `dump_unnamed` hashes, has the same 18 bodies defeatured bit for bit and the same 10 refusals: main 3,032.5 s, branch 3,037.6 s. At the committed 120 s deadline, FTC 07 AP242 #13541 runs past it on this box on main too (about 270 s against 36 s on cox-worker-2) |
+  | Goldens | Met: ryukei, ryucad, ryusketch, ryumate and ryustep's suites are unmoved; `partial_deletes` is the one new line (`eb2f6ae1a52b7ede`) |
+  | Work figures | Met: `tests/work.rs` is main's to the unit; `the_partial_deletes_twin_is_bounded` is new (55,779 units, the same on 1 and 8 threads) |
+  | `edit_props` | Met: `seeded_edits_check_clean` is main's seed for seed (40 built, 38 refused). `seeded_partial_deletes_check_clean` is new: 10 built (0 units kept) and 7 refused of its 32 seeds |
+  | Suites | Met, on the branch, release: `--lib`; `blend_edits`, `delete_faces`, `retrim` and ryucad's `direct_edits`, each as on main; `blend_props`, `boolean_props`, `general_props`, `heal_props`, `tolerant_boolean_props`, `blends`, `booleans`, `tweaks`, `drafts`, `fuzz_regressions` and ryustep's `checks` pass; workspace clippy and fmt are clean |
+  | Fuzzing | Met: `edit`, `boolean`, `tweak` and `intersect` through `fuzz.yml`, three runs (45203213619, 45203230092 and 45203247134). The third's `intersect` job lost its runner during Build, before fuzzing, and its rerun passed. No crash, timeout or OOM |
+
+- **Mutations** (debug: `--lib tweak::blends work::`, `delete_faces`, `section::partial_deletes`, `work`'s twin). Each of these makes a test fail:
+  - M1, `units` closing every pick at once;
+  - M2, sets never grown whole;
+  - M3, the whole path's journal netted;
+  - M4 and M5, `touched` always true or always false;
+  - M6, a budget stop answering `Err`;
+  - M7, `run_keeping` as `run`;
+  - M8, a cancel kept as a unit's cause (`a_cancel_during_a_step_answers_cancelled`);
+  - M10, the net journal empty;
+  - M11, `pick` dropping the size picks;
+  - M12, a set whose faces went waiting like a one-unit set (`a_unit_whose_faces_went_with_a_neighbour_is_deleted`);
+  - M13, no one-unit-set rule (the golden);
+  - M14, a stop leaving kept units their old causes (`a_budget_spent_in_a_unit_keeps_the_rest_with_it`).
+
+  M8 and M14 survived the first tests, and each got the test named. M9, a refused step leaving a partial body, doesn't apply: a step that refuses returns no body.
+- **Testing.**
+  - `blends::partial`'s tests: `units_partition_the_closed_picks`, `where_every_set_builds_it_is_delete_blends`, `a_budget_that_runs_out_keeps_the_rest`, `a_unit_is_retried_only_after_a_neighbour_changed`, `a_cancel_answers_cancelled`, `a_refused_set_is_tried_unit_by_unit`, `a_unit_whose_faces_went_with_a_neighbour_is_deleted`, `a_cancel_during_a_step_answers_cancelled`, `a_budget_spent_in_a_unit_keeps_the_rest_with_it` and `a_budget_spent_in_a_later_set_keeps_an_earlier_sets_units_with_it` (#1047's review: a refused set's units are untried, so a budget spent on a later set keeps them with it).
+  - `work`'s `run_keeping_keeps_the_answer_past_a_budget_only`.
+  - `tests/delete_faces.rs`' `a_partial_delete_of_nothing_is_the_body`, `the_partial_deletes_twin_holds_its_bridges_and_a_fillet` and `the_partial_deletes_twin_keeps_its_bridges`.
+  - The `partial_deletes` golden section, and `tests/work.rs`' `the_partial_deletes_twin_is_bounded`, at 55,779 units.
+  - `edit_props`' `seeded_partial_deletes_check_clean`, release (full.yml): `edit_bytes::partial_case` and `run_partial`, with `edit_case`'s seeds unmoved. The `edit` fuzz target makes a partial delete when its first byte is `0xFE`.
+  - ryustep's `the_refused_bodies_lose_what_solidworks_loses` and `pinned_refused_bodies_lose_what_solidworks_loses` are ignored and run by hand (question 1245); `RYUKEI_PARTIAL_ONLY` runs one body.
+- **Limits.**
+  - The order is greedy: a unit kept might have gone in another order, and the design forbids searching orders.
+  - A unit that refuses costs about what its set's refusal did (23.B), so a body's partial delete costs roughly its refused sets plus its refused units, each up to a gap.
+  - Where a body's sets refuse alone, as FTC 07's do, no order of units helps: the refusal is the growth's (#652).
