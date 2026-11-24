@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- A ryuplm catalogue is a folder; its ryuplm.json marks it. Opening that
+     file opens the catalogue. -->
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-ryuplm-catalogue">
+    <comment>ryuplm catalogue</comment>
+    <sub-class-of type="application/json"/>
+    <glob pattern="ryuplm.json" weight="90" case-sensitive="true"/>
+  </mime-type>
+</mime-info>

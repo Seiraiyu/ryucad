@@ -619,3 +619,55 @@ fn ryuedas_release_carries_the_app() {
         assert!(root().join(file).is_file(), "{file}");
     }
 }
+
+/// ryuplm's desktop registration (design 938, Shipping): the files the
+/// installers register, each checked by full.yml's installers job.
+#[test]
+fn ryuplms_desktop_files_are_there_and_checked() {
+    for file in [
+        "packaging/linux/ryuplm.desktop",
+        "packaging/linux/ryuplm.xml",
+        "packaging/macos/ryuplm.applescript",
+    ] {
+        assert!(root().join(file).is_file(), "{file}");
+    }
+    let desktop = std::fs::read_to_string(root().join("packaging/linux/ryuplm.desktop")).unwrap();
+    assert!(desktop.contains("Exec=@EXEC@ %f"), "{desktop}");
+    assert!(
+        desktop.contains("MimeType=application/x-ryuplm-catalogue;"),
+        "{desktop}"
+    );
+    let full = std::fs::read_to_string(root().join(".github/workflows/full.yml")).unwrap();
+    for want in [
+        "desktop-file-validate packaging/linux/ryuplm.desktop",
+        "xmllint --noout packaging/linux/ryuplm.xml",
+        "osacompile -o \"$RUNNER_TEMP/ryuplm.app\" packaging/macos/ryuplm.applescript",
+    ] {
+        assert!(full.contains(want), "full.yml lacks {want}");
+    }
+}
+
+/// ryuplm's archives carry the app (design 938, Shipping; ryuplm v0.2.0
+/// first, question 1219): built for the app's target, staged beside the
+/// CLI with the fonts' licences and, on Linux and macOS, share/; its
+/// smoke frame must draw; and the installers' job finds it.
+#[test]
+fn ryuplms_release_carries_the_app() {
+    let text =
+        std::fs::read_to_string(root().join(".github/workflows/ryuplm-release.yml")).unwrap();
+    for want in [
+        "app: x86_64-unknown-linux-gnu",
+        "app: aarch64-unknown-linux-gnu",
+        "cargo build --locked --release -p ryuplm-app --target \"$APP\"",
+        "\"target/$APP/release/ryuplm-app$x\"",
+        "crates/ryu-app/fonts/LICENSES.md",
+        "packaging/linux/ryuplm.desktop packaging/linux/ryuplm.xml",
+        "packaging/macos/ryuplm.applescript",
+        "RYUPLM_REQUIRE_GPU: \"1\"",
+        "mesa-vulkan-drivers",
+        "ryuplm-app --version",
+        "sh scripts/smoke-ryuplm.sh \"$exe\" \"dist/$NAME/ryuplm-app$x\"",
+    ] {
+        assert!(text.contains(want), "ryuplm-release.yml lacks {want}");
+    }
+}
