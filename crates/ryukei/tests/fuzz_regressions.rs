@@ -943,6 +943,19 @@ fn a_tolerant_boolean_whose_face_lost_its_domain() {
     assert!(!matches!(out, TolerantRun::NoCase), "{out:?}");
 }
 
+/// #1029: the `tolerant` target's find of 2026-11-20 (run 44655303525,
+/// at 9f3d30420): an intersect with a tolerance move of 1e-5, of a
+/// three-face target and two six-face tools. The result passed `check`
+/// and the self-intersection check but meshed with face 2's domain bad
+/// (`BadDomain`). It must refuse typed or build a sound body that meshes.
+#[test]
+fn a_tolerant_intersect_whose_face_meshed_with_a_bad_domain() {
+    let out = tolerant_run(&bytes(
+        "3a35376362326432396238343735613938616463376163613262373732663935332505",
+    ));
+    assert!(!matches!(out, TolerantRun::NoCase), "{out:?}");
+}
+
 /// #909: the `tolerant` target's find of 2026-11-15 (run 43751287168,
 /// `crash-a723a281…`), a mutation of #890's input: the same
 /// torus and cone, with other tolerant directions. The result's faces 0
