@@ -206,6 +206,14 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
+    #[serde(rename = "document.move")]
+    DocumentMove {
+        document: String,
+        /// `git` or `service`.
+        storage: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     #[serde(rename = "document.remove")]
     DocumentRemove {
         document: String,
@@ -543,6 +551,7 @@ impl Request {
                 | Request::DocumentEdit { .. }
                 | Request::DocumentRenumber { .. }
                 | Request::DocumentReplace { .. }
+                | Request::DocumentMove { .. }
                 | Request::DocumentRemove { .. }
                 | Request::DocumentAttach { .. }
                 | Request::DocumentDetach { .. }

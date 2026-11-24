@@ -309,6 +309,7 @@ fn every_protocol_method_has_a_command() {
         ("number.local", &["number", "next"]),
         // Sent by the commands that fetch or upload bytes (ryuplm 3.B).
         ("document.locate", &["document", "get"]),
+        ("document.move", &["document", "move"]),
         ("settings.show", &["settings", "show"]),
         ("settings.edit", &["settings", "edit"]),
         ("check", &["check"]),

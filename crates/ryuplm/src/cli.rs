@@ -576,6 +576,15 @@ enum DocumentCmd {
         #[command(flatten)]
         expect: Expect,
     },
+    /// Move the document's bytes between Git and the service.
+    Move {
+        document: String,
+        /// git or service.
+        #[arg(long)]
+        storage: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
     /// Remove a document with no releases; --detach takes it off its items too.
     Remove {
         document: String,
@@ -932,6 +941,18 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
                 document: document.clone(),
                 file: abs_file(here, file),
                 media_type: media_type.clone(),
+                expected_revision: exp(expect),
+            },
+        ),
+        Command::Document(DocumentCmd::Move {
+            document,
+            storage,
+            expect,
+        }) => (
+            root()?,
+            Request::DocumentMove {
+                document: document.clone(),
+                storage: storage.clone(),
                 expected_revision: exp(expect),
             },
         ),

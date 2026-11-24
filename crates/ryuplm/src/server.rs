@@ -237,6 +237,11 @@ fn dispatch(
             drive,
             expected_revision.as_deref(),
         )?,
+        Request::DocumentMove {
+            document,
+            storage,
+            expected_revision,
+        } => crate::documents::move_to(session, &document, &storage, expected_revision.as_deref())?,
         Request::DocumentLocate {
             documents,
             rev,
