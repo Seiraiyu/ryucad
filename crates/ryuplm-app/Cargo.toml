@@ -1,0 +1,34 @@
+[package]
+name = "ryuplm-app"
+description = "The ryuplm desktop app: a catalogue's items, BOMs and findings, pointed at by people and agents"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+# egui on winit and wgpu, as ryucad-app's and ryueda-app's: all Rust, no C.
+eframe = { version = "0.37", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "wayland", "wgpu", "x11"] }
+egui_tiles = "0.18"
+pollster = "0.4"
+# A dialog when the window can't start (no ryuplm, another build, no
+# display), as ryueda-app's.
+rfd = "0.17"
+# The shell every window shares (design 519).
+ryu-app = { path = "../ryu-app" }
+ryu-doc = { path = "../ryu-doc" }
+ryu-session = { path = "../ryu-session" }
+# proto, client, view and the Plm marker: the daemon's requests and
+# answers. Without `cad`: the daemon the window talks to does the reading.
+ryuplm = { path = "../ryuplm", default-features = false }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+winit = { version = "0.30", default-features = false, features = ["wayland-csd-adwaita"] }
+
+[dev-dependencies]
+egui_kittest = { version = "0.37", features = ["eframe", "snapshot", "wgpu"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+# The seeded catalogues the window tests open (`ryuplm::testing`).
+ryuplm = { path = "../ryuplm", default-features = false, features = ["testing"] }
+tempfile = "3"

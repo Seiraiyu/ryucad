@@ -220,6 +220,8 @@ jobs:
           shared-key: ryuplm-core
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: "! cargo tree -p ryuplm --no-default-features -e normal | grep -E 'ryucad-doc|ryukei|ryusketch|ryueda |ryudfm'"
+      # The window builds ryuplm without cad too (design 938).
+      - run: "! cargo tree -p ryuplm-app -e normal | grep -E 'ryucad-doc|ryukei|ryusketch|ryueda |ryudfm'"
       - run: cargo test --profile ci -p ryuplm --no-default-features
 
   fuzz-check:
