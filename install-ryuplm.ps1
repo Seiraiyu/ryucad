@@ -12,6 +12,8 @@
 #                           ryuplm-v0.1.0 (default: the newest release)
 #   RYUPLM_HOME             install root (default: ~\.ryuplm); the binary goes in bin\
 #   RYUPLM_NO_MODIFY_PATH   set to 1 to leave the user PATH alone
+#   RYUPLM_NO_APP           set to 1 to install the ryuplm command only, not
+#                           the desktop app
 #   GH_TOKEN, GITHUB_TOKEN  a token for a private repository (else `gh auth token`)
 #   RYUPLM_DOWNLOAD_BASE    a directory laid out as <base>\releases (the API's
 #                           list of releases) and <base>\download\<tag>\<asset>;
@@ -155,6 +157,26 @@ function Install-Ryuplm {
         Move-Aside $exe
         Copy-Item (Join-Path $tmp "ryuplm-$version-$target\ryuplm.exe") $exe
         Clear-OldCopy $exe
+
+        # The desktop app, unless only the command is wanted, and "Open in
+        # ryuplm" on folders and folder backgrounds.
+        $appSrc = Join-Path $tmp "ryuplm-$version-$target\ryuplm-app.exe"
+        if ($env:RYUPLM_NO_APP -eq '1') {
+            Write-Host 'ryuplm-install: RYUPLM_NO_APP=1: the desktop app is not installed'
+        } elseif (Test-Path $appSrc) {
+            $app = Join-Path $bin 'ryuplm-app.exe'
+            Clear-OldCopy $app
+            Move-Aside $app
+            Copy-Item $appSrc $app
+            Clear-OldCopy $app
+            foreach ($key in @('HKCU:\Software\Classes\Directory\shell\ryuplm',
+                               'HKCU:\Software\Classes\Directory\Background\shell\ryuplm')) {
+                New-Item -Path "$key\command" -Force | Out-Null
+                Set-Item -Path $key -Value 'Open in ryuplm'
+                Set-ItemProperty -Path $key -Name 'Icon' -Value "`"$app`""
+                Set-Item -Path "$key\command" -Value "`"$app`" `"%V`""
+            }
+        }
 
         # PATH: the user's, which needs no admin rights, and this session's.
         $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
