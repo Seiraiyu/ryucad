@@ -18,12 +18,27 @@ use ryuplm::proto::Request;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 /// How many activity entries the tile lists.
 pub const ACTIVITY: usize = 100;
 /// The lifecycle states the Navigator counts.
 pub const STATES: [&str; 4] = ["in_work", "released", "modified", "obsolete"];
+
+pub const RETRY_FIRST: Duration = Duration::from_millis(250);
+pub const RETRY_MAX: Duration = Duration::from_secs(5);
+
+/// The next wait after a failed reconnect: double, at most [`RETRY_MAX`].
+pub fn next_delay(d: Duration) -> Duration {
+    (d * 2).min(RETRY_MAX)
+}
+
+struct Retry {
+    at: Instant,
+    delay: Duration,
+    trying: Option<Receiver<Result<Link>>>,
+}
 
 pub type Toasts = ryu_app::toast::Toasts<Plm>;
 
@@ -138,15 +153,13 @@ enum Why {
 
 pub struct Window {
     pub root: PathBuf,
-    #[allow(dead_code)]
     name: String,
-    #[allow(dead_code)]
     daemon: Daemon,
-    #[allow(dead_code)]
     wake: Wake,
     link: Link,
     pub lost: bool,
     pub lost_why: Option<Error>,
+    retry: Option<Retry>,
     pending: BTreeMap<u64, Why>,
     readers: Readers,
     /// How many times each reader's request was sent: the window tests
@@ -215,6 +228,7 @@ impl Window {
             link,
             lost: false,
             lost_why: None,
+            retry: None,
             pending: BTreeMap::new(),
             readers: Readers::default(),
             asks: BTreeMap::new(),
@@ -708,13 +722,22 @@ impl Window {
         }
     }
 
-    /// The link went (Task 16 reconnects).
+    /// The link went: every tile greys until it is found again.
     fn lost_link(&mut self) {
+        if self.lost {
+            return;
+        }
         self.lost = true;
         self.pending.clear();
         self.readers.reset();
         self.rows.lost();
         self.checking = false;
+        self.toasts.lost(Instant::now());
+        self.retry = Some(Retry {
+            at: Instant::now() + RETRY_FIRST,
+            delay: RETRY_FIRST,
+            trying: None,
+        });
     }
 
     fn view_due(&mut self) {
@@ -787,7 +810,12 @@ impl Window {
         self.toasts.expire(now);
         self.flash.expire(now);
         if self.lost {
-            return None;
+            self.reconnect(now);
+            return Some(
+                self.retry
+                    .as_ref()
+                    .map_or(RETRY_FIRST, |r| r.at.saturating_duration_since(now)),
+            );
         }
         if let Some(a) = self.rows.ask() {
             self.send(req("item.list", Rows::params(&a)), Why::Rows(a));
@@ -813,6 +841,54 @@ impl Window {
             .into_iter()
             .flatten()
             .min()
+    }
+
+    fn reconnect(&mut self, now: Instant) {
+        let Some(retry) = &mut self.retry else { return };
+        if let Some(rx) = &retry.trying {
+            match rx.try_recv() {
+                Err(TryRecvError::Empty) => return,
+                Ok(Ok(link)) => {
+                    self.retry = None;
+                    self.reconnected(link);
+                    return;
+                }
+                Ok(Err(e)) => self.lost_why = Some(e),
+                Err(TryRecvError::Disconnected) => {}
+            }
+            retry.trying = None;
+            retry.at = now + retry.delay;
+            retry.delay = next_delay(retry.delay);
+            return;
+        }
+        if now < retry.at {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (root, daemon, name, wake) = (
+            self.root.clone(),
+            self.daemon.clone(),
+            self.name.clone(),
+            self.wake.clone(),
+        );
+        std::thread::spawn(move || {
+            let _ = tx.send(Link::open(&root, &daemon, &name, wake.clone()));
+            wake();
+        });
+        retry.trying = Some(rx);
+    }
+
+    fn reconnected(&mut self, link: Link) {
+        self.people.reset(&link.session["participants"]);
+        self.link = link;
+        self.lost = false;
+        self.lost_why = None;
+        self.toasts.found(Instant::now());
+        self.select.due();
+        self.select.reset();
+        self.view.due();
+        self.view.reset();
+        self.ask_all();
     }
 }
 
@@ -903,5 +979,18 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn retries_back_off_to_five_seconds() {
+        let mut d = RETRY_FIRST;
+        let mut seen = Vec::new();
+        for _ in 0..8 {
+            seen.push(d);
+            d = next_delay(d);
+        }
+        assert_eq!(seen[0], Duration::from_millis(250));
+        assert_eq!(seen[1], Duration::from_millis(500));
+        assert_eq!(*seen.last().unwrap(), RETRY_MAX);
     }
 }
