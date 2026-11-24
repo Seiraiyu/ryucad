@@ -1056,6 +1056,7 @@ fn not_cached(id: &Id, d: &Document) -> Error {
     )
     .with("document", id)
     .with("blake3", &d.file.blake3)
+    .with("size", d.file.size)
     .with("storage", "service")
 }
 

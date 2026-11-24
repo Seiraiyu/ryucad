@@ -128,7 +128,8 @@ impl DocStore {
             if held.contains(h) || out.uploaded.contains(h) || out.missing.contains(h) {
                 continue;
             }
-            if !cache.has(h, *size) {
+            // Hashed before it goes up: a bad entry is dropped and missing.
+            if !cache.verify(h, *size)? {
                 out.missing.push(h.clone());
                 continue;
             }
@@ -251,7 +252,24 @@ pub fn around(
             open()?.fetch(&Cache::open()?, h, size)?;
         }
     }
-    let mut out = send(req)?;
+    // `locate`'s `cached` looks at the length only: an entry with the wrong
+    // bytes is dropped by the session, which says the bytes are missing.
+    // Fetch them once and ask again.
+    let mut out = match send(req.clone()) {
+        Err(e)
+            if e.code == Code::DocumentBytesMissing
+                && e.details["storage"] == json!("service")
+                && e.details["blake3"].is_string() =>
+        {
+            let (h, size) = (
+                e.details["blake3"].as_str().unwrap_or_default().to_owned(),
+                e.details["size"].as_u64().unwrap_or(0),
+            );
+            open()?.fetch(&Cache::open()?, &h, size)?;
+            send(req)?
+        }
+        r => r?,
+    };
     let want: Vec<(String, u64)> = out["to_upload"]
         .as_array()
         .into_iter()
@@ -403,15 +421,26 @@ pub fn sync_all(
             "name documents to sync, or pass --all",
         ));
     }
+    // Named documents are located whatever they are, so one with no Drive
+    // file is refused rather than skipped; --all takes the pinned ones.
     let v = send(Request::DocumentLocate {
         documents: documents.to_vec(),
         rev: None,
         storage: None,
-        pinned: true,
+        pinned: documents.is_empty(),
     })?;
+    let rows = v["documents"].as_array().cloned().unwrap_or_default();
+    if let Some(r) = rows.iter().find(|r| r.get("pin").is_none()) {
+        let id = r["id"].as_str().unwrap_or_default();
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!("document {id} has no Drive file to sync"),
+        )
+        .with("document", id));
+    }
     let store = open()?;
     let mut out = Vec::new();
-    for row in v["documents"].as_array().cloned().unwrap_or_default() {
+    for row in rows {
         let drive_id = row["pin"]["drive_id"]
             .as_str()
             .unwrap_or_default()
@@ -510,8 +539,20 @@ pub(crate) mod tests {
         assert_eq!(v["uploaded"], json!([h]));
         assert!(state.lock().unwrap().blobs.contains_key(&h));
         // Another machine: an empty cache, so get fetches first.
-        let _other = crate::documents::tests::cache_env();
+        let other = crate::documents::tests::cache_env();
         let out = outside.path().join("got.pdf");
+        let get = Request::DocumentGet {
+            document: "D-1".into(),
+            rev: None,
+            out: out.display().to_string(),
+        };
+        around(&mut send, &open, get, &mut warnings).unwrap();
+        assert_eq!(std::fs::read(&out).unwrap(), b"%PDF a");
+        // A cached entry of the right length with the wrong bytes: locate
+        // says cached, the session drops it, and the CLI fetches once more.
+        let entry = crate::store::Cache::at(other.path()).path(&h);
+        std::fs::write(&entry, b"%PDF A").unwrap();
+        std::fs::remove_file(&out).unwrap();
         let get = Request::DocumentGet {
             document: "D-1".into(),
             rev: None,
@@ -665,6 +706,34 @@ pub(crate) mod tests {
         assert_eq!(dry["documents"][0]["written"], false);
         let v = sync_all(&mut send, &open, &[], true, false, &mut warnings).unwrap();
         assert_eq!(v["documents"][0]["document"]["pin"]["revision"], "r2");
+        // A named document with no Drive file is refused, never skipped.
+        let outside = tempfile::tempdir().unwrap();
+        let src = outside.path().join("plain.pdf");
+        std::fs::write(&src, b"plain").unwrap();
+        send(Request::DocumentAdd {
+            file: Some(src.display().to_string()),
+            number: Some("D-2".into()),
+            next: None,
+            fields: crate::documents::New {
+                title: Some("Plain".into()),
+                ..Default::default()
+            },
+            storage: None,
+            drive: None,
+            expected_revision: None,
+        })
+        .unwrap();
+        let e = sync_all(
+            &mut send,
+            &open,
+            &["D-2".into()],
+            false,
+            false,
+            &mut warnings,
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam);
+        assert!(e.message.contains("no Drive file"), "{}", e.message);
         state.lock().unwrap().connected = false;
         let e = sync_all(&mut send, &open, &[], true, false, &mut warnings).unwrap_err();
         assert_eq!(e.code, Code::DriveNotConnected);

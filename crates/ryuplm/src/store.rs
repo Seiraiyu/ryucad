@@ -114,10 +114,35 @@ impl Cache {
             .map_err(|e| Error::io(tmp.path(), &e))?;
         let hex = h.finalize().to_hex().to_string();
         let at = self.path(&hex);
-        if !self.has(&hex, size) {
-            tmp.persist(&at).map_err(|e| Error::io(&at, &e.error))?;
-        }
+        // Always over whatever is there: an entry of the right length with
+        // the wrong bytes is replaced by the bytes just hashed.
+        tmp.persist(&at).map_err(|e| Error::io(&at, &e.error))?;
         Ok((hex, size))
+    }
+
+    /// Whether the entry of `blake3` is there and is `size` bytes hashing
+    /// to it, read in pieces, never whole; a bad entry is removed.
+    pub fn verify(&self, blake3: &str, size: u64) -> Result<bool> {
+        if !self.has(blake3, size) {
+            return Ok(false);
+        }
+        let at = self.path(blake3);
+        let mut f = std::fs::File::open(&at).map_err(|e| Error::io(&at, &e))?;
+        let mut h = blake3::Hasher::new();
+        let mut buf = vec![0u8; 1 << 20];
+        loop {
+            let n = f.read(&mut buf).map_err(|e| Error::io(&at, &e))?;
+            if n == 0 {
+                break;
+            }
+            h.update(&buf[..n]);
+        }
+        if h.finalize().to_hex().as_str() != blake3 {
+            drop(f);
+            let _ = std::fs::remove_file(&at);
+            return Ok(false);
+        }
+        Ok(true)
     }
 
     /// The bytes of `blake3`, `None` when they aren't there or aren't
@@ -197,6 +222,15 @@ mod tests {
         assert!(c.get(&h, 8).unwrap().is_none());
         assert!(!c.path(&h).exists());
         assert!(c.get(&"0".repeat(64), 1).unwrap().is_none());
+        // An entry of the right length with the wrong bytes: putting the
+        // bytes again replaces it, and verify drops it.
+        std::fs::write(c.path(&h), b"%PDF onE").unwrap();
+        assert!(c.has(&h, 8), "has looks at the length only");
+        assert!(!c.verify(&h, 8).unwrap());
+        assert!(!c.path(&h).exists());
+        std::fs::write(c.path(&h), b"%PDF onE").unwrap();
+        assert_eq!(c.put_file(&src).unwrap().0, h);
+        assert!(c.verify(&h, 8).unwrap(), "the good bytes replaced the bad");
         // Nothing but finished entries is ever there.
         let names: Vec<String> = std::fs::read_dir(d.path().join("documents"))
             .unwrap()
