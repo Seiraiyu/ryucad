@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::fmt;
 
+pub mod details;
+
 /// A stable error code. Agents branch on these, so a code is never renamed
 /// or reused; new failures get new codes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1742,6 +1744,12 @@ impl Code {
             _ => 1,
         }
     }
+
+    /// The keys this code's details declare, beside the common ones
+    /// ([`details::COMMON`]); `None` while it is undeclared (design 698).
+    pub fn keys(self) -> Option<&'static [details::Key]> {
+        details::keys(self)
+    }
 }
 
 /// An error with a stable code, a message for people, and structured
@@ -1763,12 +1771,20 @@ impl Error {
         }
     }
 
-    /// Adds `key: value` to the details object.
+    /// Adds `key: value` to the details object. When `key` is an older
+    /// spelling this code declares as an alias (`ref` of `reference`), the
+    /// declared key gets the same value too, unless it is already there.
     pub fn with(mut self, key: &str, value: impl Serialize) -> Self {
         if !self.details.is_object() {
             self.details = json!({});
         }
-        self.details[key] = serde_json::to_value(value).unwrap_or(Value::Null);
+        let value = serde_json::to_value(value).unwrap_or(Value::Null);
+        if let Some(of) = details::alias_of(self.code, key)
+            && self.details.get(of).is_none()
+        {
+            self.details[of] = value.clone();
+        }
+        self.details[key] = value;
         self
     }
 
@@ -2533,5 +2549,27 @@ mod tests {
         );
         let bare = serde_json::to_value(Error::new(Code::Internal, "x")).unwrap();
         assert_eq!(bare, json!({"code": "internal", "message": "x"}));
+    }
+
+    /// An older spelling brings its declared key with the same value
+    /// (design 698, question 1015); the call sites don't change.
+    #[test]
+    fn an_alias_brings_its_declared_key() {
+        let e = Error::new(Code::InvalidParam, "x").with("field", "radius");
+        assert_eq!(e.details, json!({"field": "radius", "param": "radius"}));
+        let e = Error::new(Code::NotFound, "x").with("ref", "p/f1");
+        assert_eq!(e.details, json!({"ref": "p/f1", "reference": "p/f1"}));
+        let e = Error::new(Code::Internal, "x").with("file", "a.step");
+        assert_eq!(e.details, json!({"file": "a.step", "path": "a.step"}));
+        // A declared key already there is kept.
+        let e = Error::new(Code::InvalidParam, "x")
+            .with("param", "a")
+            .with("parameter", "b");
+        assert_eq!(e.details, json!({"param": "a", "parameter": "b"}));
+        // An undeclared code gets only what it was given.
+        let e = Error::new(Code::Conflict, "x").with("expected", "r1");
+        assert_eq!(e.details, json!({"expected": "r1"}));
+        assert!(Code::InvalidParam.keys().is_some());
+        assert!(Code::Conflict.keys().is_none());
     }
 }
