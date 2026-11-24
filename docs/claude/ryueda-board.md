@@ -193,7 +193,7 @@ The design is document 924 in the Coxswain planning project `ryucad-ryukei`; the
   - `tests/cli.rs`: a bottom ground plane on the breakout, DRC clean, shown, edited, refused for an unknown net, a missing layer and no boundary, deleted.
   - `board_gen::Spec` gained `pours`, empty on every board it made before. `board_props.rs`, 16 seeded boards of four or six layers with an `in1` plane, a `bottom` pour over it in priority and a contour on `top`: no finding but opens, starved thermals and empty fills; every region exactly clear of other nets' copper; one thread and eight. Pours round-trip byte for byte.
   - Goldens: `fill.0` to `fill.7`; `board.pour.*` (show, DRC, the bottom copper render, every exported file) on one thread and eight.
-  - Fuzz: `copper` also fills the first operand less the second with a thermal pad; `board` draws up to two pours. FUZZ_COUNTS
+  - Fuzz: `copper` also fills the first operand less the second with a thermal pad; `board` draws up to two pours. On GitHub's runner, 10 minutes each, no finding: `copper` 23,475 runs, `board` 52,285 runs (https://github.com/Seiraiyu/ryucad/actions/runs/45372832436).
 - **Bars** (cox-worker-2, Ryzen 7 9700X, shared, load 6 to 9, `RYUEDA_BARS=1`, one test at a time, four threads):
   - The board bars hold: the breakout's track write 7.1 ms (50 ms); the generated board checked cold in 90 ms (1 s); a write 198 ms (250 ms).
   - **The plane bar misses.** A whole `top` plane on the bars' board (2,000 pads, 1,998 tracks) fills in 11.6 s, not design 924's 500 ms (#1067).
