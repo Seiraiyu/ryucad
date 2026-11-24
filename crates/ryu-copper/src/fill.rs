@@ -5,10 +5,8 @@
 //! Exact integer booleans throughout (`poly`); the same polygons on
 //! every machine and thread count.
 
-#[allow(unused_imports)]
 use crate::measure::{self, Body, Verdict};
 use crate::poly::{self, FillRule, FlattenOptions, Polygons, Rings};
-#[allow(unused_imports)]
 use ryu_board::geom::{Mdeg, Nm, Place, Point};
 
 /// The bound fills are flattened at.
@@ -123,10 +121,41 @@ pub fn fill(ask: &Ask) -> Fill {
     } else {
         opened
     };
+    let mut out = Vec::new();
+    let mut uncertain = Vec::new();
+    let mut removed = 0;
+    for p in &joined.polygons {
+        let one = Polygons {
+            polygons: vec![p.clone()],
+            bound: joined.bound,
+        };
+        let body = one.body();
+        let v =
+            ask.own
+                .iter()
+                .map(|o| measure::touches(o, &body))
+                .fold(Verdict::No, |acc, v| match (acc, v) {
+                    (Verdict::Yes, _) | (_, Verdict::Yes) => Verdict::Yes,
+                    (Verdict::Uncertain, _) | (_, Verdict::Uncertain) => Verdict::Uncertain,
+                    _ => Verdict::No,
+                });
+        match v {
+            Verdict::Yes => out.push(p.clone()),
+            Verdict::Uncertain => {
+                uncertain.push(out.len());
+                out.push(p.clone());
+            }
+            Verdict::No if ask.keep_islands => out.push(p.clone()),
+            Verdict::No => removed += 1,
+        }
+    }
     Fill {
-        polygons: joined,
-        islands_removed: 0,
-        uncertain: Vec::new(),
+        polygons: Polygons {
+            polygons: out,
+            bound: joined.bound,
+        },
+        islands_removed: removed,
+        uncertain,
         spokes: counts,
     }
 }
@@ -229,5 +258,29 @@ pub(crate) mod tests {
         a.obstacles.push(other.clone());
         a.spoke_obstacles.push(other);
         assert_eq!(fill(&a).spokes, [3]);
+    }
+    #[test]
+    fn islands_without_own_copper_go_unless_kept() {
+        let area = union_all(&[rect(0, 0, 4 * MM, 4 * MM), rect(6 * MM, 0, 10 * MM, 4 * MM)]);
+        let mut a = ask(area);
+        a.keep_islands = false;
+        // A via of the pour's net on the left square only.
+        a.own.push(Body::of_shape(
+            &ryu_board::shape::Shape::regions(
+                ryu_board::model::Polarity::Positive,
+                [ryu_board::geom::Region::solid(
+                    ryu_board::shape::circle(Point::new(2 * MM, 2 * MM), MM / 4).unwrap(),
+                )],
+            ),
+            &crate::measure::BodyOptions::default(),
+        ));
+        let f = fill(&a);
+        assert_eq!((f.polygons.polygons.len(), f.islands_removed), (1, 1));
+        assert!(f.polygons.contains(Point::new(MM, MM)).is_yes());
+        a.keep_islands = true;
+        assert_eq!(fill(&a).polygons.polygons.len(), 2);
+        a.own.clear();
+        a.keep_islands = false;
+        assert!(fill(&a).polygons.is_empty(), "no own copper: nothing kept");
     }
 }
