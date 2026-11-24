@@ -181,7 +181,7 @@ fn read_source(path: &Path) -> Result<(String, Vec<u8>)> {
         return Err(Error::new(
             Code::DocumentTooLarge,
             format!(
-                "{} is {} bytes, over the 100 MiB GitHub takes in a file",
+                "{} is {} bytes, over the 100 MiB GitHub takes in a file: add it with --storage service",
                 path.display(),
                 meta.len()
             ),
@@ -256,40 +256,112 @@ fn set_type(d: &mut Document, t: Option<String>) -> Result<()> {
     Ok(())
 }
 
+/// The storage `asked` names, or the catalogue's default.
+fn storage_for(session: &Session, asked: Option<&str>) -> Result<Storage> {
+    match asked {
+        None => Ok(session.catalogue().manifest.document_storage),
+        Some(s) => Storage::parse(s).ok_or_else(|| {
+            Error::new(Code::InvalidParam, "storage is git or service").with("storage", s)
+        }),
+    }
+}
+
+/// The source file `path` put into the local cache: its safe name, the
+/// record's `file`, and nothing read into memory.
+fn cached_source(path: &Path, media: Option<&str>) -> Result<File> {
+    let meta = std::fs::metadata(path).map_err(|e| Error::io(path, &e))?;
+    if !meta.is_file() {
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!("{} isn't a file", path.display()),
+        )
+        .with("file", path));
+    }
+    let (blake3, size) = crate::store::Cache::open()?.put_file(path)?;
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut f = File::of(&name, b"", media)?;
+    f.size = size;
+    f.blake3 = blake3;
+    Ok(f)
+}
+
+/// What a write leaves to upload.
+fn to_upload(id: &Id, d: &Document) -> Value {
+    json!([{"document": id, "blake3": d.file.blake3, "size": d.file.size}])
+}
+
+/// The record's `file` for a Drive pin (Task 14).
+fn pinned_file(
+    _pin: &crate::docstore::DrivePin,
+    _storage: Storage,
+) -> Result<(File, Option<Arc<[u8]>>)> {
+    Err(Error::new(
+        Code::Usage,
+        "Drive pins come with document sync",
+    ))
+}
+
 pub fn add(
     session: &mut Session,
-    file: &Path,
+    file: Option<&Path>,
     number: Option<String>,
     next: Option<String>,
     fields: New,
+    storage: Option<&str>,
+    drive: Option<crate::docstore::DrivePin>,
     expected: Option<&str>,
 ) -> Result<Value> {
     check_expected("the catalogue", &session.revision(), expected)?;
-    let title = fields
-        .title
-        .clone()
-        .ok_or_else(|| Error::new(Code::Usage, "a document needs --title"))?;
+    let storage = storage_for(session, storage)?;
+    let title = match (&fields.title, &drive) {
+        (Some(t), _) => t.clone(),
+        (None, Some(p)) => p.name.clone(),
+        (None, None) => return Err(Error::new(Code::Usage, "a document needs --title")),
+    };
     let number = number_for(session, number, next)?;
-    let (name, bytes) = read_source(file)?;
-    let mut d = Document::new(
-        &number,
-        &title,
-        File::of(&name, &bytes, fields.media_type.as_deref())?,
-    );
+    let (file_rec, git_bytes): (File, Option<Arc<[u8]>>) = match (file, &drive, storage) {
+        (Some(p), None, Storage::Git) => {
+            let (name, bytes) = read_source(p)?;
+            (
+                File::of(&name, &bytes, fields.media_type.as_deref())?,
+                Some(Arc::from(bytes)),
+            )
+        }
+        (Some(p), None, Storage::Service) => {
+            (cached_source(p, fields.media_type.as_deref())?, None)
+        }
+        (None, Some(pin), _) => pinned_file(pin, storage)?,
+        _ => return Err(Error::new(Code::Usage, "give a file or --drive, not both")),
+    };
+    let mut d = Document::new(&number, &title, file_rec);
+    d.storage = storage;
+    d.pin = drive.as_ref().map(|p| crate::document::Pin {
+        drive_id: p.drive_id.clone(),
+        revision: p.revision.clone(),
+    });
     d.description = fields.description;
     set_type(&mut d, fields.doc_type)?;
-    // One ID space with items (Decision 1).
     let id = crate::ids::random(|s| {
         Id::parse(s, "document").is_ok_and(|i| session.catalogue().holds(&i))
     })?;
     let text = text_of(&id, &d)?;
+    let bytes = git_bytes
+        .map(|b| vec![(bytes_path(&id, &d.file.name), b)])
+        .unwrap_or_default();
     commit_with(
         session,
         &format!("adding document {number}"),
         Writes(vec![(document_path(&id), Some(text))]),
-        vec![(bytes_path(&id, &d.file.name), Arc::from(bytes))],
+        bytes,
     )?;
-    Ok(shown(session, &id))
+    let mut v = shown(session, &id);
+    if storage == Storage::Service {
+        v["to_upload"] = to_upload(&id, &d);
+    }
+    Ok(v)
 }
 
 pub fn show(session: &mut Session, document: &str) -> Result<Value> {
@@ -526,9 +598,9 @@ fn files_at(
     id: &Id,
     rev: &str,
 ) -> Result<std::collections::BTreeMap<String, Vec<u8>>> {
-    let (repo, releases) = crate::release::history(session)?;
+    let (_, releases) = crate::release::history(session)?;
     let commit = match rev.strip_prefix("label:") {
-        None => rev.to_owned(),
+        None => return files_at_rev(session, rev),
         Some(label) => {
             let config =
                 ryupdm::config::Config::read_in(&session.snapshot(), crate::catalogue::NAME)?;
@@ -546,7 +618,16 @@ fn files_at(
                 })?
         }
     };
-    ryupdm::history::files_for::<crate::Plm>(repo.gix(), &commit, repo.prefix())
+    files_at_rev(session, &commit)
+}
+
+/// The files of the catalogue at Git revision `rev`.
+fn files_at_rev(
+    session: &mut Session,
+    rev: &str,
+) -> Result<std::collections::BTreeMap<String, Vec<u8>>> {
+    let (repo, _) = crate::release::history(session)?;
+    ryupdm::history::files_for::<crate::Plm>(repo.gix(), rev, repo.prefix())
 }
 
 pub fn get(session: &mut Session, document: &str, rev: Option<&str>, out: &Path) -> Result<Value> {
@@ -881,6 +962,55 @@ pub fn elsewhere(cat: &Catalogue, others: &[std::path::PathBuf]) -> Vec<Fault> {
     out
 }
 
+/// `document.locate`: for each document named (every one when none are),
+/// at `rev` or in the working files, `{id, number, storage, file, pin?,
+/// cached?}`; `cached` (service storage only) is whether this machine's
+/// cache holds the bytes.
+pub fn locate(
+    session: &mut Session,
+    documents: &[String],
+    rev: Option<&str>,
+    storage: Option<&str>,
+    pinned: bool,
+) -> Result<Value> {
+    let cat = match rev {
+        None => session.catalogue().clone(),
+        Some(r) => Catalogue::load(&files_at_rev(session, r)?)?,
+    };
+    let ids: Vec<Id> = if documents.is_empty() {
+        cat.documents.keys().cloned().collect()
+    } else {
+        documents
+            .iter()
+            .map(|s| cat.find_document(s))
+            .collect::<Result<_>>()?
+    };
+    let cache = crate::store::Cache::open().ok();
+    let rows: Vec<Value> = ids
+        .iter()
+        .filter_map(|id| {
+            let d = &cat.documents[id];
+            if storage.is_some_and(|s| s != d.storage.as_str()) || (pinned && d.pin.is_none()) {
+                return None;
+            }
+            let mut v = json!({"id": id, "number": d.number, "storage": d.storage.as_str(),
+                               "file": d.to_json()["file"]});
+            if let Some(p) = &d.pin {
+                v["pin"] = json!({"drive_id": p.drive_id, "revision": p.revision});
+            }
+            if d.storage == Storage::Service {
+                v["cached"] = json!(
+                    cache
+                        .as_ref()
+                        .is_some_and(|c| c.has(&d.file.blake3, d.file.size))
+                );
+            }
+            Some(v)
+        })
+        .collect();
+    Ok(json!({"documents": rows}))
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -1031,7 +1161,7 @@ pub(crate) mod tests {
         let made = ask(
             &root,
             Request::DocumentAdd {
-                file: file.clone(),
+                file: Some(file.clone()),
                 number: Some("DOC-1".into()),
                 next: None,
                 fields: New {
@@ -1039,6 +1169,8 @@ pub(crate) mod tests {
                     doc_type: Some("specification".into()),
                     ..Default::default()
                 },
+                storage: None,
+                drive: None,
                 expected_revision: None,
             },
         )
@@ -1185,13 +1317,15 @@ pub(crate) mod tests {
         let e = ask(
             &root,
             Request::DocumentAdd {
-                file: big.display().to_string(),
+                file: Some(big.display().to_string()),
                 number: Some("D-1".into()),
                 next: None,
                 fields: New {
                     title: Some("Big".into()),
                     ..Default::default()
                 },
+                storage: None,
+                drive: None,
                 expected_revision: None,
             },
         )
@@ -1201,7 +1335,7 @@ pub(crate) mod tests {
         let e = ask(
             &root,
             Request::DocumentAdd {
-                file: small,
+                file: Some(small),
                 number: Some("D-1".into()),
                 next: None,
                 fields: New {
@@ -1209,6 +1343,8 @@ pub(crate) mod tests {
                     media_type: Some("PDF".into()),
                     ..Default::default()
                 },
+                storage: None,
+                drive: None,
                 expected_revision: None,
             },
         )
@@ -1229,13 +1365,15 @@ pub(crate) mod tests {
         let made = ask(
             &a,
             Request::DocumentAdd {
-                file,
+                file: Some(file),
                 number: Some("DOC-1".into()),
                 next: None,
                 fields: New {
                     title: Some("Spec".into()),
                     ..Default::default()
                 },
+                storage: None,
+                drive: None,
                 expected_revision: None,
             },
         )
@@ -1339,13 +1477,15 @@ pub(crate) mod tests {
         let doc = ask(
             &a,
             Request::DocumentAdd {
-                file,
+                file: Some(file),
                 number: Some("DOC-1".into()),
                 next: None,
                 fields: New {
                     title: Some("Spec".into()),
                     ..Default::default()
                 },
+                storage: None,
+                drive: None,
                 expected_revision: None,
             },
         )
@@ -1414,13 +1554,15 @@ pub(crate) mod tests {
         let made = ask(
             &root,
             Request::DocumentAdd {
-                file,
+                file: Some(file),
                 number: Some("D-1".into()),
                 next: None,
                 fields: New {
                     title: Some("A".into()),
                     ..Default::default()
                 },
+                storage: None,
+                drive: None,
                 expected_revision: None,
             },
         )
@@ -1446,5 +1588,179 @@ pub(crate) mod tests {
             (e.code, e.details["storage"].clone()),
             (Code::InvalidParam, json!("service"))
         );
+    }
+
+    #[test]
+    fn locate_says_where_each_documents_bytes_are() {
+        let (_d, root) = catalogue();
+        let outside = tempfile::tempdir().unwrap();
+        let file = source(outside.path(), "a.pdf", b"%PDF a");
+        ask(
+            &root,
+            Request::DocumentAdd {
+                file: Some(file),
+                number: Some("D-1".into()),
+                next: None,
+                fields: New {
+                    title: Some("A".into()),
+                    ..Default::default()
+                },
+                storage: None,
+                drive: None,
+                expected_revision: None,
+            },
+        )
+        .unwrap();
+        let v = ask(
+            &root,
+            Request::DocumentLocate {
+                documents: vec![],
+                rev: None,
+                storage: None,
+                pinned: false,
+            },
+        )
+        .unwrap();
+        let row = &v["documents"][0];
+        assert_eq!(
+            (row["number"].as_str(), row["storage"].as_str()),
+            (Some("D-1"), Some("git"))
+        );
+        assert_eq!(row["file"]["size"], 6);
+        assert!(row.get("cached").is_none(), "only service-stored rows say");
+        let none = ask(
+            &root,
+            Request::DocumentLocate {
+                documents: vec![],
+                rev: None,
+                storage: Some("service".into()),
+                pinned: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(none["documents"], json!([]));
+    }
+
+    /// Points ryuplm's cache at a fresh folder for this test's process:
+    /// the session reads it through `store::dir`. Tests in one process
+    /// share the variable, so each test sets it before every call that
+    /// reads the cache and the folders never collide (they are tempdirs).
+    pub(crate) fn cache_env() -> tempfile::TempDir {
+        let d = tempfile::tempdir().unwrap();
+        // SAFETY: tests that touch RYUPLM_CACHE_DIR hold CACHE_LOCK.
+        unsafe { std::env::set_var(crate::store::DIR_VAR, d.path()) };
+        d
+    }
+
+    pub(crate) static CACHE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn a_service_stored_document_is_a_record_and_a_cache_entry() {
+        let _l = CACHE_LOCK.lock().unwrap();
+        let cache = cache_env();
+        let (_d, root) = catalogue();
+        let outside = tempfile::tempdir().unwrap();
+        let file = source(outside.path(), "Big.pdf", b"%PDF big");
+        let v = ask(
+            &root,
+            Request::DocumentAdd {
+                file: Some(file),
+                number: Some("D-1".into()),
+                next: None,
+                fields: New {
+                    title: Some("Big".into()),
+                    ..Default::default()
+                },
+                storage: Some("service".into()),
+                drive: None,
+                expected_revision: None,
+            },
+        )
+        .unwrap();
+        let h = blake3::hash(b"%PDF big").to_hex().to_string();
+        assert_eq!(v["document"]["storage"], "service");
+        assert_eq!(v["bytes"], json!(null), "nothing in Git");
+        assert_eq!(
+            v["to_upload"],
+            json!([{"document": v["document"]["id"], "blake3": h, "size": 8}])
+        );
+        assert!(crate::store::Cache::at(cache.path()).has(&h, 8));
+        assert!(
+            !root
+                .join(format!(
+                    "documents/{}",
+                    &v["document"]["id"].as_str().unwrap()[..2]
+                ))
+                .join(v["document"]["id"].as_str().unwrap())
+                .exists()
+        );
+        let c = ask(
+            &root,
+            Request::Check {
+                within: vec![],
+                against: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(c["errors"], 0, "{c}");
+        // The manifest's default applies when --storage isn't given.
+        ask(
+            &root,
+            Request::SettingsEdit {
+                change: crate::settings::Change {
+                    document_storage: Some("service".into()),
+                    ..Default::default()
+                },
+                expected_revision: None,
+            },
+        )
+        .unwrap();
+        let file = source(outside.path(), "b.txt", b"b");
+        let v = ask(
+            &root,
+            Request::DocumentAdd {
+                file: Some(file),
+                number: Some("D-2".into()),
+                next: None,
+                fields: New {
+                    title: Some("B".into()),
+                    ..Default::default()
+                },
+                storage: None,
+                drive: None,
+                expected_revision: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(v["document"]["storage"], "service");
+    }
+
+    #[test]
+    fn a_git_file_over_the_limit_names_service_storage() {
+        let (_d, root) = catalogue();
+        let outside = tempfile::tempdir().unwrap();
+        let big = outside.path().join("big.bin");
+        std::fs::File::create(&big)
+            .unwrap()
+            .set_len(TOO_LARGE + 1)
+            .unwrap();
+        let e = ask(
+            &root,
+            Request::DocumentAdd {
+                file: Some(big.display().to_string()),
+                number: Some("D-1".into()),
+                next: None,
+                fields: New {
+                    title: Some("Big".into()),
+                    ..Default::default()
+                },
+                storage: None,
+                drive: None,
+                expected_revision: None,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::DocumentTooLarge);
+        assert!(e.message.contains("--storage service"), "{}", e.message);
     }
 }

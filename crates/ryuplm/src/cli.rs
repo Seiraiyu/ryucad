@@ -864,10 +864,12 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
         }) => (
             root()?,
             Request::DocumentAdd {
-                file: abs_file(here, file),
+                file: Some(abs_file(here, file)),
                 number: number.clone(),
                 next: next.clone(),
                 fields: fields.fields(media_type.clone()),
+                storage: None,
+                drive: None,
                 expected_revision: exp(expect),
             },
         ),

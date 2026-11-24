@@ -307,6 +307,8 @@ fn every_protocol_method_has_a_command() {
         ("import.list", &["import", "list"]),
         // Read by the CLI before it asks the ledger (ryuplm 2.B).
         ("number.local", &["number", "next"]),
+        // Sent by the commands that fetch or upload bytes (ryuplm 3.B).
+        ("document.locate", &["document", "get"]),
         ("settings.show", &["settings", "show"]),
         ("settings.edit", &["settings", "edit"]),
         ("check", &["check"]),
