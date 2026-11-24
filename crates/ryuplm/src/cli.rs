@@ -641,6 +641,9 @@ enum SettingsCmd {
         /// With --scheme: what it numbers, item (the default) or document.
         #[arg(long)]
         scheme_kind: Option<String>,
+        /// New documents' storage: git (the default) or service.
+        #[arg(long)]
+        document_storage: Option<String>,
         #[arg(long)]
         next_template: Option<String>,
         #[arg(long)]
@@ -1222,6 +1225,7 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
             pattern,
             scheme_class,
             scheme_kind,
+            document_storage,
             next_template,
             property,
             declaration,
@@ -1243,6 +1247,7 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
                         pattern: pattern.clone(),
                         scheme_class: scheme_class.clone(),
                         scheme_kind: scheme_kind.clone(),
+                        document_storage: document_storage.clone(),
                         next_template: next_template.clone(),
                         property: property.clone(),
                         declaration,
