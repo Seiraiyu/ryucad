@@ -177,6 +177,8 @@ pub struct ListAsk {
     pub state: Option<String>,
     pub make_buy: Option<String>,
     pub faults: Option<String>,
+    /// An import mapping's name: items it made or updated.
+    pub source: Option<String>,
     pub sort: Option<String>,
     pub offset: Option<usize>,
     pub limit: Option<usize>,
@@ -243,6 +245,7 @@ pub fn list(session: &mut Session, ask: &ListAsk) -> Result<Value> {
                 .as_ref()
                 .is_none_or(|m| r.make_buy.as_ref() == Some(m))
             && faults.is_none_or(|errors| if errors { r.errors > 0 } else { r.warnings > 0 })
+            && ask.source.as_ref().is_none_or(|s| r.sources.contains(s))
             && needle.as_ref().is_none_or(|t| r.hay.contains(t.as_str()));
         if !keep {
             continue;
@@ -603,6 +606,7 @@ mod tests {
                 state: None,
                 make_buy: None,
                 faults: None,
+                source: None,
                 sort: None,
                 offset: None,
                 limit: None,
@@ -749,5 +753,46 @@ mod tests {
         );
         let both = edit(json!({"ledger": true, "class": "x"})).unwrap_err();
         assert_eq!(both.code, crate::error::Code::Usage);
+    }
+
+    #[test]
+    fn a_list_by_the_import_that_made_its_items() {
+        let (_d, root) = catalogue();
+        let mk = |n: &str| {
+            ask(
+                &root,
+                Request::ItemCreate {
+                    fields: Default::default(),
+                    number: Some(n.into()),
+                    next: None,
+                    expected_revision: None,
+                },
+            )
+            .unwrap()["item"]["id"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        let a = mk("A-1");
+        mk("B-1");
+        // Provenance as an import writes it (0.C): `source.<mapping>`.
+        let path = root.join(crate::ids::item_path(
+            &crate::id::Id::parse(&a, "item").unwrap(),
+        ));
+        let mut v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        v["source"] = json!({"erp": {"key": "42", "digest": "ab"}});
+        std::fs::write(&path, crate::canonical::to_string(&v)).unwrap();
+        let by = |s: &str| {
+            ask(
+                &root,
+                serde_json::from_value(json!({"method": "item.list", "params": {"source": s}}))
+                    .unwrap(),
+            )
+            .unwrap()
+        };
+        assert_eq!(by("erp")["total"], 1);
+        assert_eq!(by("erp")["items"][0]["number"], "A-1");
+        assert_eq!(by("plm")["total"], 0);
     }
 }

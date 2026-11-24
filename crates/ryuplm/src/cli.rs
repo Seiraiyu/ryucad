@@ -445,6 +445,9 @@ enum ItemCmd {
         /// errors or warnings: items with at least one.
         #[arg(long)]
         faults: Option<String>,
+        /// An import mapping's name: items it made or updated.
+        #[arg(long)]
+        source: Option<String>,
         /// id (the default), number, name or class.
         #[arg(long)]
         sort: Option<String>,
@@ -1012,6 +1015,7 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
             state,
             make_buy,
             faults,
+            source,
             sort,
             offset,
             limit,
@@ -1024,6 +1028,7 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
                 state: state.clone(),
                 make_buy: make_buy.clone(),
                 faults: faults.clone(),
+                source: source.clone(),
                 sort: sort.clone(),
                 offset: *offset,
                 limit: *limit,

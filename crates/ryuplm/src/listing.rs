@@ -28,6 +28,8 @@ pub struct Row {
     /// The catalogue's own files' faults naming this item.
     pub errors: u32,
     pub warnings: u32,
+    /// The import mappings its provenance names (`item.source`'s keys).
+    pub sources: Vec<String>,
     /// What `--text` searches, lower-cased: the number, previous numbers,
     /// name and description, each on its own line.
     pub hay: String,
@@ -158,6 +160,7 @@ fn build(session: &mut Session, key: Key, built: u64) -> Listing {
                     .map(str::to_owned),
                 errors,
                 warnings,
+                sources: i.source.keys().cloned().collect(),
                 hay,
             }
         })

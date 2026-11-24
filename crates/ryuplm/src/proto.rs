@@ -88,6 +88,9 @@ pub enum Request {
         /// `errors` or `warnings`: items with at least one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         faults: Option<String>,
+        /// An import mapping's name: items whose provenance names it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<String>,
         /// `id` (the default), `number`, `name` or `class`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sort: Option<String>,
