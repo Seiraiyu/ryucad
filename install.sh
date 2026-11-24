@@ -113,35 +113,26 @@ register() {
             fi
             ;;
         Darwin)
-            # A launcher compiled here, so it knows where the binaries are.
-            if command -v osacompile >/dev/null 2>&1; then
-                mkdir -p "$HOME/Applications"
-                sed "s|@BIN@|$1|g" "$2/ryucad.applescript" >"$tmp/ryucad.applescript"
-                rm -rf "$HOME/Applications/ryucad.app"
-                app="$HOME/Applications/ryucad.app"
-                # osacompile signs what it makes and says so on stderr
-                # ("replacing existing signature"); only real faults show.
-                status=0
-                osacompile -o "$app" "$tmp/ryucad.applescript" 2>"$tmp/osacompile.err" || status=$?
-                grep -v 'replacing existing signature' "$tmp/osacompile.err" >&2 || true
-                [ "$status" -eq 0 ] || die "could not compile the launcher $app"
-                # Offered by Finder (Open With, not the default) for
-                # folders and JSON files: ryucad.json is plain JSON, and
-                # no type can name one file.
-                plutil -replace CFBundleIdentifier -string com.seiraiyu.ryucad "$app/Contents/Info.plist"
-                plutil -replace CFBundleDocumentTypes -json '[
-                    {"CFBundleTypeName": "Folder", "CFBundleTypeRole": "Viewer",
-                     "LSHandlerRank": "Alternate", "LSItemContentTypes": ["public.folder"]},
-                    {"CFBundleTypeName": "ryucad project", "CFBundleTypeRole": "Viewer",
-                     "LSHandlerRank": "Alternate", "LSItemContentTypes": ["public.json"]}
-                ]' "$app/Contents/Info.plist"
-                # Signed again, since its Info.plist changed, and told to
-                # Launch Services.
-                codesign --force --sign - "$app" >/dev/null 2>&1 || true
-                lsregister=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
-                if [ -x "$lsregister" ]; then
-                    "$lsregister" -f "$app" >/dev/null 2>&1 || true
-                fi
+            # The window is the bundle's own executable, so Apple events sent
+            # to com.seiraiyu.ryucad reach it (#1022), and Finder's Open With
+            # hands it folders itself. ryucad is copied beside it: the app
+            # finds ryucad there before PATH, and a Finder launch has no
+            # shell PATH (a link out of the bundle would break its signature).
+            mkdir -p "$HOME/Applications"
+            app="$HOME/Applications/ryucad.app"
+            rm -rf "$app"
+            mkdir -p "$app/Contents/MacOS"
+            cp "$1/ryucad-app" "$app/Contents/MacOS/ryucad-app"
+            cp "$1/ryucad" "$app/Contents/MacOS/ryucad"
+            sed "s|@VERSION@|$version|g" "$2/Info.plist" >"$app/Contents/Info.plist"
+            # The command on PATH is the bundle's, so both are one build.
+            ln -sf "$app/Contents/MacOS/ryucad-app" "$1/ryucad-app"
+            # Signed ad hoc, as Apple silicon needs, and told to Launch
+            # Services.
+            codesign --force --sign - "$app" >/dev/null 2>&1 || true
+            lsregister=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+            if [ -x "$lsregister" ]; then
+                "$lsregister" -f "$app" >/dev/null 2>&1 || true
             fi
             ;;
     esac

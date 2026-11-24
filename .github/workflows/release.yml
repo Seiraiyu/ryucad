@@ -145,7 +145,7 @@ jobs:
             "dist/$NAME/licenses/"
           case "$RUNNER_OS" in
             Linux) mkdir -p "dist/$NAME/share" && cp packaging/linux/ryucad.desktop packaging/linux/ryucad.xml "dist/$NAME/share/" ;;
-            macOS) mkdir -p "dist/$NAME/share" && cp packaging/macos/ryucad.applescript "dist/$NAME/share/" ;;
+            macOS) mkdir -p "dist/$NAME/share" && cp packaging/macos/Info.plist "dist/$NAME/share/" ;;
           esac
       - name: smoke test
         shell: bash

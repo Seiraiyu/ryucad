@@ -37,7 +37,7 @@ release() {
             printf '#!/bin/sh\necho "{\\"ryucad\\":\\"%s\\"}"\n' "$v" >"$s/ryucad-app"
             chmod 755 "$s/ryucad-app"
             cp "$root/packaging/linux/ryucad.desktop" "$root/packaging/linux/ryucad.xml" \
-                "$root/packaging/macos/ryucad.applescript" "$s/share/"
+                "$root/packaging/macos/Info.plist" "$s/share/"
             tar -czf "$d/ryucad-$v-$t.tar.gz" -C "$work/stage" "ryucad-$v-$t"
         done
         if command -v sha256sum >/dev/null 2>&1; then
@@ -139,17 +139,27 @@ case "$(uname -s)" in
         check "desktop entry opens projects, not every folder" 'grep -qx "MimeType=application/x-ryucad-project;" "$desktop"'
         ;;
     Darwin)
-        if command -v osacompile >/dev/null 2>&1; then
-            plist="$work/home-fresh/Applications/ryucad.app/Contents/Info.plist"
-            check "launcher in ~/Applications" '[ -f "$plist" ]'
-            # Finder offers it for folders and for ryucad.json.
-            types=$(plutil -extract CFBundleDocumentTypes json -o - "$plist" 2>/dev/null || true)
-            check "launcher opens folders" 'printf %s "$types" | grep -q "public.folder"'
-            check "launcher opens JSON" 'printf %s "$types" | grep -q "public.json"'
-            check "launcher is still signed" 'codesign --verify "$work/home-fresh/Applications/ryucad.app"'
-            # The reinstall above replaced the launcher: no word of signing.
-            check "says nothing of signing" '! grep -q "signature" "$work/out"'
-        fi
+        app="$work/home-fresh/Applications/ryucad.app"
+        plist="$app/Contents/Info.plist"
+        check "the app in ~/Applications" '[ -f "$plist" ]'
+        # The window is the bundle's own executable, ryucad beside it
+        # (#1022).
+        check "the app is the bundle's executable" '[ -x "$app/Contents/MacOS/ryucad-app" ]'
+        check "ryucad sits beside it" '[ -x "$app/Contents/MacOS/ryucad" ]'
+        check "the bundle runs ryucad-app" '[ "$(plutil -extract CFBundleExecutable raw "$plist")" = ryucad-app ]'
+        check "the bundle is com.seiraiyu.ryucad" '[ "$(plutil -extract CFBundleIdentifier raw "$plist")" = com.seiraiyu.ryucad ]'
+        check "the bundle is an application" '[ "$(plutil -extract CFBundlePackageType raw "$plist")" = APPL ]'
+        check "the bundle's version is the release's" '[ "$(plutil -extract CFBundleShortVersionString raw "$plist")" = 0.1.0 ]'
+        check "the plist is well formed" 'plutil -lint "$plist"'
+        check "no AppleScript applet is left" '[ ! -e "$app/Contents/Resources/Scripts/main.scpt" ]'
+        check "the app on PATH is the bundle's" '[ -L "$work/home-fresh/.ryucad/bin/ryucad-app" ] && "$work/home-fresh/.ryucad/bin/ryucad-app" --version | grep -q 0.1.0'
+        # Finder offers it for folders and for ryucad.json.
+        types=$(plutil -extract CFBundleDocumentTypes json -o - "$plist" 2>/dev/null || true)
+        check "the app opens folders" 'printf %s "$types" | grep -q "public.folder"'
+        check "the app opens JSON" 'printf %s "$types" | grep -q "public.json"'
+        check "the app is signed" 'codesign --verify "$app"'
+        # The reinstall above replaced the app: no word of signing.
+        check "says nothing of signing" '! grep -q "signature" "$work/out"'
         ;;
 esac
 if [ "$(uname -s)" = Linux ]; then

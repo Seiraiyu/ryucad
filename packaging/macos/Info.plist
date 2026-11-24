@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- ryucad.app's Info.plist: install.sh writes it with @VERSION@ filled in.
+     The window, ryucad-app, is the bundle's own executable, so Apple events
+     sent to com.seiraiyu.ryucad reach it (#1022). Finder offers it (Open
+     With, not the default) for folders and JSON files: ryucad.json is plain
+     JSON, and no type can name one file. -->
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key><string>com.seiraiyu.ryucad</string>
+  <key>CFBundleName</key><string>ryucad</string>
+  <key>CFBundleDisplayName</key><string>ryucad</string>
+  <key>CFBundleExecutable</key><string>ryucad-app</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>@VERSION@</string>
+  <key>CFBundleVersion</key><string>@VERSION@</string>
+  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+  <key>LSMinimumSystemVersion</key><string>11.0</string>
+  <key>NSHighResolutionCapable</key><true/>
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeName</key><string>Folder</string>
+      <key>CFBundleTypeRole</key><string>Viewer</string>
+      <key>LSHandlerRank</key><string>Alternate</string>
+      <key>LSItemContentTypes</key><array><string>public.folder</string></array>
+    </dict>
+    <dict>
+      <key>CFBundleTypeName</key><string>ryucad project</string>
+      <key>CFBundleTypeRole</key><string>Viewer</string>
+      <key>LSHandlerRank</key><string>Alternate</string>
+      <key>LSItemContentTypes</key><array><string>public.json</string></array>
+    </dict>
+  </array>
+</dict>
+</plist>

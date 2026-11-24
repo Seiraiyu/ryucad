@@ -377,6 +377,17 @@ impl App {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
             self.titled = Some(title);
         }
+        // Folders the desktop asked to open (#1022).
+        crate::ui::opened::wake_with(&ctx);
+        let start = matches!(self.screen, Screen::Start(_));
+        for r in crate::ui::opened::route(start, crate::ui::opened::take()) {
+            match r {
+                crate::ui::opened::Route::Here(dir) => self.go(&dir),
+                crate::ui::opened::Route::Elsewhere(dir) => {
+                    crate::ui::opened::elsewhere(&self.daemon.exe, &dir);
+                }
+            }
+        }
         let mut go = None;
         match &mut self.screen {
             Screen::Start(s) => match start::show(ui, s) {
