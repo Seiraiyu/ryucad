@@ -13,3 +13,4 @@ pub mod product;
 pub mod reader;
 pub mod rows;
 pub mod tiles;
+pub mod window;
