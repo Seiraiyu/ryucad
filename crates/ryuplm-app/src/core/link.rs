@@ -43,7 +43,8 @@ mod tests {
     #[test]
     fn the_catalogue_is_found_at_or_above_the_folder() {
         let d = tempfile::tempdir().unwrap();
-        let root = d.path().canonicalize().unwrap();
+        // As find_root gives it: without Windows' \\?\ prefix.
+        let root = ryuplm::source::plain(d.path().canonicalize().unwrap());
         ryuplm::server::init(&root, None).unwrap();
         std::fs::create_dir_all(root.join("a/b")).unwrap();
         assert_eq!(find_root(&root.join("a/b")).unwrap(), root);
