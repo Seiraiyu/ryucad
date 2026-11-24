@@ -53,6 +53,7 @@ pub mod review;
 pub mod server;
 pub mod session;
 pub mod settings;
+pub mod store;
 #[cfg(feature = "testing")]
 pub mod testing;
 pub mod textconv;
