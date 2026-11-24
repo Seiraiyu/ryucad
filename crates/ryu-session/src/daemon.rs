@@ -325,6 +325,17 @@ fn status<P: Serve>(state: &State<P>, timings: bool) -> Value {
         v["last_activity"] = last_activity(&c.live);
         if timings {
             v["timings"] = c.live.timings.to_json();
+            // The deferred syncer's work (#1050): whether a slow write
+            // waited behind its flushes.
+            let s = ryu_doc::source::sync_stats();
+            let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
+            v["timings"]["syncer"] = json!({
+                "batches": s.batches,
+                "files": s.files,
+                "total_ms": ms(s.total),
+                "longest_batch_ms": ms(s.longest_batch),
+                "longest_file_ms": ms(s.longest_file),
+            });
         }
     }
     match core.as_ref().map(|c| c.session.as_ref()) {

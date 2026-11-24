@@ -412,6 +412,13 @@ fn writes_are_logged_and_undone_through_the_daemon() {
         undo["held_ms"].is_number() && undo["wait_ms"].is_number(),
         "{s}"
     );
+    // The deferred syncer's work (#1050); a write's phases are the bar's
+    // to print (these writes don't go through write::commit).
+    let syncer = &s["result"]["timings"]["syncer"];
+    assert!(
+        syncer["batches"].is_u64() && syncer["longest_file_ms"].is_number(),
+        "{s}"
+    );
 }
 
 #[test]

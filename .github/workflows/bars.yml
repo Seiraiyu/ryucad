@@ -2,7 +2,8 @@ name: Bars
 
 # Dispatch only: a crate's strict bars on the persistent self-hosted runner,
 # a quieter machine than a shared worker (ryuplm-release 1.A, design 934).
-# Each run prints the load and the CPU beside its numbers.
+# Each run prints the load and the CPU beside its numbers. windows-latest
+# (hosted, so indicative only) measures what only Windows shows (#1050).
 
 on:
   workflow_dispatch:
@@ -26,6 +27,7 @@ on:
         options:
           - cpp-v3-runner-1
           - arc-runner-x86
+          - windows-latest
 
 permissions:
   contents: read
@@ -34,6 +36,9 @@ jobs:
   bars:
     runs-on: ${{ inputs.runner }}
     timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
     env:
       CRATE: ${{ inputs.crate }}
       TEST: ${{ inputs.test }}
@@ -53,9 +58,9 @@ jobs:
         run: cargo test -p "$CRATE" --release --test "$TEST" --no-run
       - name: Bars
         run: |
-          lscpu | grep 'Model name' || true
+          lscpu | grep 'Model name' || wmic cpu get name 2>/dev/null || true
           nproc
           for k in $(seq 1 "$RUNS"); do
-            echo "== run $k: $(uptime)"
+            echo "== run $k: $(uptime 2>/dev/null || date)"
             env "$BARS=1" cargo test -p "$CRATE" --release --test "$TEST" -- --nocapture --test-threads=1 || echo "== run $k FAILED"
           done
