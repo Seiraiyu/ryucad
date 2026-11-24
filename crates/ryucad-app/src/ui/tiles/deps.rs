@@ -6,6 +6,11 @@
 use crate::core::workspace::Workspace;
 use eframe::egui;
 
+/// How wide a row's source line may grow before it is elided (#1039): a
+/// constant, since inside the rows' horizontal scroll the width available
+/// has no bound, and eliding needs one.
+const SOURCE_WIDTH: f32 = 360.0;
+
 pub fn deps(ui: &mut egui::Ui, ws: &mut Workspace) {
     let (mut fetch, mut update, mut remove, mut add, mut confirm, mut cancel) =
         (None, None, None, false, false, false);
@@ -134,10 +139,17 @@ pub fn deps(ui: &mut egui::Ui, ws: &mut Workspace) {
                 .striped(true)
                 .show(ui, |ui| {
                     for r in &d.rows {
-                        // Where it comes from, said, not only on hover (#752).
+                        // Where it comes from, said, not only on hover (#752);
+                        // a long one elided so the row stays inside the
+                        // window and its scrollbar off the buttons (#1039).
                         ui.vertical(|ui| {
                             ui.strong(r.title()).on_hover_text(&r.project);
-                            ui.weak(r.source());
+                            let source = r.source();
+                            ui.set_max_width(SOURCE_WIDTH);
+                            ui.add(
+                                egui::Label::new(egui::RichText::new(&source).weak()).truncate(),
+                            )
+                            .on_hover_text(source);
                         });
                         ui.label(r.state());
                         ui.vertical(|ui| {

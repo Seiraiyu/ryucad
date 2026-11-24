@@ -294,6 +294,20 @@ impl Project {
         p
     }
 
+    /// A project in a folder called `name`, under a folder whose name is
+    /// `depth` characters long: paths as long as a deep checkout's
+    /// target folder gives (#1039).
+    pub fn named_deep(name: &str, depth: usize) -> Project {
+        let dir = tempfile::tempdir_in(shared()).unwrap();
+        let deep = dir.path().join("d".repeat(depth));
+        std::fs::create_dir(&deep).unwrap();
+        let root = ryucad::doc::project::plain(deep.canonicalize().unwrap()).join(name);
+        std::fs::create_dir(&root).unwrap();
+        let p = Project { _dir: dir, root };
+        p.ok(&["init", "--unit", "mm"]);
+        p
+    }
+
     /// Runs the CLI in the project as the agent `agent`; returns its JSON.
     pub fn cli(&self, args: &[&str]) -> Value {
         let out = ryucad_cmd(&ryucad().exe)
@@ -1201,7 +1215,16 @@ pub fn file_url(root: &std::path::Path) -> String {
 /// (a box and a cylinder) numbered `B-6` and released as A, official on
 /// `main`. Its `file://` URL.
 pub fn library() -> (Project, String) {
-    let lib = Project::named("fasteners").with_part();
+    library_in(Project::named("fasteners"))
+}
+
+/// [`library`] under a folder `depth` characters long (#1039).
+pub fn deep_library(depth: usize) -> (Project, String) {
+    library_in(Project::named_deep("fasteners", depth))
+}
+
+fn library_in(lib: Project) -> (Project, String) {
+    let lib = lib.with_part();
     lib.ok(&["pdm", "init"]);
     lib.ok(&["props", "set", "p", "number=B-6"]);
     let lib = lib.committed();

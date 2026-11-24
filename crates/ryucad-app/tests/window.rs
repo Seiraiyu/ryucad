@@ -6189,7 +6189,18 @@ fn a_dependency_is_added_from_its_tab_and_its_part_placed_from_the_picker() {
             .is_some_and(|r| r.fetched)
     });
     shown(&mut h, "fasteners");
-    shown(&mut h, &format!("from {url}"));
+    // The source said in full in the model; the label may be elided
+    // (#1039), so only its start is looked for.
+    let source = h
+        .state()
+        .opened()
+        .ws
+        .deps
+        .row("fasteners")
+        .unwrap()
+        .source();
+    assert_eq!(source, format!("from {url}"));
+    h.get_by_label_contains("from file://");
     // Project > Place from dependency…: the dependency, its part, Place.
     menu(&mut h, "Project", "Place from dependency…");
     shown(&mut h, "Place in frame");
@@ -6253,7 +6264,9 @@ fn an_update_that_breaks_a_mate_says_so_before_it_writes() {
     if !gpu() {
         return;
     }
-    let (lib, url) = common::library();
+    // Under a deep folder, so the source line is wider than the window
+    // whatever the target folder (#1039).
+    let (lib, url) = common::deep_library(160);
     let p = Project::new().committed();
     p.ok(&["deps", "add", &url]);
     p.ok(&["part", "create", "frame", "--assembly"]);
