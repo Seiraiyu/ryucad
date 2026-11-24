@@ -526,9 +526,19 @@ impl DocArgs {
 
 #[derive(Subcommand)]
 enum DocumentCmd {
-    /// A new document: FILE's bytes in Git beside its record.
+    /// A new document: FILE's bytes in Git beside its record, or on the
+    /// service (--storage service), or a Google Drive file's (--drive).
     Add {
-        file: PathBuf,
+        #[arg(required_unless_present = "drive")]
+        file: Option<PathBuf>,
+        /// A Google Drive file the organization's connection can read,
+        /// instead of FILE: its head revision pinned by hash.
+        #[arg(long, conflicts_with = "file")]
+        drive: Option<String>,
+        /// git or service; the catalogue's default (documents.storage) when
+        /// absent.
+        #[arg(long)]
+        storage: Option<String>,
         #[arg(long)]
         number: Option<String>,
         /// Take the next number of SCHEME (or of the document scheme there is).
@@ -580,6 +590,30 @@ enum DocumentCmd {
         file: PathBuf,
         #[arg(long)]
         media_type: Option<String>,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Pin each document's Drive file again and take a newer revision.
+    Sync {
+        documents: Vec<String>,
+        /// Every document with a Drive pin.
+        #[arg(long)]
+        all: bool,
+        /// Say what would change; write nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Upload service-stored documents' bytes the service lacks, from
+    /// this machine's cache (all of them when none are named).
+    Upload {
+        documents: Vec<String>,
+    },
+    /// Move the document's bytes between Git and the service.
+    Move {
+        document: String,
+        /// git or service.
+        #[arg(long)]
+        storage: String,
         #[command(flatten)]
         expect: Expect,
     },
@@ -648,6 +682,9 @@ enum SettingsCmd {
         /// With --scheme: what it numbers, item (the default) or document.
         #[arg(long)]
         scheme_kind: Option<String>,
+        /// New documents' storage: git (the default) or service.
+        #[arg(long)]
+        document_storage: Option<String>,
         #[arg(long)]
         next_template: Option<String>,
         #[arg(long)]
@@ -860,6 +897,8 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
         Command::Import(ImportCmd::List) => (root()?, Request::ImportList {}),
         Command::Document(DocumentCmd::Add {
             file,
+            drive: _,
+            storage,
             number,
             next,
             fields,
@@ -868,10 +907,14 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
         }) => (
             root()?,
             Request::DocumentAdd {
-                file: abs_file(here, file),
+                // A Drive file goes as a pin, once the CLI has pinned it
+                // (`run`); the request never names the Drive ID itself.
+                file: file.as_ref().map(|f| abs_file(here, f)),
                 number: number.clone(),
                 next: next.clone(),
                 fields: fields.fields(media_type.clone()),
+                storage: storage.clone(),
+                drive: None,
                 expected_revision: exp(expect),
             },
         ),
@@ -934,6 +977,18 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
                 document: document.clone(),
                 file: abs_file(here, file),
                 media_type: media_type.clone(),
+                expected_revision: exp(expect),
+            },
+        ),
+        Command::Document(DocumentCmd::Move {
+            document,
+            storage,
+            expect,
+        }) => (
+            root()?,
+            Request::DocumentMove {
+                document: document.clone(),
+                storage: storage.clone(),
                 expected_revision: exp(expect),
             },
         ),
@@ -1229,6 +1284,7 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
             pattern,
             scheme_class,
             scheme_kind,
+            document_storage,
             next_template,
             property,
             declaration,
@@ -1250,6 +1306,7 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
                         pattern: pattern.clone(),
                         scheme_class: scheme_class.clone(),
                         scheme_kind: scheme_kind.clone(),
+                        document_storage: document_storage.clone(),
                         next_template: next_template.clone(),
                         property: property.clone(),
                         declaration,
@@ -1337,6 +1394,8 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
         | Command::Merge(_)
         | Command::Review(_)
         | Command::Number(_)
+        | Command::Document(DocumentCmd::Upload { .. })
+        | Command::Document(DocumentCmd::Sync { .. })
         | Command::WhereUsed { org: true, .. } => return Ok(None),
     }))
 }
@@ -1455,6 +1514,54 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
             };
             ryuplm::review::run(&here, action)
         }
+        Command::Document(DocumentCmd::Sync {
+            documents,
+            all,
+            dry_run,
+        }) => {
+            let root = find_root(&here)?;
+            let mut sent = Vec::new();
+            let out = {
+                let mut send_one = |r: Request| send(cli, &root, r, &mut sent);
+                let open = || ryuplm::docstore::DocStore::open(&root);
+                ryuplm::docstore::sync_all(
+                    &mut send_one,
+                    &open,
+                    documents,
+                    *all,
+                    *dry_run,
+                    warnings,
+                )
+            };
+            warnings.extend(sent);
+            out
+        }
+        Command::Document(DocumentCmd::Add {
+            drive: Some(id), ..
+        }) => {
+            let Some((root, req)) = request(&cli.command, &here)? else {
+                return Err(Error::new(Code::Internal, "document add is a request"));
+            };
+            let mut sent = Vec::new();
+            let out = {
+                let mut send_one = |r: Request| send(cli, &root, r, &mut sent);
+                let open = || ryuplm::docstore::DocStore::open(&root);
+                ryuplm::docstore::drive_add(&mut send_one, &open, id, req, warnings)
+            };
+            warnings.extend(sent);
+            out
+        }
+        Command::Document(DocumentCmd::Upload { documents }) => {
+            let root = find_root(&here)?;
+            let mut sent = Vec::new();
+            let out = {
+                let mut send_one = |r: Request| send(cli, &root, r, &mut sent);
+                let open = || ryuplm::docstore::DocStore::open(&root);
+                ryuplm::docstore::upload_all(&mut send_one, &open, documents)
+            };
+            warnings.extend(sent);
+            out
+        }
         Command::Number(cmd) => {
             let root = find_root(&here)?;
             let ask = match cmd {
@@ -1508,6 +1615,15 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
                     }
                     Request::ImportRun { .. } => {
                         ryuplm::ledger::import_run(&mut send_one, &open, req, warnings)
+                    }
+                    // Service-stored bytes move here, in the CLI's process,
+                    // never in the daemon (ryuplm 3.B).
+                    Request::DocumentAdd { .. }
+                    | Request::DocumentReplace { .. }
+                    | Request::DocumentMove { .. }
+                    | Request::DocumentGet { .. } => {
+                        let open = || ryuplm::docstore::DocStore::open(&root);
+                        ryuplm::docstore::around(&mut send_one, &open, req, warnings)
                     }
                     _ => send_one(req),
                 }

@@ -1272,6 +1272,15 @@ pub enum Code {
     /// current content (an error of release readiness); release the document
     /// in the same proposal, or first.
     DocumentUnreleased,
+    /// A service-stored document's bytes weren't uploaded (a warning): the
+    /// service couldn't be asked; `ryuplm document upload` sends them.
+    DocumentNotUploaded,
+    /// The organization has no Google Drive connection on the service
+    /// (ryuplm 3, design 937): an owner connects one on its page.
+    DriveNotConnected,
+    /// A Drive file the organization's connection can't read: not picked
+    /// for the service, deleted, or no longer shared.
+    DriveFileUnavailable,
     /// ryuplm check finding (a warning): the label an item's legacy
     /// history carried isn't one of the catalogue's revision scheme, so its
     /// first release takes the scheme's first label (design 935).
@@ -1717,6 +1726,9 @@ impl Code {
         Code::DocumentInUse,
         Code::DocumentReleased,
         Code::DocumentUnreleased,
+        Code::DocumentNotUploaded,
+        Code::DriveNotConnected,
+        Code::DriveFileUnavailable,
         Code::ItemHistoryLabelForeign,
         Code::PartNumberTaken,
         Code::LedgerUnavailable,
@@ -1740,7 +1752,8 @@ impl Code {
             | Code::PartsSourceUnreachable
             | Code::PartsRateLimited
             | Code::Cancelled
-            | Code::LedgerUnavailable => 4,
+            | Code::LedgerUnavailable
+            | Code::DriveNotConnected => 4,
             _ => 1,
         }
     }
@@ -1837,6 +1850,19 @@ mod tests {
             &Code::ALL[Code::ALL.len() - 2..],
             &[Code::PartNumberTaken, Code::LedgerUnavailable]
         );
+    }
+
+    #[test]
+    fn store_and_drive_codes() {
+        for (c, s, exit) in [
+            (Code::DocumentNotUploaded, "document_not_uploaded", 1),
+            (Code::DriveNotConnected, "drive_not_connected", 4),
+            (Code::DriveFileUnavailable, "drive_file_unavailable", 1),
+        ] {
+            assert_eq!(json!(c), json!(s));
+            assert_eq!(c.exit_code(), exit);
+            assert!(Code::ALL.contains(&c), "{c:?} in ALL");
+        }
     }
 
     #[test]

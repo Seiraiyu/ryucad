@@ -38,6 +38,9 @@ pub struct Change {
     /// design 936).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ledger: Option<bool>,
+    /// New documents' storage: `git` or `service` (design 937).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub document_storage: Option<String>,
     /// Remove the named class, scheme or property instead.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub remove: bool,
@@ -70,6 +73,7 @@ pub fn edit(session: &mut Session, change: Change, expected: Option<&str>) -> Re
         change.scheme.is_some(),
         change.property.is_some(),
         change.ledger.is_some(),
+        change.document_storage.is_some(),
     ]
     .iter()
     .filter(|b| **b)
@@ -77,7 +81,7 @@ pub fn edit(session: &mut Session, change: Change, expected: Option<&str>) -> Re
     if picked != 1 {
         return Err(Error::new(
             Code::Usage,
-            "change one of --class, --scheme, --property or --ledger at a time",
+            "change one of --class, --scheme, --property, --ledger or --document-storage at a time",
         ));
     }
     let mut manifest = session.catalogue().manifest.clone();
@@ -161,6 +165,10 @@ pub fn edit(session: &mut Session, change: Change, expected: Option<&str>) -> Re
     }
     if let Some(on) = change.ledger {
         config.ledger = on;
+    }
+    if let Some(s) = &change.document_storage {
+        manifest.document_storage = crate::document::Storage::parse(s)
+            .ok_or_else(|| bad("--document-storage is git or service"))?;
     }
     // The settings must read back as written.
     let config_text = crate::canonical::to_string(&config.to_json());

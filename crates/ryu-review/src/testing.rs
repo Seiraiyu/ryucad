@@ -1,7 +1,7 @@
 //! A stand-in for the hosted review service, for products' tests (feature
 //! `testing`): fixed answers by method and path (query included), answers
-//! a handler makes, or the ledger's routes kept in memory (`Ledger`), and
-//! a record of every request.
+//! a handler makes, the ledger's routes kept in memory (`Ledger`), a
+//! document store with a Drive (`Store`), and a record of every request.
 
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
@@ -15,6 +15,8 @@ pub struct Seen {
     pub path: String,
     pub auth: Option<String>,
     pub body: String,
+    /// The body as sent, byte for byte (`body` is it as lossy UTF-8).
+    pub bytes: Vec<u8>,
 }
 
 /// An answer: method, path, status, content type, body.
@@ -92,6 +94,7 @@ impl Fake {
                     path,
                     auth,
                     body: String::from_utf8_lossy(&body).into_owned(),
+                    bytes: body,
                 };
                 let (status, ty, bytes) = handler(&s);
                 log.lock().unwrap().push(s);
@@ -360,6 +363,161 @@ impl Template {
     }
 }
 
+/// One revision of a fake Drive file: what the pin route stores.
+#[derive(Clone, Debug)]
+pub struct Revision {
+    pub revision: String,
+    pub name: String,
+    pub media_type: String,
+    pub bytes: Vec<u8>,
+}
+
+impl Revision {
+    pub fn file(revision: &str, name: &str, media_type: &str, bytes: &[u8]) -> Revision {
+        Revision {
+            revision: revision.into(),
+            name: name.into(),
+            media_type: media_type.into(),
+            bytes: bytes.to_vec(),
+        }
+    }
+}
+
+/// One repository's document store and Drive connection as ryupdm-service
+/// answers them (ryuplm 3.B's contract; plan 3.C serves it), kept in
+/// memory: `POST documents/has`, `PUT documents/{blake3}`, `GET
+/// documents/{blake3}` (a signed link under `/links/`), and `POST
+/// drive/files/{id}/pin`. `tamper` serves the wrong bytes behind every
+/// link; `refuse` refuses every call.
+#[derive(Debug, Default)]
+pub struct Store {
+    pub blobs: BTreeMap<String, Vec<u8>>,
+    /// Drive file ID → its revisions, the last the head.
+    pub drive: BTreeMap<String, Vec<Revision>>,
+    pub connected: bool,
+    /// Bytes over this are `413 limit_exceeded`.
+    pub limit: Option<usize>,
+    pub tamper: bool,
+    pub refuse: Option<(u16, String)>,
+    /// How many PUTs were answered.
+    pub puts: usize,
+}
+
+impl Store {
+    pub fn start(slug: &str) -> (Fake, Arc<Mutex<Store>>) {
+        let store = Arc::new(Mutex::new(Store {
+            connected: true,
+            ..Store::default()
+        }));
+        let state = Arc::clone(&store);
+        let base = format!("/api/v1/repos/{slug}");
+        let fake = Fake::serve(move |s| {
+            let mut st = state.lock().unwrap();
+            if let Some(h) = s.path.strip_prefix("/links/") {
+                return match st.blobs.get(h) {
+                    Some(b) if st.tamper => (
+                        200,
+                        "application/octet-stream",
+                        [b.as_slice(), b"!"].concat(),
+                    ),
+                    Some(b) => (200, "application/octet-stream", b.clone()),
+                    None => not_found(),
+                };
+            }
+            let Some(rest) = s.path.strip_prefix(&base) else {
+                return not_found();
+            };
+            if let Some((status, code)) = &st.refuse {
+                return reply(*status, &error(code, &format!("refused: {code}")));
+            }
+            let (status, body) = st.answer(&s.method, rest, &s.bytes);
+            reply(status, &body)
+        });
+        (fake, store)
+    }
+
+    fn answer(&mut self, method: &str, rest: &str, body: &[u8]) -> (u16, Value) {
+        match (method, rest) {
+            ("POST", "/documents/has") => {
+                let b: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+                let held: Vec<&str> = b["blake3"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .filter(|h| self.blobs.contains_key(*h))
+                    .collect();
+                (200, json!({"schema": 1, "held": held}))
+            }
+            ("PUT", r) if r.starts_with("/documents/") => {
+                let h = &r["/documents/".len()..];
+                self.puts += 1;
+                if self.limit.is_some_and(|l| body.len() > l) {
+                    return (
+                        413,
+                        error(
+                            "limit_exceeded",
+                            "the file is over the organization's limit",
+                        ),
+                    );
+                }
+                if blake3::hash(body).to_hex().as_str() != h {
+                    return (
+                        400,
+                        error("invalid_request", "the body's BLAKE3 isn't the key"),
+                    );
+                }
+                let held = self.blobs.insert(h.to_owned(), body.to_vec()).is_some();
+                (
+                    if held { 200 } else { 201 },
+                    json!({"schema": 1, "blake3": h, "size": body.len(), "held": held}),
+                )
+            }
+            ("GET", r) if r.starts_with("/documents/") => {
+                let h = &r["/documents/".len()..];
+                match self.blobs.get(h) {
+                    Some(b) => (
+                        200,
+                        json!({"schema": 1, "blake3": h, "size": b.len(),
+                        "url": format!("/links/{h}"), "expires_at": EXPIRES}),
+                    ),
+                    None => (404, error("not_found", "no such document bytes")),
+                }
+            }
+            ("POST", r) if r.starts_with("/drive/files/") && r.ends_with("/pin") => {
+                let id = &r["/drive/files/".len()..r.len() - "/pin".len()];
+                if !self.connected {
+                    return (
+                        409,
+                        error(
+                            "drive_not_connected",
+                            "the organization has no Drive connection",
+                        ),
+                    );
+                }
+                let Some(head) = self.drive.get(id).and_then(|v| v.last()).cloned() else {
+                    return (
+                        404,
+                        error(
+                            "drive_file_unavailable",
+                            "the connection can't read that file",
+                        ),
+                    );
+                };
+                let h = blake3::hash(&head.bytes).to_hex().to_string();
+                self.blobs.insert(h.clone(), head.bytes.clone());
+                (
+                    200,
+                    json!({"schema": 1, "drive_id": id, "revision": head.revision,
+                    "name": head.name, "media_type": head.media_type,
+                    "size": head.bytes.len(), "blake3": h}),
+                )
+            }
+            _ => (404, error("not_found", "no such API route")),
+        }
+    }
+}
+
 fn reply(status: u16, v: &Value) -> Reply {
     (status, "application/json", v.to_string().into_bytes())
 }
@@ -386,4 +544,66 @@ fn unescape(s: &str) -> String {
         }
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_store_holds_bytes_by_hash_and_links_them() {
+        let (fake, store) = Store::start("acme/w");
+        let c = crate::Client::new(&fake.url, "t");
+        let h = blake3::hash(b"pdf").to_hex().to_string();
+        let v = c
+            .post(
+                "/repos/acme/w/documents/has",
+                &json!({"schema": 1, "blake3": [h]}),
+            )
+            .unwrap();
+        assert_eq!(v["held"], json!([]));
+        let v = c
+            .put_bytes(&format!("/repos/acme/w/documents/{h}"), b"pdf")
+            .unwrap();
+        assert_eq!(v["held"], false);
+        assert_eq!(
+            c.put_bytes(&format!("/repos/acme/w/documents/{h}"), b"pdf")
+                .unwrap()["held"],
+            true
+        );
+        // The wrong bytes under a key are refused.
+        let e = c
+            .put_bytes(&format!("/repos/acme/w/documents/{h}"), b"PDF")
+            .unwrap_err();
+        assert_eq!(e.code, ryu_doc::error::Code::ReviewInvalidRequest);
+        let v = c.get(&format!("/repos/acme/w/documents/{h}")).unwrap();
+        assert_eq!(
+            c.download_up_to(v["url"].as_str().unwrap(), 4).unwrap(),
+            b"pdf"
+        );
+        // A Drive file pins its head revision into the store.
+        store.lock().unwrap().drive.insert(
+            "f1".into(),
+            vec![Revision::file("r1", "Spec.pdf", "application/pdf", b"one")],
+        );
+        let p = c
+            .post("/repos/acme/w/drive/files/f1/pin", &json!({"schema": 1}))
+            .unwrap();
+        assert_eq!(
+            (p["revision"].as_str(), p["size"].as_u64()),
+            (Some("r1"), Some(3))
+        );
+        assert!(
+            store
+                .lock()
+                .unwrap()
+                .blobs
+                .contains_key(p["blake3"].as_str().unwrap())
+        );
+        store.lock().unwrap().connected = false;
+        let e = c
+            .post("/repos/acme/w/drive/files/f1/pin", &json!({"schema": 1}))
+            .unwrap_err();
+        assert_eq!(e.code, ryu_doc::error::Code::DriveNotConnected);
+    }
 }
