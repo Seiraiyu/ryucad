@@ -66,6 +66,13 @@ pub fn find_root(start: &Path) -> Result<PathBuf> {
 enum Command {
     /// This build's version, commit, target and protocol.
     Version,
+    /// Open a catalogue (this folder by default) in the desktop app,
+    /// ryuplm-app; RYUPLM_APP names another.
+    Open {
+        /// The folder to open: this one (or -C's) by default.
+        #[arg(id = "folder", value_name = "DIR")]
+        dir: Option<PathBuf>,
+    },
     /// Make this folder a catalogue.
     Init {
         #[arg(long, value_parser = unit)]
@@ -1549,6 +1556,7 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
         // Version, Init, Watch, Daemon, Git, Merge, Review, Number and
         // where-used --org are not requests.
         Command::Version
+        | Command::Open { .. }
         | Command::Init { .. }
         | Command::Watch { .. }
         | Command::Daemon(_)
@@ -1593,6 +1601,11 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
     };
     match &cli.command {
         Command::Version => Ok(json!(VersionInfo::current())),
+        Command::Open { dir } => {
+            let dir = dir.as_ref().map_or_else(|| here.clone(), |d| here.join(d));
+            let dir = ryuplm::source::plain(dir.canonicalize().map_err(|e| Error::io(&dir, &e))?);
+            client::open(&find_root(&dir)?)
+        }
         Command::Init { unit } => {
             let root =
                 ryuplm::source::plain(here.canonicalize().map_err(|e| Error::io(&here, &e))?);

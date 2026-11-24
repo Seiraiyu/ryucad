@@ -889,3 +889,46 @@ fn live_requests_from_the_cli() {
     let (_, v) = p.run_in(&p.direct, &["select", "item/A-1"]);
     assert_eq!(v["error"]["code"], "no_live_session");
 }
+
+/// `ryuplm open` (design 938): RYUPLM_APP's program on the catalogue's
+/// folder, detached; `app_not_installed` (exit 4) when there is none.
+#[test]
+fn open_starts_the_app_or_says_it_isnt_installed() {
+    let p = Pair::project();
+    let missing = p.run.with_file_name("no-such-app");
+    let mut cmd = ryuplm(&p.run);
+    cmd.current_dir(p.direct.join("p"))
+        .env("RYUPLM_APP", &missing)
+        .arg("open");
+    let (code, v) = parse(cmd.output().unwrap(), &p.direct);
+    assert_eq!(
+        (code, v["error"]["code"].as_str()),
+        (4, Some("app_not_installed")),
+        "{v}"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let said = p.run.with_file_name("app-said");
+        let app = p.run.with_file_name("fake-app");
+        fs::write(
+            &app,
+            format!("#!/bin/sh\necho \"$1\" > '{}'\n", said.display()),
+        )
+        .unwrap();
+        fs::set_permissions(&app, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut cmd = ryuplm(&p.run);
+        cmd.current_dir(p.direct.join("p"))
+            .env("RYUPLM_APP", &app)
+            .arg("open");
+        let (code, v) = parse(cmd.output().unwrap(), &p.direct);
+        assert_eq!((code, &v["result"]["opened"]), (0, &json!("new")), "{v}");
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !said.exists() {
+            assert!(std::time::Instant::now() < end, "the app never ran");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let dir = fs::read_to_string(&said).unwrap();
+        assert_eq!(Path::new(dir.trim()), p.direct.join("p"));
+    }
+}
