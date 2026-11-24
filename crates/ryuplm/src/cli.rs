@@ -4,6 +4,7 @@
 //! write what Git reads.
 
 use clap::{Args, Parser, Subcommand};
+use ryu_session::live::SelectMode;
 use ryuplm::error::{Code, Error, Result};
 use ryuplm::proto::{Request, VersionInfo};
 use ryuplm::units::Unit;
@@ -183,6 +184,69 @@ enum Command {
     Redo {
         entry: Option<u64>,
     },
+    /// Select references (item/<id or number>, item/<id>/line/<line>,
+    /// import/<name>), replacing your selection, or with --add or
+    /// --remove changing it; --clear empties it. Through the daemon.
+    Select {
+        refs: Vec<String>,
+        #[arg(long, conflicts_with_all = ["remove", "clear"])]
+        add: bool,
+        #[arg(long, conflicts_with = "clear")]
+        remove: bool,
+        #[arg(long)]
+        clear: bool,
+    },
+    /// What a participant has selected (the one person attached by
+    /// default), each reference with what it names. Through the daemon.
+    Selection {
+        /// A participant's ID (`participants` lists them).
+        #[arg(long)]
+        of: Option<String>,
+    },
+    /// Highlight references in every window watching, in your colour:
+    /// pending (about to change), changed, or note (the default), under a
+    /// --label; --clear takes yours away (only --style's, if given).
+    /// Through the daemon.
+    Highlight {
+        refs: Vec<String>,
+        #[arg(long)]
+        style: Option<String>,
+        #[arg(long)]
+        label: Option<String>,
+        #[arg(long, conflicts_with = "label")]
+        clear: bool,
+    },
+    /// Say what you are doing, in one line under every window's People
+    /// strip, with --ref for what you are working on; "" clears it.
+    /// Through the daemon.
+    Status {
+        text: String,
+        #[arg(long = "ref", value_name = "REF")]
+        refs: Vec<String>,
+    },
+    /// What a window shows (the one person attached by default); `view
+    /// set` sets yours. Through the daemon.
+    View {
+        #[command(subcommand)]
+        cmd: Option<ViewCmd>,
+        /// A participant's ID (`participants` lists them).
+        #[arg(long)]
+        of: Option<String>,
+    },
+    /// Show a reference to a participant (every person attached by
+    /// default): an item opens, a line opens its item's BOM, an import
+    /// the Imports tab, and it is selected. Through the daemon.
+    Show {
+        #[arg(value_name = "REF")]
+        reference: String,
+        /// A participant's ID (`participants` lists them).
+        #[arg(long = "for", value_name = "PARTICIPANT")]
+        participant: Option<String>,
+    },
+    /// Cancel a running long request by its token (through the daemon).
+    Cancel {
+        token: String,
+    },
     Watch {
         #[arg(long = "topic")]
         topics: Vec<String>,
@@ -193,6 +257,46 @@ enum Command {
     },
     #[command(subcommand)]
     Daemon(DaemonCmd),
+}
+
+#[derive(Subcommand)]
+enum ViewCmd {
+    /// Set your window's view, whole: the open item, its tab and the
+    /// list's filter.
+    Set {
+        /// An item's ID or number.
+        #[arg(long)]
+        item: Option<String>,
+        /// bom, where_used, findings, changes, releases, imports,
+        /// documents or activity.
+        #[arg(long)]
+        tab: Option<String>,
+        #[arg(long)]
+        text: Option<String>,
+        #[arg(long)]
+        class: Option<String>,
+        #[arg(long)]
+        state: Option<String>,
+        /// errors or warnings.
+        #[arg(long)]
+        faults: Option<String>,
+        /// An import mapping's name.
+        #[arg(long)]
+        source: Option<String>,
+        /// id, number, name or class.
+        #[arg(long)]
+        sort: Option<String>,
+    },
+}
+
+/// A highlight style by name.
+fn style(s: &str) -> Result<ryu_session::live::Style> {
+    serde_json::from_value(json!(s)).map_err(|_| {
+        Error::new(
+            Code::Usage,
+            format!("--style is pending, changed or note, not {s:?}"),
+        )
+    })
 }
 
 /// What `item create` and `item edit` set.
@@ -1324,6 +1428,124 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
         Command::Participants => (root()?, Request::ParticipantList {}),
         Command::Undo { entry } => (root()?, Request::Undo { entry: *entry }),
         Command::Redo { entry } => (root()?, Request::Redo { entry: *entry }),
+        Command::Select {
+            refs,
+            add,
+            remove,
+            clear,
+        } => {
+            if refs.is_empty() != *clear {
+                return Err(Error::new(
+                    Code::Usage,
+                    "name references to select, or --clear, not both",
+                ));
+            }
+            let mode = if *add {
+                SelectMode::Add
+            } else if *remove {
+                SelectMode::Remove
+            } else {
+                SelectMode::Replace
+            };
+            (
+                root()?,
+                Request::SelectionSet {
+                    refs: refs.clone(),
+                    mode,
+                },
+            )
+        }
+        Command::Selection { of } => (
+            root()?,
+            Request::SelectionGet {
+                participant: of.clone(),
+            },
+        ),
+        Command::Highlight {
+            refs,
+            style: named,
+            label,
+            clear,
+        } => {
+            let named = named.as_deref().map(style).transpose()?;
+            let req = match (*clear, refs.is_empty()) {
+                (true, true) => Request::HighlightClear { style: named },
+                (false, false) => Request::HighlightSet {
+                    refs: refs.clone(),
+                    style: named.unwrap_or_default(),
+                    label: label.clone(),
+                },
+                _ => {
+                    return Err(Error::new(
+                        Code::Usage,
+                        "name references to highlight, or --clear, not both",
+                    ));
+                }
+            };
+            (root()?, req)
+        }
+        Command::Status { text, refs } => (
+            root()?,
+            Request::ActivitySet {
+                status: text.clone(),
+                refs: refs.clone(),
+            },
+        ),
+        Command::View { cmd: None, of } => (
+            root()?,
+            Request::ViewGet {
+                participant: of.clone(),
+            },
+        ),
+        Command::View {
+            cmd:
+                Some(ViewCmd::Set {
+                    item,
+                    tab,
+                    text,
+                    class,
+                    state,
+                    faults,
+                    source,
+                    sort,
+                }),
+            ..
+        } => {
+            let list = ryuplm::view::List {
+                text: text.clone(),
+                class: class.clone(),
+                state: state.clone(),
+                faults: faults.clone(),
+                source: source.clone(),
+                sort: sort.clone(),
+            };
+            let list = (list != ryuplm::view::List::default()).then_some(list);
+            (
+                root()?,
+                Request::ViewSet {
+                    item: item.clone(),
+                    tab: tab.clone(),
+                    list,
+                },
+            )
+        }
+        Command::Show {
+            reference,
+            participant,
+        } => (
+            root()?,
+            Request::ViewShow {
+                reference: reference.clone(),
+                participant: participant.clone(),
+            },
+        ),
+        Command::Cancel { token } => (
+            root()?,
+            Request::RequestCancel {
+                token: token.clone(),
+                name: None,
+            },
+        ),
         // Version, Init, Watch, Daemon, Git, Merge, Review, Number and
         // where-used --org are not requests.
         Command::Version

@@ -320,6 +320,15 @@ fn every_protocol_method_has_a_command() {
         ("activity.log", &["history"]),
         ("undo", &["undo"]),
         ("redo", &["redo"]),
+        ("selection.get", &["selection"]),
+        ("selection.set", &["select"]),
+        ("highlight.set", &["highlight"]),
+        ("highlight.clear", &["highlight"]),
+        ("activity.set", &["status"]),
+        ("view.get", &["view"]),
+        ("view.set", &["view", "set"]),
+        ("view.show", &["show"]),
+        ("request.cancel", &["cancel"]),
         ("session.hello", &["participants"]),
         ("participant.list", &["participants"]),
         ("subscribe", &["watch"]),
@@ -828,4 +837,55 @@ fn the_services_answers_from_the_cli() {
             "{v}"
         );
     }
+}
+
+/// The live session from the CLI (design 938): an agent selects by
+/// number and the session keeps the ID; highlights, status and a view;
+/// a show with nobody attached shows no one; and none of it in process.
+#[test]
+fn live_requests_from_the_cli() {
+    let p = Pair::project();
+    let d = p.daemon.clone();
+    assert_eq!(p.run_in(&d, &["item", "create", "A-1"]).0, 0);
+    let (c, v) = p.run_in(&d, &["select", "item/A-1"]);
+    assert_eq!(c, 0, "{v}");
+    let picked = v["result"]["selection"][0].as_str().unwrap().to_owned();
+    assert!(
+        picked.starts_with("item/") && picked != "item/A-1",
+        "{picked}"
+    );
+    let (_, who) = p.run_in(&d, &["participants"]);
+    let agent = who["result"]["participants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["name"] == "agent")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (_, s) = p.run_in(&d, &["selection", "--of", &agent]);
+    assert_eq!(s["result"]["objects"][0]["number"], "A-1");
+    for args in [
+        &["highlight", "item/A-1", "--style", "pending"][..],
+        &["highlight", "--clear"],
+        &["status", "renumbering", "--ref", "item/A-1"],
+        &[
+            "view", "set", "--item", "A-1", "--tab", "bom", "--sort", "number",
+        ],
+    ] {
+        let (c, v) = p.run_in(&d, args);
+        assert_eq!(c, 0, "{args:?}: {v}");
+    }
+    let (_, v) = p.run_in(&d, &["view", "--of", &agent]);
+    assert_eq!(v["result"]["view"]["tab"], "bom");
+    assert_eq!(v["result"]["view"]["list"]["sort"], "number");
+    let (c, v) = p.run_in(&d, &["show", "item/A-1"]);
+    assert_eq!((c, &v["result"]["shown"]), (0, &json!([])), "{v}");
+    let (_, v) = p.run_in(&d, &["select", "item/NOPE"]);
+    assert_eq!(v["error"]["code"], "item_not_found");
+    let (_, v) = p.run_in(&d, &["highlight", "item/A-1", "--style", "loud"]);
+    assert_eq!(v["error"]["code"], "usage");
+    let (_, v) = p.run_in(&p.direct, &["select", "item/A-1"]);
+    assert_eq!(v["error"]["code"], "no_live_session");
 }
