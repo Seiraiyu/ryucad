@@ -15,10 +15,12 @@ serde_json = { version = "1", features = ["float_roundtrip"] }
 # build it: static musl binaries need no system OpenSSL (see ryucad's
 # Cargo.toml for why ring).
 ureq = { version = "3", default-features = false, features = ["rustls"] }
+# The store stand-in's keys (`testing::Store`).
+blake3 = { version = "1", features = ["pure"], optional = true }
 
 [features]
 # `testing::Fake`, a stand-in for the service, for products' tests.
-testing = []
+testing = ["dep:blake3"]
 
 [dev-dependencies]
 tempfile = "3"
