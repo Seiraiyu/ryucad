@@ -125,12 +125,22 @@ fn a_hundred_thousand_items_in_the_window() {
     h.step();
     h.step();
     let r = h.state().opened().unwrap().rows.get(0).unwrap().clone();
+    // The agent watches as agents do: one connection, its hello once.
+    let mut conn = daemon().connect(&root).unwrap();
+    conn.call(&ryuplm::proto::Request::SessionHello {
+        kind: ryu_session::live::Kind::Agent,
+        name: Some("agent".into()),
+        participant: None,
+    })
+    .unwrap()
+    .unwrap();
+    let get = ryuplm::proto::Request::SelectionGet { participant: None };
     let t = Instant::now();
     h.get_by_label(format!("{} {}", r.number, r.name.clone().unwrap_or_default()).trim())
         .click();
     loop {
         h.step();
-        if agent(&root, "selection.get", json!({}))["selection"] == json!([r.reference()]) {
+        if conn.call(&get).unwrap().unwrap()["selection"] == json!([r.reference()]) {
             break;
         }
     }

@@ -882,6 +882,21 @@ impl Window {
             (Some(r), false) => self.selection = vec![r],
         }
         self.select.due();
+        // Sent now when the throttle allows, ahead of the readers the pick
+        // starts (a click opens the item: its card and BOM go aside too, and
+        // at 100,000 items each costs a freshness scan, #1018). Otherwise
+        // the next tick sends the last value.
+        self.send_selection(std::time::Instant::now());
+    }
+
+    /// The selection to the daemon, when the throttle allows. Pointing
+    /// goes aside, as the readers do: the main connection is the Items
+    /// list's, so a search never waits behind it.
+    fn send_selection(&mut self, now: Instant) {
+        if self.select.ready(now) {
+            let refs = self.selection.clone();
+            self.send_aside(req("selection.set", json!({"refs": refs})), Why::Quiet);
+        }
     }
 
     /// Go to: the session shows `reference` to this window's participant,
@@ -957,12 +972,7 @@ impl Window {
             self.started = true;
             self.ask_all();
         }
-        if self.select.ready(now) {
-            let refs = self.selection.clone();
-            // Pointing goes aside, as the readers do: the main connection
-            // is the Items list's, so a search never waits behind it.
-            self.send_aside(req("selection.set", json!({"refs": refs})), Why::Quiet);
-        }
+        self.send_selection(now);
         if self.view.ready(now) && self.following.is_none() {
             let v = self.view_now();
             let mut p = json!({"list": v.list});
