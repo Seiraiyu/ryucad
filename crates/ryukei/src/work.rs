@@ -552,7 +552,8 @@ pub(crate) fn run<T>(
 /// [`run`] for a call that settles its own budget (plan 23.C's partial
 /// delete keeps what it built and reports the rest): what it spent is
 /// counted, a cancel still answers `Cancelled`, and past the budget its
-/// answer stands.
+/// answer stands. A refusal past the budget is the budget's, as in
+/// [`run`]: the call never got to keep anything.
 pub(crate) fn run_keeping<T>(
     work: &Work<'_>,
     f: impl FnOnce(&Meter<'_>) -> Result<T, Error>,
@@ -568,6 +569,12 @@ pub(crate) fn run_keeping<T>(
         });
     if m.halted.get() && work.cancelled() {
         return Err(Error::Cancelled);
+    }
+    if r.is_err() && spent > work.budget {
+        return Err(Error::BudgetExceeded {
+            spent,
+            budget: work.budget,
+        });
     }
     r
 }
@@ -862,6 +869,26 @@ mod tests {
         assert_eq!(r, Err(Error::Cancelled));
         let w = Work::unlimited();
         assert_eq!(run_keeping(&w, |m| Ok(m.stop_cause())), Ok(None));
+    }
+
+    /// Plan 23.D: a call that refuses past its budget (a partial delete's
+    /// recognition halted before anything was built) answers
+    /// `BudgetExceeded`, as `run` does; one that refuses within it keeps
+    /// its own refusal.
+    #[test]
+    fn run_keeping_answers_the_budget_for_a_refusal_past_it() {
+        let w = Work::unlimited().with_budget(3);
+        let r: Result<(), Error> = run_keeping(&w, |m| {
+            let _ = m.charge(5);
+            Err(Error::NonFinite)
+        });
+        assert_eq!(r, Err(Error::BudgetExceeded { spent: 5, budget: 3 }));
+        let w = Work::unlimited().with_budget(3);
+        let r: Result<(), Error> = run_keeping(&w, |m| {
+            let _ = m.charge(2);
+            Err(Error::NonFinite)
+        });
+        assert_eq!(r, Err(Error::NonFinite));
     }
 
     /// STC 07's shape (#658): a rung of pairs, each able to spend a
