@@ -173,7 +173,7 @@ fn gather_with(
 /// edges, whose pcurves may start apart by up to the vertex's tolerance:
 /// each visit then takes its own parameters, and the segments arriving at
 /// the two cross where they meet (#1029: a tolerant intersect's plane
-/// face, two visits 2.4e-7 apart at a vertex of tolerance 1e-5). In the
+/// face, two visits 2.4e-7 apart, moved by 1e-5). In the
 /// tube model both are the vertex, so a later visit whose point and whose
 /// way to the first visit (the parameters' midpoint) lie on the surface
 /// within the vertex's tolerance of it takes the first visit's parameters,
