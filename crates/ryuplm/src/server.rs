@@ -242,6 +242,18 @@ fn dispatch(
             storage,
             expected_revision,
         } => crate::documents::move_to(session, &document, &storage, expected_revision.as_deref())?,
+        Request::DocumentSync {
+            document,
+            pin,
+            dry_run,
+            expected_revision,
+        } => crate::documents::sync(
+            session,
+            &document,
+            pin,
+            dry_run,
+            expected_revision.as_deref(),
+        )?,
         Request::DocumentLocate {
             documents,
             rev,

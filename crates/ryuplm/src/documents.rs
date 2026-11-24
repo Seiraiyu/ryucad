@@ -293,15 +293,45 @@ fn to_upload(id: &Id, d: &Document) -> Value {
     json!([{"document": id, "blake3": d.file.blake3, "size": d.file.size}])
 }
 
-/// The record's `file` for a Drive pin (Task 14).
+/// The record's `file` for a Drive pin, and for Git storage the bytes from
+/// the cache, which the CLI has filled.
 fn pinned_file(
-    _pin: &crate::docstore::DrivePin,
-    _storage: Storage,
+    pin: &crate::docstore::DrivePin,
+    storage: Storage,
 ) -> Result<(File, Option<Arc<[u8]>>)> {
-    Err(Error::new(
-        Code::Usage,
-        "Drive pins come with document sync",
-    ))
+    let mut f = File::of(&pin.name, b"", Some(&pin.media_type))
+        .or_else(|_| File::of(&pin.name, b"", None))?;
+    f.size = pin.size;
+    f.blake3 = pin.blake3.clone();
+    let bytes = match storage {
+        Storage::Service => None,
+        Storage::Git => {
+            if pin.size > TOO_LARGE {
+                return Err(Error::new(
+                    Code::DocumentTooLarge,
+                    format!(
+                        "Drive file {} is {} bytes, over the 100 MiB GitHub takes: add it with --storage service",
+                        pin.drive_id, pin.size
+                    ),
+                ));
+            }
+            Some(
+                crate::store::Cache::open()?
+                    .get(&pin.blake3, pin.size)?
+                    .ok_or_else(|| {
+                        Error::new(
+                            Code::DocumentBytesMissing,
+                            format!(
+                                "Drive file {}'s bytes aren't in this machine's cache",
+                                pin.drive_id
+                            ),
+                        )
+                        .with("blake3", &pin.blake3)
+                    })?,
+            )
+        }
+    };
+    Ok((f, bytes))
 }
 
 pub fn add(
@@ -1093,6 +1123,71 @@ pub fn move_to(
             Ok(shown(session, &id))
         }
     }
+}
+
+/// `document.sync`: the document's `file` and `pin` from a Drive pin of
+/// its own Drive file, and for Git storage its bytes. A pin of the
+/// revision and hash it has writes nothing (`unchanged`); `dry_run`
+/// answers what would change.
+pub fn sync(
+    session: &mut Session,
+    document: &str,
+    pin: crate::docstore::DrivePin,
+    dry_run: bool,
+    expected: Option<&str>,
+) -> Result<Value> {
+    let (id, mut d) = current(session, document, expected)?;
+    let Some(had) = d.pin.clone() else {
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!("document {id} has no Drive file to sync"),
+        )
+        .with("document", &id));
+    };
+    if had.drive_id != pin.drive_id {
+        return Err(Error::new(
+            Code::InvalidParam,
+            format!("document {id} is pinned to Drive file {}", had.drive_id),
+        )
+        .with("document", &id));
+    }
+    let unchanged = had.revision == pin.revision && d.file.blake3 == pin.blake3;
+    if unchanged || dry_run {
+        let mut v = shown(session, &id);
+        v["unchanged"] = json!(unchanged);
+        v["written"] = json!(false);
+        if !unchanged {
+            v["would"] = json!({"revision": pin.revision, "blake3": pin.blake3, "size": pin.size});
+        }
+        return Ok(v);
+    }
+    let old = bytes_path(&id, &d.file.name);
+    let (f, bytes) = pinned_file(&pin, d.storage)?;
+    d.file = f;
+    d.pin = Some(crate::document::Pin {
+        drive_id: pin.drive_id.clone(),
+        revision: pin.revision.clone(),
+    });
+    let text = text_of(&id, &d)?;
+    let new = bytes_path(&id, &d.file.name);
+    let mut writes = vec![(document_path(&id), Some(text))];
+    if d.storage == Storage::Git && old != new {
+        writes.push((old, None));
+    }
+    let b = bytes.map(|b| vec![(new, b)]).unwrap_or_default();
+    commit_with(
+        session,
+        &format!("syncing document {id} to Drive revision {}", pin.revision),
+        Writes(writes),
+        b,
+    )?;
+    let mut v = shown(session, &id);
+    v["unchanged"] = json!(false);
+    v["written"] = json!(true);
+    if d.storage == Storage::Service {
+        v["to_upload"] = to_upload(&id, &d);
+    }
+    Ok(v)
 }
 
 #[cfg(test)]
@@ -2020,6 +2115,97 @@ pub(crate) mod tests {
         assert_eq!(
             (e.code, e.details["storage"].clone()),
             (Code::DocumentBytesMissing, json!("service"))
+        );
+    }
+
+    fn pin(revision: &str, bytes: &[u8]) -> crate::docstore::DrivePin {
+        crate::docstore::DrivePin {
+            drive_id: "1AbC_d-9".into(),
+            revision: revision.into(),
+            name: "Spec: A.pdf".into(),
+            media_type: "application/pdf".into(),
+            size: bytes.len() as u64,
+            blake3: blake3::hash(bytes).to_hex().to_string(),
+        }
+    }
+
+    #[test]
+    fn a_drive_pin_makes_and_moves_a_document() {
+        let _l = CACHE_LOCK.lock().unwrap();
+        let cache = cache_env();
+        let (_d, root) = catalogue();
+        let c = crate::store::Cache::at(cache.path());
+        c.put_bytes(b"one").unwrap();
+        let v = ask(
+            &root,
+            Request::DocumentAdd {
+                file: None,
+                number: Some("D-1".into()),
+                next: None,
+                fields: New::default(),
+                storage: None,
+                drive: Some(pin("r1", b"one")),
+                expected_revision: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(v["document"]["title"], "Spec: A.pdf");
+        assert_eq!(v["document"]["file"]["name"], "Spec_ A.pdf");
+        assert_eq!(
+            v["document"]["pin"],
+            json!({"drive_id": "1AbC_d-9", "revision": "r1"})
+        );
+        assert_eq!(
+            std::fs::read(root.join(v["bytes"].as_str().unwrap())).unwrap(),
+            b"one"
+        );
+        let id = v["document"]["id"].as_str().unwrap().to_owned();
+        let same = ask(
+            &root,
+            Request::DocumentSync {
+                document: id.clone(),
+                pin: pin("r1", b"one"),
+                dry_run: false,
+                expected_revision: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(same["unchanged"], true);
+        c.put_bytes(b"two!").unwrap();
+        let dry = ask(
+            &root,
+            Request::DocumentSync {
+                document: id.clone(),
+                pin: pin("r2", b"two!"),
+                dry_run: true,
+                expected_revision: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            (dry["unchanged"].as_bool(), dry["written"].as_bool()),
+            (Some(false), Some(false))
+        );
+        let v = ask(
+            &root,
+            Request::DocumentSync {
+                document: id,
+                pin: pin("r2", b"two!"),
+                dry_run: false,
+                expected_revision: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                v["document"]["pin"]["revision"].as_str(),
+                v["document"]["file"]["size"].as_u64()
+            ),
+            (Some("r2"), Some(4))
+        );
+        assert_eq!(
+            std::fs::read(root.join(v["bytes"].as_str().unwrap())).unwrap(),
+            b"two!"
         );
     }
 }

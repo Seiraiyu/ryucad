@@ -214,6 +214,16 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
+    #[serde(rename = "document.sync")]
+    DocumentSync {
+        document: String,
+        /// The Drive revision the CLI pinned.
+        pin: crate::docstore::DrivePin,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        dry_run: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     #[serde(rename = "document.remove")]
     DocumentRemove {
         document: String,
@@ -552,6 +562,7 @@ impl Request {
                 | Request::DocumentRenumber { .. }
                 | Request::DocumentReplace { .. }
                 | Request::DocumentMove { .. }
+                | Request::DocumentSync { .. }
                 | Request::DocumentRemove { .. }
                 | Request::DocumentAttach { .. }
                 | Request::DocumentDetach { .. }
@@ -624,6 +635,19 @@ mod tests {
                 },
                 storage: None,
                 drive: None,
+                expected_revision: None,
+            },
+            Request::DocumentSync {
+                document: "DOC-1".into(),
+                pin: crate::docstore::DrivePin {
+                    drive_id: "f1".into(),
+                    revision: "r2".into(),
+                    name: "Spec.pdf".into(),
+                    media_type: "application/pdf".into(),
+                    size: 3,
+                    blake3: "a".repeat(64),
+                },
+                dry_run: true,
                 expected_revision: None,
             },
             Request::DocumentLocate {
