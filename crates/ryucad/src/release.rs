@@ -20,29 +20,14 @@ use crate::error::{Code, Error, Result};
 use crate::part::{check_revision, part_id};
 use crate::proto::VersionInfo;
 use crate::session::Session;
-use ryupdm::approvals::Rule;
-use ryupdm::attest::Verdict;
 use ryupdm::config::Config;
 use ryupdm::history::Releases;
 use ryupdm::props::Pdm;
-use ryupdm::record::{BuiltWith, Kind, Obsolete, Record, Records, Release, ReleasedBy};
-use ryupdm::state::{self, Status};
+use ryupdm::record::{BuiltWith, Kind, Obsolete, Record, Records, Release};
+use ryupdm::release::{check_pending, ordered, refs_key, released_by, required, state_value};
+use ryupdm::state;
 use ryupdm::structure::At;
 use serde_json::{Value, json};
-
-/// What the release branch as read depends on: the branch's name and
-/// tip, and every `ryupdm/` tag.
-fn refs_key(repo: &crate::git::Repo, config: &Config) -> Result<String> {
-    let branch = ryupdm::history::branch(repo.gix(), &config.release_branch)?;
-    // Each tag's own object as well as its commit: a tag replaced at the
-    // same commit says something else.
-    let tags = ryupdm::history::tag_refs(repo.gix())?;
-    Ok(format!(
-        "{}\0{:?}\0{tags:?}",
-        config.release_branch,
-        branch.map(|b| b.tip)
-    ))
-}
 
 /// The project's repository and its release branch as read, from the
 /// session's copy while the refs haven't moved; `not_a_git_repo` outside
@@ -50,7 +35,7 @@ fn refs_key(repo: &crate::git::Repo, config: &Config) -> Result<String> {
 pub(crate) fn history(session: &mut Session) -> Result<(crate::git::Repo, Releases)> {
     let repo = crate::git::repo(session.root())?;
     let config = Config::read(&*session)?;
-    let key = refs_key(&repo, &config)?;
+    let key = refs_key(repo.gix(), &config)?;
     if let Some(r) = session.caches().releases(&key) {
         return Ok((repo, r.clone()));
     }
@@ -65,7 +50,7 @@ pub(crate) fn history(session: &mut Session) -> Result<(crate::git::Repo, Releas
 pub(crate) fn refs(session: &Session) -> Option<String> {
     let repo = crate::git::repo(session.root()).ok()?;
     let config = Config::read(session).ok()?;
-    refs_key(&repo, &config).ok()
+    refs_key(repo.gix(), &config).ok()
 }
 
 /// `part` as the release `rev` names has it, for an instance: one of the
@@ -198,20 +183,6 @@ pub(crate) fn is_newer(session: &Session, a: &str, b: &str) -> Result<bool> {
     let config = Config::read(session)?;
     let order = |l: &str| ryupdm::bom::rev_order(config.revisions, &Rev::Label(l.to_owned()));
     Ok(order(a) > order(b))
-}
-
-/// Who is writing a record: Git's author identity, and the participant.
-fn released_by(repo: &crate::git::Repo, participant: &str) -> ReleasedBy {
-    let author = repo.gix().author().and_then(|a| a.ok());
-    let text = |s: &[u8]| {
-        let s = String::from_utf8_lossy(s).trim().to_owned();
-        (!s.is_empty()).then_some(s)
-    };
-    ReleasedBy {
-        name: author.as_ref().and_then(|a| text(a.name)),
-        email: author.as_ref().and_then(|a| text(a.email)),
-        participant: participant.to_owned(),
-    }
 }
 
 /// Why `part` can't be released as it is: every load, rebuild and
@@ -406,44 +377,6 @@ fn write(session: &mut Session, record: &Record) -> Result<Value> {
     Ok(v)
 }
 
-/// The part's records, in order, refusing those this build can't read.
-fn ordered<'a>(
-    config: &Config,
-    records: &'a Records,
-    part: &'a Id,
-) -> Result<Vec<(&'a ryupdm::record::Entry, &'a Record)>> {
-    for e in records.of(part) {
-        if let Err(err) = &e.record {
-            return Err(err.clone());
-        }
-    }
-    state::ordered(config.revisions, records, part)
-}
-
-/// Refuses while any record of `part` is still proposed.
-fn check_pending(
-    releases: &Releases,
-    list: &[(&ryupdm::record::Entry, &Record)],
-    part: &Id,
-) -> Result<()> {
-    if let Some((e, _)) = list
-        .iter()
-        .find(|(e, _)| !releases.official.contains_key(&e.path))
-    {
-        return Err(Error::new(
-            Code::ReleasePending,
-            format!(
-                "{part} already has a proposed record, {}, that isn't official yet: merge it to the release branch, or delete it to withdraw it",
-                e.path
-            ),
-        )
-        .with("part", part)
-        .with("path", &e.path)
-        .with("label", &e.label));
-    }
-    Ok(())
-}
-
 /// What a proposal of a part would write, every check passed: its label,
 /// what it supersedes, and the record's content.
 struct Proposal {
@@ -482,21 +415,10 @@ fn prepare(session: &mut Session, id: &Id, expected: Option<&str>) -> Result<Pro
         .with("problems", &problems));
     }
     let files = session.snapshot();
-    let s = state::of(&files, &config, &records, id, &releases);
-    if let Status::Released(label) = &s.status {
-        return Err(Error::new(
-            Code::NothingToRelease,
-            format!("{id} is revision {label} as released: nothing to release"),
-        )
-        .with("part", id)
-        .with("label", label));
-    }
-    let label = s.next.clone().expect("a known state");
-    let supersedes = list
-        .iter()
-        .rev()
-        .find(|(e, _)| e.kind == Kind::Release)
-        .map(|(e, _)| e.label.clone());
+    // Checks pending again, which is harmless; an unknown state is an
+    // error where this was an `expect`.
+    let ryupdm::release::Next { label, supersedes } =
+        ryupdm::release::next_for::<ryupdm::cad::Cad>(&files, &config, &records, &releases, id)?;
     let content = ryupdm::content::hash(&files, id)?;
     let props = ryupdm::props::read(&files, id)?;
     let results = session
@@ -572,7 +494,7 @@ pub fn propose(
             commit: v.commit,
             product: None,
         },
-        released_by: released_by(&repo, participant),
+        released_by: released_by(repo.gix(), participant),
         supersedes: p.supersedes,
         note,
     });
@@ -598,49 +520,13 @@ pub fn obsolete(
     let files = session.snapshot();
     let config = Config::read(&files)?;
     let records = Records::read(&files)?;
-    let list = ordered(&config, &records, &id)?;
-    check_pending(&releases, &list, &id)?;
-    let latest = list
-        .iter()
-        .rev()
-        .find(|(e, _)| e.kind == Kind::Release && releases.official.contains_key(&e.path));
-    let Some((latest, _)) = latest else {
-        return Err(Error::new(
-            Code::InvalidParam,
-            format!("{id} has no official release to make obsolete"),
-        )
-        .with("part", &id)
-        .with("param", "label"));
-    };
-    if latest.label != label {
-        return Err(Error::new(
-            Code::InvalidParam,
-            format!(
-                "{id}'s latest official revision is {}: only it can be made obsolete",
-                latest.label
-            ),
-        )
-        .with("part", &id)
-        .with("param", "label")
-        .with("latest", &latest.label));
-    }
-    if list
-        .iter()
-        .any(|(e, _)| e.kind == Kind::Obsolete && e.label == label)
-    {
-        return Err(Error::new(
-            Code::NothingToRelease,
-            format!("{id} {label} is already obsolete"),
-        )
-        .with("part", &id)
-        .with("label", label));
-    }
+    ryupdm::release::obsolete_target(&config, &records, &releases, &id, label)?;
     let project = crate::pdm::ensure_id(session)?;
     let record = Record::Obsolete(Obsolete {
         project,
         part: id,
         label: label.to_owned(),
-        released_by: released_by(&repo, participant),
+        released_by: released_by(repo.gix(), participant),
         note,
     });
     write(session, &record)
@@ -692,23 +578,6 @@ fn states_key(session: &Session) -> String {
     h.finalize().to_hex().to_string()
 }
 
-/// A part's release state as `pdm.changed` gives it.
-fn state_value(part: &Id, s: &state::State, releases: &Releases) -> Value {
-    let tags: Vec<Value> = releases
-        .official
-        .iter()
-        .filter_map(|(path, o)| {
-            let name = path.strip_prefix(&format!("releases/{part}/"))?;
-            let (label, kind) = ryupdm::record::parse_name(name)?;
-            (kind == Kind::Release).then(|| {
-                json!({"tag": releases.name_of(part, &label, Kind::Release),
-                       "status": releases.tag(part, &label, &o.commit).as_str()})
-            })
-        })
-        .collect();
-    json!({"part": part, "state": s.to_json(), "tags": tags})
-}
-
 /// Each part's release state and its releases' tags, for `pdm.changed`:
 /// `{part, state, tags: [{tag, status}]}` by part.
 pub(crate) fn summary(session: &mut Session) -> std::collections::BTreeMap<Id, Value> {
@@ -744,63 +613,6 @@ pub(crate) fn summary(session: &mut Session) -> std::collections::BTreeMap<Id, V
     out
 }
 
-/// The rules a proposal of `part` will be judged by: those at the release
-/// branch's tip as this clone has it. `None` when none apply.
-fn required(part: &Id, releases: &Releases) -> Option<Value> {
-    let rules = releases.tip_approvals.as_ref()?.applicable(part);
-    (!rules.is_empty()).then(
-        || json!({"required": true, "rules": rules.iter().map(Rule::to_json).collect::<Vec<_>>()}),
-    )
-}
-
-/// An official record's `approval` under rules: how its tag stands and,
-/// where its attestation verifies, who proposed and approved it.
-fn approval(a: &ryupdm::history::Approval) -> Value {
-    let mut v = json!({
-        "rules": a.rules.iter().map(Rule::to_json).collect::<Vec<_>>(),
-        "rules_at": a.rules_at,
-        "status": a.verdict.as_ref().map_or("moved", Verdict::status),
-    });
-    match &a.verdict {
-        Some(Verdict::Invalid(c)) => v["clause"] = json!(c.name()),
-        Some(Verdict::Revoked { key, revoked }) => {
-            v["key"] = json!(key);
-            v["revoked"] = json!(revoked);
-        }
-        Some(Verdict::Unknown { key, format }) => {
-            v["key"] = json!(key);
-            v["format"] = json!(format);
-        }
-        _ => {}
-    }
-    if let Some((at, key)) = a.verdict.as_ref().and_then(Verdict::attestation) {
-        v["outcome"] = json!(at.outcome.as_str());
-        v["approvers"] = json!(
-            at.approvals
-                .iter()
-                .map(|x| {
-                    let mut a = json!({"login": x.github.login, "id": x.github.id, "at": x.at});
-                    if !x.via.is_empty() {
-                        a["via"] = json!(x.via);
-                    }
-                    a
-                })
-                .collect::<Vec<_>>()
-        );
-        v["proposed_by"] = json!({"login": at.proposed_by.login, "id": at.proposed_by.id});
-        v["key"] = json!(key);
-        if !at.missing.is_empty() {
-            v["missing"] = json!(
-                at.missing
-                    .iter()
-                    .map(ryupdm::approvals::Unmet::to_json)
-                    .collect::<Vec<_>>()
-            );
-        }
-    }
-    v
-}
-
 /// An official release's `package` in `release.list` (design 436): how
 /// its package tag stands, and the hash it attests.
 fn package_of(repo: &crate::git::Repo, releases: &Releases, path: &str) -> Value {
@@ -830,58 +642,12 @@ fn listed(
     releases: &Releases,
     repo: Option<&crate::git::Repo>,
 ) -> Value {
-    let has_repo = repo.is_some();
-    let mut v = json!({"part": entry.part, "label": entry.label, "kind": entry.kind.as_str(),
-                       "path": entry.path});
-    match &entry.record {
-        Err(e) => v["error"] = json!(e),
-        Ok(r) => {
-            if let Some(rel) = r.release() {
-                v["supersedes"] = json!(rel.supersedes);
-            }
-            if let Some(n) = r.note() {
-                v["note"] = json!(n);
-            }
-            let by = r.released_by();
-            v["released_by"] = json!({"name": by.name, "email": by.email,
-                                      "participant": by.participant});
-        }
-    }
-    match releases.official.get(&entry.path) {
-        Some(o) => {
-            v["status"] = json!("official");
-            v["commit"] = json!(o.commit);
-            if o.shallow {
-                v["shallow"] = json!(true);
-            }
-            let ruled = releases.approvals.get(&entry.path);
-            if entry.kind == Kind::Release || ruled.is_some() {
-                let t = releases.tag_of(&entry.part, &entry.label, entry.kind, &o.commit);
-                let mut tag = json!({
-                    "name": releases.name_of(&entry.part, &entry.label, entry.kind),
-                    "status": t.as_str()});
-                if let ryupdm::history::Tag::Moved(to) = t {
-                    tag["points_at"] = json!(to);
-                }
-                // Under rules only the service tags it.
-                if ruled.is_some() {
-                    tag["service"] = json!(true);
-                }
-                v["tag"] = tag;
-            }
-            if let Some(a) = ruled {
-                v["approval"] = approval(a);
-            }
-            if let (Kind::Release, Some(repo)) = (entry.kind, repo) {
-                v["package"] = package_of(repo, releases, &entry.path);
-            }
-        }
-        None => {
-            v["status"] = json!(if has_repo { "proposed" } else { "unofficial" });
-            if let Some(a) = required(&entry.part, releases) {
-                v["approval"] = a;
-            }
-        }
+    let mut v = ryupdm::release::listed(entry, releases, repo.is_some());
+    if entry.kind == Kind::Release
+        && releases.official.contains_key(&entry.path)
+        && let Some(repo) = repo
+    {
+        v["package"] = package_of(repo, releases, &entry.path);
     }
     v
 }
@@ -960,70 +726,11 @@ pub fn list(session: &mut Session, part: Option<&str>) -> Result<Value> {
 /// accounts for is reported, never deleted. Fails as a whole on the first
 /// ref that can't be written, saying which were.
 pub fn sync(session: &mut Session) -> Result<Value> {
-    use gix::refs::transaction::{PreviousValue, RefEdit};
     let (repo, releases) = history(session)?;
     ryupdm::history::check_folder(repo.prefix())?;
-    let mut created = Vec::new();
-    let mut left = Vec::new();
-    let mut moved = Vec::new();
-    let mut unchanged = 0;
-    for (path, o) in &releases.official {
-        let mut seg = path.split('/').skip(1);
-        let (Some(part), Some(file)) = (seg.next(), seg.next()) else {
-            continue;
-        };
-        let (Ok(part), Some((label, Kind::Release))) =
-            (Id::parse(part, "part"), ryupdm::record::parse_name(file))
-        else {
-            continue;
-        };
-        let name = releases.name_of(&part, &label, Kind::Release);
-        // Under rules the tag is the service's, annotated and signed.
-        if releases.approvals.contains_key(path) {
-            left.push(json!({"tag": name, "path": path}));
-            continue;
-        }
-        let expected = match releases.tag(&part, &label, &o.commit) {
-            ryupdm::history::Tag::Ok => {
-                unchanged += 1;
-                continue;
-            }
-            ryupdm::history::Tag::Missing => PreviousValue::MustNotExist,
-            ryupdm::history::Tag::Moved(_) => PreviousValue::MustExist,
-        };
-        let failed = |e: String| {
-            Error::new(
-                Code::Internal,
-                format!("writing tag {name}: {e}; tags written before it are kept"),
-            )
-            .with("tag", &name)
-            .with("created", &created)
-            .with("moved", &moved)
-        };
-        let id = gix::ObjectId::from_hex(o.commit.as_bytes()).map_err(|e| failed(e.to_string()))?;
-        let full = gix::refs::FullName::try_from(format!("refs/tags/{name}"))
-            .map_err(|e| failed(e.to_string()))?;
-        let move_from = match &expected {
-            PreviousValue::MustExist => Some(releases.tags[&format!("{part}/{label}")].clone()),
-            _ => None,
-        };
-        repo.gix()
-            .edit_reference(RefEdit::update(full, id, expected, "ryucad release sync"))
-            .map_err(|e| failed(e.to_string()))?;
-        match move_from {
-            Some(from) => moved.push(json!({"tag": name, "from": from, "to": o.commit})),
-            None => created.push(json!({"tag": name, "at": o.commit})),
-        }
-    }
-    let orphaned: Vec<String> = releases
-        .orphaned_tags()
-        .into_iter()
-        .map(|k| releases.name(k))
-        .collect();
-    Ok(
-        json!({"created": created, "moved": moved, "unchanged": unchanged,
-              "orphaned": orphaned, "left_to_service": left}),
-    )
+    // ryupdm's, as ryueda's is: it also refuses a tag that clashes with
+    // another project's (`release_tag_clash`, #844).
+    ryupdm::release::sync(repo.gix(), &releases, "ryucad")
 }
 
 /// Rebuilds released content for `release_result_changed`, once per
@@ -1553,6 +1260,25 @@ pub(crate) mod tests {
             call(&mut t, "release.sync", json!({})).unwrap_err().code,
             Code::NotAGitRepo
         );
+    }
+
+    /// #844, through ryupdm's sync (#888): a tag that is a leading path of
+    /// the release's own (`ryupdm/p` beside `ryupdm/p/A`) is refused, typed,
+    /// and the other tag stays.
+    #[test]
+    fn sync_refuses_a_tag_that_clashes_with_another() {
+        let (dir, mut s) = released_project();
+        let root = dir.path();
+        propose(&mut s).unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-q", "-m", "release A"]);
+        let a = rev(root, "HEAD");
+        git(root, &["tag", "ryupdm/p", "HEAD"]);
+        let err = call(&mut s, "release.sync", json!({})).unwrap_err();
+        assert_eq!(err.code, Code::ReleaseTagClash, "{}", err.message);
+        assert_eq!(err.details["tag"], "ryupdm/p/A");
+        assert_eq!(err.details["clashes"], "ryupdm/p");
+        assert_eq!(rev(root, "ryupdm/p"), a);
     }
 
     /// A repository holding a project in the folder `folder`, with a part
