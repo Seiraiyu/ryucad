@@ -90,7 +90,7 @@ impl<T> Got<T> {
 /// The readers a tile's answers come from.
 pub fn keys_of(tile: &str) -> &'static [&'static str] {
     match tile {
-        "navigator" => &["info", "imports"],
+        "navigator" => &["info", "imports", "counts"],
         "item" => &["card", "settings", "reps"],
         "bom" => &["bom"],
         "where_used" => &["used"],
@@ -104,35 +104,25 @@ pub fn keys_of(tile: &str) -> &'static [&'static str] {
     }
 }
 
-/// `item.list`'s params for a count reader: `count:all`, or
-/// `count:<filter>:<value>`.
-pub fn count_params(key: &str) -> Option<Value> {
-    let rest = key.strip_prefix("count:")?;
-    let mut p = json!({"limit": 0});
-    if rest != "all" {
-        let (k, v) = rest.split_once(':')?;
-        p[k] = json!(v);
+/// The Navigator's counts from `item.list --counts` (one request for
+/// all of them), by the keys the Navigator reads: `count:all`,
+/// `count:class:<c>`, `count:state:<s>`, `count:faults:errors|warnings`
+/// and `count:source:<mapping>`.
+pub fn counts_from(v: &Value) -> BTreeMap<String, usize> {
+    let c = &v["counts"];
+    let n = |x: &Value| x.as_u64().unwrap_or(0) as usize;
+    let mut out = BTreeMap::new();
+    out.insert("count:all".to_owned(), n(&c["all"]));
+    for (group, key) in [("class", "class"), ("state", "state"), ("source", "source")] {
+        for (name, k) in c[group].as_object().into_iter().flatten() {
+            out.insert(format!("count:{key}:{name}"), n(k));
+        }
     }
-    Some(p)
-}
-
-/// The Navigator's counts for `project.info`'s classes: everything, each
-/// class, each state, and items with errors and with warnings.
-pub fn count_keys(info: &Value) -> Vec<String> {
-    let mut out = vec!["count:all".to_owned()];
-    for c in info["classes"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-    {
-        out.push(format!("count:class:{c}"));
+    for s in STATES {
+        out.entry(format!("count:state:{s}")).or_insert(0);
     }
-    out.extend(STATES.iter().map(|s| format!("count:state:{s}")));
-    out.extend([
-        "count:faults:errors".to_owned(),
-        "count:faults:warnings".to_owned(),
-    ]);
+    out.insert("count:faults:errors".to_owned(), n(&c["errors"]));
+    out.insert("count:faults:warnings".to_owned(), n(&c["warnings"]));
     out
 }
 
@@ -225,6 +215,8 @@ pub struct Window {
     pub follow_shows: bool,
     /// The palette's `@` answer.
     pub places: Vec<Place>,
+    /// Whether the first tick has asked for everything (after the rows).
+    started: bool,
     places_query: Option<String>,
 }
 
@@ -235,7 +227,7 @@ impl Window {
         let link = Link::open(root, daemon, name, wake.clone())?;
         let mut people = People::default();
         people.reset(&link.session["participants"]);
-        let mut w = Window {
+        let w = Window {
             root: root.to_owned(),
             name: name.to_owned(),
             daemon: daemon.clone(),
@@ -288,9 +280,9 @@ impl Window {
             following: None,
             follow_shows: crate::core::prefs::flag("ui.follow_shows"),
             places: Vec::new(),
+            started: false,
             places_query: None,
         };
-        w.ask_all();
         Ok(w)
     }
 
@@ -379,13 +371,11 @@ impl Window {
             key: key.to_owned(),
             item,
         };
-        // A check, and where-used and representations, may read other
-        // folders for a while: on the aside connection.
-        if matches!(key, "check" | "used" | "reps") {
-            self.send_aside(r, why);
-        } else {
-            self.send(r, why);
-        }
+        // Every reader on the aside connection: the main one carries the
+        // Items list's windows and pointing, which never queue behind a
+        // tile's answer (at 100,000 items each request is a few hundred
+        // milliseconds of the daemon's).
+        self.send_aside(r, why);
     }
 
     fn request_for(&self, key: &str) -> Option<(Request, Option<String>)> {
@@ -426,7 +416,8 @@ impl Window {
                 let id = k["child:".len()..].to_owned();
                 (req("bom.get", json!({"item": id})), Some(id))
             }
-            k => (req("item.list", count_params(k)?), None),
+            "counts" => (req("item.list", json!({"limit": 0, "counts": true})), None),
+            _ => return None,
         })
     }
 
@@ -696,13 +687,10 @@ impl Window {
         let bad = || Error::new(Code::Internal, "the daemon's answer didn't read");
         match key {
             "info" => {
-                if let Ok(v) = &a {
-                    if let Some(r) = v["revision"].as_str() {
-                        self.rows.moved(r);
-                    }
-                    for k in count_keys(v) {
-                        self.want(&k);
-                    }
+                if let Ok(v) = &a
+                    && let Some(r) = v["revision"].as_str()
+                {
+                    self.rows.moved(r);
                 }
                 self.info.set(a);
             }
@@ -790,11 +778,12 @@ impl Window {
                     g.set(a.map(|v| lists::bom(&v)));
                 }
             }
-            k => {
-                if let Some(t) = a.ok().and_then(|v| v["total"].as_u64()) {
-                    self.counts.insert(k.to_owned(), t as usize);
+            "counts" => {
+                if let Ok(v) = a {
+                    self.counts = counts_from(&v);
                 }
             }
+            _ => {}
         }
     }
 
@@ -962,6 +951,12 @@ impl Window {
         if let Some(a) = self.rows.ask() {
             self.send(req("item.list", Rows::params(&a)), Why::Rows(a));
         }
+        // The first rows are asked before anything else, so they lead the
+        // daemon's queue when the window opens.
+        if !self.started {
+            self.started = true;
+            self.ask_all();
+        }
         if self.select.ready(now) {
             let refs = self.selection.clone();
             self.send(req("selection.set", json!({"refs": refs})), Why::Quiet);
@@ -1046,8 +1041,7 @@ mod tests {
                 "item.list",
                 json!({"offset": 0, "limit": 230, "sort": "number", "text": "bolt"}),
             ),
-            ("item.list", count_params("count:class:fastener").unwrap()),
-            ("item.list", count_params("count:all").unwrap()),
+            ("item.list", json!({"limit": 0, "counts": true})),
             ("item.list", json!({"text": "100-00", "limit": 12})),
             ("item.show", json!({"item": "k3v9q2m8x4c1p"})),
             ("settings.show", json!({})),
@@ -1079,31 +1073,18 @@ mod tests {
     }
 
     #[test]
-    fn counts_are_lists_of_no_rows() {
-        assert_eq!(count_params("count:all"), Some(json!({"limit": 0})));
+    fn the_navigator_s_counts_are_one_answer() {
+        let c = counts_from(&json!({"counts": {"all": 5, "class": {"fastener": 3},
+            "state": {"in_work": 4, "released": 1}, "source": {"erp": 2},
+            "errors": 1, "warnings": 2}}));
+        assert_eq!(c["count:all"], 5);
+        assert_eq!(c["count:class:fastener"], 3);
+        assert_eq!(c["count:state:released"], 1);
+        assert_eq!(c["count:state:obsolete"], 0);
+        assert_eq!(c["count:source:erp"], 2);
         assert_eq!(
-            count_params("count:state:released"),
-            Some(json!({"limit": 0, "state": "released"}))
-        );
-        assert_eq!(
-            count_params("count:faults:errors"),
-            Some(json!({"limit": 0, "faults": "errors"}))
-        );
-        assert_eq!(count_params("bom"), None);
-        let info = json!({"classes": ["fastener", "mech"]});
-        assert_eq!(
-            count_keys(&info),
-            [
-                "count:all",
-                "count:class:fastener",
-                "count:class:mech",
-                "count:state:in_work",
-                "count:state:released",
-                "count:state:modified",
-                "count:state:obsolete",
-                "count:faults:errors",
-                "count:faults:warnings"
-            ]
+            (c["count:faults:errors"], c["count:faults:warnings"]),
+            (1, 2)
         );
     }
 
