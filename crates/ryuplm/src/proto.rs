@@ -457,6 +457,87 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         entry: Option<u64>,
     },
+    /// A participant's selection, and what each reference names:
+    /// `participant`, else the one human (an agent asks what the person
+    /// points at). Needs the daemon.
+    #[serde(rename = "selection.get")]
+    SelectionGet {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        participant: Option<String>,
+    },
+    /// The caller's selection: `refs` (`item/<id or number>`,
+    /// `item/<id>/line/<line>`, `import/<name>`) replace it, or with
+    /// `mode` are added or taken out; none clears it. Needs the daemon.
+    #[serde(rename = "selection.set")]
+    SelectionSet {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        refs: Vec<String>,
+        #[serde(default)]
+        mode: ryu_session::live::SelectMode,
+    },
+    /// Paints references in every window, in the caller's colour and
+    /// `style` (`pending`, `changed`, `note`), replacing its highlight of
+    /// the same style and label. Needs the daemon.
+    #[serde(rename = "highlight.set")]
+    HighlightSet {
+        refs: Vec<String>,
+        #[serde(default)]
+        style: ryu_session::live::Style,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
+    /// Takes away the caller's highlights of `style`, or all of them.
+    #[serde(rename = "highlight.clear")]
+    HighlightClear {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        style: Option<ryu_session::live::Style>,
+    },
+    /// The caller's one-line status (at most 200 characters; empty clears
+    /// it) and the references it is working on, shown under every
+    /// window's People strip. Needs the daemon.
+    #[serde(rename = "activity.set")]
+    ActivitySet {
+        status: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        refs: Vec<String>,
+    },
+    /// What a participant's window shows (`item`, `tab`, `list`,
+    /// `shown_by`): `participant`, else the one human. Needs the daemon.
+    #[serde(rename = "view.get")]
+    ViewGet {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        participant: Option<String>,
+    },
+    /// The caller's window's view, whole: the open item (ID or number),
+    /// its tab and the list's filter. Needs the daemon.
+    #[serde(rename = "view.set")]
+    ViewSet {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        item: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tab: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        list: Option<crate::view::List>,
+    },
+    /// Shows a reference to `participant`, else to every person attached:
+    /// an item opens, a line opens its item at the BOM, an import opens
+    /// the Imports tab, and their selection becomes it. Needs the daemon.
+    #[serde(rename = "view.show")]
+    ViewShow {
+        #[serde(rename = "ref")]
+        reference: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        participant: Option<String>,
+    },
+    /// Cancels the caller's running long request named `token` (the
+    /// connection's participant's, or on a connection that said no hello
+    /// the agent `as`'s). Answered by the daemon's loop.
+    #[serde(rename = "request.cancel")]
+    RequestCancel {
+        token: String,
+        #[serde(rename = "as", default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
     #[serde(rename = "session.hello")]
     SessionHello {
         kind: Kind,
@@ -674,6 +755,31 @@ mod tests {
                 next: Some(String::new()),
                 class: Some("machined".into()),
                 item: None,
+            },
+            Request::SelectionSet {
+                refs: vec!["item/A-1".into()],
+                mode: ryu_session::live::SelectMode::Add,
+            },
+            Request::ViewSet {
+                item: Some("A-1".into()),
+                tab: Some("bom".into()),
+                list: Some(crate::view::List {
+                    text: Some("bolt".into()),
+                    ..Default::default()
+                }),
+            },
+            Request::ViewShow {
+                reference: "import/erp".into(),
+                participant: Some("p-1".into()),
+            },
+            Request::HighlightSet {
+                refs: vec!["item/A-1".into()],
+                style: ryu_session::live::Style::Note,
+                label: Some("why".into()),
+            },
+            Request::RequestCancel {
+                token: "t".into(),
+                name: Some("agent".into()),
             },
         ];
         for r in reqs {

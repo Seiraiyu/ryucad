@@ -42,6 +42,10 @@ impl ryu_session::Serve for Plm {
         match req {
             Request::DaemonStatus {} => Control::Status { timings: false },
             Request::DaemonShutdown {} => Control::Shutdown,
+            Request::RequestCancel { token, name } => Control::Cancel {
+                token: token.clone(),
+                name: name.clone(),
+            },
             Request::Subscribe { topics } => Control::Subscribe(topics.clone()),
             Request::SessionHello {
                 kind, participant, ..
