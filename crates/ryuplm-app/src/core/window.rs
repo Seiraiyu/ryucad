@@ -4,6 +4,7 @@
 //! show. `pump` takes events; `tick` sends what is due and reconnects.
 
 use crate::core::command::{Place, places};
+use crate::core::documents;
 use crate::core::flash::Flash;
 use crate::core::link::{Daemon, Event, Link, Wake};
 use crate::core::lists::{self, BomLine, Card, Change, Entry, Finding, Import, Release, Used};
@@ -97,6 +98,7 @@ pub fn keys_of(tile: &str) -> &'static [&'static str] {
         "releases" => &["releases"],
         "imports" => &["imports"],
         "activity" => &["activity"],
+        "documents" => &["documents"],
         _ => &[],
     }
 }
@@ -193,6 +195,14 @@ pub struct Window {
     pub releases_all: bool,
     pub imports: Got<Vec<Import>>,
     pub activity: Got<Vec<Entry>>,
+    /// The Documents tab: every document (`document.list`), when it lists
+    /// them all or no item is open.
+    pub documents: Got<Vec<documents::Doc>>,
+    /// Each document's card by ID (`document.show`), as the tab needs them.
+    pub doc_cards: BTreeMap<String, Got<documents::Card>>,
+    /// Every document, not only the open item's.
+    pub docs_all: bool,
+    pub docs_query: String,
     /// The bottom tab shown.
     pub tab: Option<String>,
     /// A tab to bring to the front at the next frame (a show named it).
@@ -256,6 +266,10 @@ impl Window {
             releases_all: false,
             imports: Got::default(),
             activity: Got::default(),
+            documents: Got::default(),
+            doc_cards: BTreeMap::new(),
+            docs_all: false,
+            docs_query: String::new(),
             tab: None,
             open_tab: None,
             selection: Vec::new(),
@@ -310,6 +324,10 @@ impl Window {
         for k in kids {
             self.want(&k);
         }
+        let docs: Vec<String> = self.doc_cards.keys().map(|d| format!("doc:{d}")).collect();
+        for k in docs {
+            self.want(&k);
+        }
     }
 
     /// The tile `tile` is drawn this frame: its readers are asked the
@@ -318,6 +336,9 @@ impl Window {
         if self.shown.insert(tile) {
             for k in keys_of(tile) {
                 self.want(k);
+            }
+            if tile == "documents" {
+                self.ask_item_docs();
             }
         }
         if ryuplm::view::TABS.contains(&tile) && self.tab.as_deref() != Some(tile) {
@@ -384,6 +405,17 @@ impl Window {
                 let q = self.places_query.clone()?;
                 (req("item.list", json!({"text": q, "limit": 12})), None)
             }
+            "documents" => {
+                let mut p = json!({"limit": 200});
+                if !self.docs_query.trim().is_empty() {
+                    p["text"] = json!(self.docs_query.trim());
+                }
+                (req("document.list", p), None)
+            }
+            k if k.starts_with("doc:") => {
+                let id = k["doc:".len()..].to_owned();
+                (req("document.show", json!({"document": id})), None)
+            }
             k if k.starts_with("child:") => {
                 let id = k["child:".len()..].to_owned();
                 (req("bom.get", json!({"item": id})), Some(id))
@@ -410,6 +442,7 @@ impl Window {
         self.bom.clear();
         self.used.clear();
         self.children.clear();
+        self.doc_cards.clear();
         let keys: Vec<&'static str> = ["item", "bom", "where_used", "releases"]
             .into_iter()
             .filter(|t| self.shown.contains(t))
@@ -420,6 +453,37 @@ impl Window {
             self.want(k);
         }
         true
+    }
+
+    /// Reads the open item's own documents' cards.
+    fn ask_item_docs(&mut self) {
+        let ids = self
+            .card
+            .value
+            .as_ref()
+            .map(|c| documents::local(&c.documents))
+            .unwrap_or_default();
+        for id in ids {
+            self.want(&format!("doc:{id}"));
+        }
+    }
+
+    /// Every document (and its search), or the open item's.
+    pub fn set_docs(&mut self, all: bool, query: &str) {
+        let moved = self.docs_all != all || self.docs_query != query;
+        self.docs_all = all;
+        self.docs_query = query.to_owned();
+        if moved && all {
+            self.want("documents");
+        }
+    }
+
+    /// The card of document `id`, read once it is wanted.
+    pub fn doc_card(&mut self, id: &str) {
+        if !self.doc_cards.contains_key(id) {
+            self.doc_cards.insert(id.to_owned(), Got::default());
+            self.want(&format!("doc:{id}"));
+        }
     }
 
     /// The Items list's filter and sort.
@@ -606,6 +670,9 @@ impl Window {
                     c
                 });
                 self.card.set(card);
+                if self.shown.contains("documents") {
+                    self.ask_item_docs();
+                }
             }
             "settings" => {
                 if let Ok(v) = a {
@@ -651,6 +718,18 @@ impl Window {
                 if let Ok(v) = a {
                     self.places = places(&v);
                 }
+            }
+            "documents" => self.documents.set(a.map(|v| documents::list(&v))),
+            k if k.starts_with("doc:") => {
+                let card = a.and_then(|v| {
+                    documents::Card::read(&v).ok_or_else(|| {
+                        Error::new(Code::Internal, "the daemon's answer didn't read")
+                    })
+                });
+                self.doc_cards
+                    .entry(k["doc:".len()..].to_owned())
+                    .or_default()
+                    .set(card);
             }
             k if k.starts_with("child:") => {
                 if let Some(g) = self.children.get_mut(&k["child:".len()..]) {
@@ -973,10 +1052,7 @@ mod tests {
         assert!(keys_of("items").is_empty(), "the list asks for itself");
         for (id, _) in crate::core::tiles::TILES {
             if ryuplm::view::TABS.contains(&id) {
-                assert!(
-                    !keys_of(id).is_empty() || id == "documents",
-                    "{id} reads nothing"
-                );
+                assert!(!keys_of(id).is_empty(), "{id} reads nothing");
             }
         }
     }
@@ -992,5 +1068,17 @@ mod tests {
         assert_eq!(seen[0], Duration::from_millis(250));
         assert_eq!(seen[1], Duration::from_millis(500));
         assert_eq!(*seen.last().unwrap(), RETRY_MAX);
+    }
+
+    #[test]
+    fn the_documents_tab_reads_lists_and_cards() {
+        assert_eq!(keys_of("documents"), ["documents"]);
+        for (m, p) in [
+            ("document.list", json!({"limit": 200})),
+            ("document.list", json!({"text": "spec", "limit": 200})),
+            ("document.show", json!({"document": "d000000000001"})),
+        ] {
+            assert!(Request::from_rpc(m, Some(p.clone())).is_ok(), "{m} {p}");
+        }
     }
 }

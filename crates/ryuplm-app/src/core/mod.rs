@@ -2,6 +2,7 @@
 
 pub mod activity;
 pub mod command;
+pub mod documents;
 pub mod flash;
 pub mod keys;
 pub mod launch;
