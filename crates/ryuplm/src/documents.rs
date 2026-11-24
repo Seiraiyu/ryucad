@@ -334,6 +334,7 @@ fn pinned_file(
     Ok((f, bytes))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn add(
     session: &mut Session,
     file: Option<&Path>,
