@@ -694,3 +694,204 @@ fn placements_keepouts_and_drawings_round_trip() {
         assert!(first.is_some());
     }
 }
+
+/// A seeded board's project, loaded.
+fn load(spec: &Spec) -> (tempfile::TempDir, ryueda::project::Project) {
+    let d = tempfile::tempdir().unwrap();
+    board_gen::write(d.path(), spec);
+    let p = ryueda::project::Project::load(d.path()).unwrap();
+    assert!(p.faults().iter().all(|f| !f.is_error()), "{:?}", p.faults());
+    (d, p)
+}
+
+/// Planes on seeded boards of four layers or more (ryueda 7.D): a whole
+/// `in1` plane of the first chain's net, a whole `bottom` pour of the
+/// last's over it in priority, and a contour round one part on `top`.
+/// They raise no finding but opens, starved thermals and empty fills,
+/// none that names a pour; every fill is exactly clear of other nets'
+/// copper by its clearance; one thread and eight alike.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release only: seeded boards filled")]
+fn planes_are_clean_and_fills_find_nothing() {
+    use board_gen::MM;
+    use ryu_copper::measure::{self, Body, BodyOptions, Verdict};
+    use serde_json::json;
+    let id = ryueda::id::Id::parse("main", "board").unwrap();
+    let mut done = 0;
+    for seed in 0..200u64 {
+        if done == 16 {
+            break;
+        }
+        let base = board_gen::seeded_multilayer(seed);
+        if base.layers < 4 {
+            continue;
+        }
+        done += 1;
+        let (_d, p) = load(&base);
+        let s = ryueda::board::shapes::build(&p, &p.boards[&id]).unwrap();
+        let mut tracks: Vec<_> = s.tracks.iter().collect();
+        tracks.sort_by(|a, b| a.id.cmp(&b.id));
+        let first = tracks[0].net.clone();
+        let last = tracks[tracks.len() - 1].net.clone();
+        let m = (base.cols + 1).min(base.count() - 1);
+        let pm: Vec<_> = s
+            .pads
+            .iter()
+            .filter(|x| x.occurrence == base.occurrence(m))
+            .collect();
+        let (mx, my) = ((pm[0].at.x + pm[1].at.x) / 2, (pm[0].at.y + pm[1].at.y) / 2);
+        let h = (pm[0].at.x - pm[1].at.x)
+            .abs()
+            .max((pm[0].at.y - pm[1].at.y).abs())
+            / 2
+            + MM;
+        let round = json!({"start": [mx - h, my - h], "edges": [
+            {"type": "line", "to": [mx + h, my - h]}, {"type": "line", "to": [mx + h, my + h]},
+            {"type": "line", "to": [mx - h, my + h]}, {"type": "line", "to": [mx - h, my - h]}]});
+        let spec = Spec {
+            pours: vec![
+                json!({"net": first, "layer": "in1", "whole": true}),
+                json!({"net": last, "layer": "bottom", "whole": true, "priority": 1}),
+                json!({"net": pm[0].net, "layer": "top", "contour": round}),
+            ],
+            ..base.clone()
+        };
+        let (_d, p) = load(&spec);
+        let b = &p.boards[&id];
+        let run = |threads| {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap()
+                .install(|| {
+                    let s = ryueda::board::shapes::build(&p, b).unwrap();
+                    let c = drc::check(&p, b).unwrap();
+                    (s, c)
+                })
+        };
+        let (s, c) = run(1);
+        assert_eq!(s.pours.len(), 3, "seed {seed}");
+        for f in &c.findings {
+            assert!(
+                matches!(
+                    f.code,
+                    Code::NetOpen | Code::PourThermalStarved | Code::PourEmpty
+                ),
+                "seed {seed}: {f:?}"
+            );
+            if f.code == Code::NetOpen {
+                assert!(
+                    !f.refs.iter().any(|r| r.contains(":pour/")),
+                    "seed {seed}: {f:?}"
+                );
+            }
+        }
+        let opts = BodyOptions::default();
+        let n = s.n();
+        for f in &s.pours {
+            let clearance = f.rules.clearance.value;
+            let mut others: Vec<(&str, &ryu_board::shape::Shape)> = Vec::new();
+            for x in s.pads.iter().filter(|x| x.on(f.layer, n)) {
+                if x.net.as_deref() != Some(f.net.as_str()) {
+                    others.push((&x.reference, &x.copper));
+                }
+            }
+            for t in s
+                .tracks
+                .iter()
+                .filter(|t| t.layer.index(n) == Some(f.layer))
+            {
+                if t.net != f.net {
+                    others.push((t.id.as_str(), &t.shape));
+                }
+            }
+            for v in s
+                .vias
+                .iter()
+                .filter(|v| v.from <= f.layer && f.layer <= v.to)
+            {
+                if v.net != f.net {
+                    others.push((v.id.as_str(), &v.shape));
+                }
+            }
+            for g in s
+                .pours
+                .iter()
+                .filter(|g| g.layer == f.layer && g.net != f.net)
+            {
+                for r in &g.regions {
+                    others.push((g.id.as_str(), r));
+                }
+            }
+            for r in &f.regions {
+                let fill = Body::of_shape(r, &opts);
+                for (what, shape) in &others {
+                    assert_eq!(
+                        measure::closer(&fill, &Body::of_shape(shape, &opts), clearance),
+                        Verdict::No,
+                        "seed {seed}: pour {} within {clearance} nm of {what}",
+                        f.id
+                    );
+                }
+            }
+        }
+        if done % 4 == 1 {
+            let (s8, c8) = run(8);
+            assert_eq!(s.pours, s8.pours, "seed {seed}");
+            assert_eq!(
+                serde_json::to_string(&c.findings).unwrap(),
+                serde_json::to_string(&c8.findings).unwrap(),
+                "seed {seed}"
+            );
+        }
+    }
+    assert_eq!(done, 16);
+}
+
+/// Seeded pours, whole and contoured, with cutouts and every option, read
+/// back and write the same bytes at format 1.
+#[test]
+fn pours_round_trip() {
+    use board_gen::{MM, UM};
+    use serde_json::json;
+    let square = |x: i64, y: i64, h: i64| {
+        json!({"start": [x - h, y - h], "edges": [
+            {"type": "line", "to": [x + h, y - h]}, {"type": "line", "to": [x + h, y + h]},
+            {"type": "line", "to": [x - h, y + h]}, {"type": "line", "to": [x - h, y - h]}]})
+    };
+    for seed in [0u64, 4, 9] {
+        let mut r = seed;
+        let mut draw = |k: u64| board_gen::next(&mut r) % k;
+        let net = "rail:gnd";
+        let pours = vec![
+            json!({"net": net, "layer": "top", "whole": true}),
+            json!({"net": net, "layer": "bottom", "contour": square(5 * MM, 5 * MM, (2 + draw(3) as i64) * MM),
+                   "cutouts": [square(5 * MM, 5 * MM, 500 * UM)],
+                   "priority": 1 + draw(5) as i64, "clearance_nm": 200_000 + 10_000 * draw(10) as i64,
+                   "min_width_nm": 150_000, "connect": "solid", "islands": "keep",
+                   "thermal": {"gap_nm": 300_000 + draw(7) as i64 * UM, "spoke_nm": 400_000}}),
+        ];
+        let spec = Spec {
+            pours,
+            ..board_gen::seeded(seed)
+        };
+        let d = tempfile::tempdir().unwrap();
+        board_gen::write(d.path(), &spec);
+        let p = ryueda::project::Project::load(d.path()).unwrap();
+        let id = ryueda::id::Id::parse("main", "board").unwrap();
+        let b = &p.boards[&id];
+        assert_eq!(b.pours.len(), 2);
+        for (pid, l) in &b.pours {
+            let pour = l.item.as_ref().unwrap();
+            assert!(l.faults.iter().all(|f| !f.is_error()), "{:?}", l.faults);
+            let path = d.path().join(format!("boards/main/pours/{pid}.json"));
+            let text = std::fs::read_to_string(&path).unwrap();
+            assert_eq!(
+                ryueda::doc::to_string(pour, ryueda::board::file::POUR_KIND, 1),
+                text,
+                "{}",
+                path.display()
+            );
+        }
+    }
+}

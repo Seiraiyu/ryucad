@@ -75,6 +75,8 @@ pub struct Spec {
     pub constraints: Vec<(usize, Value)>,
     /// Drawing files' bodies, written as `drawings/d<i>.json` (ryueda 7.C).
     pub drawings: Vec<Value>,
+    /// Pour files' bodies, written as `pours/p<i>.json` (ryueda 7.D).
+    pub pours: Vec<Value>,
 }
 
 impl Spec {
@@ -94,6 +96,7 @@ impl Spec {
             bottom_every: 0,
             rules: None,
             keepouts: Vec::new(),
+            pours: Vec::new(),
             constraints: Vec::new(),
             drawings: Vec::new(),
         }
@@ -255,6 +258,14 @@ pub fn write(dir: &Path, s: &Spec) {
             k.clone(),
         );
     }
+    for (i, p) in s.pours.iter().enumerate() {
+        put(
+            dir,
+            &format!("boards/main/pours/p{i}.json"),
+            "ryueda.pour",
+            p.clone(),
+        );
+    }
     for (i, d) in s.drawings.iter().enumerate() {
         put(
             dir,
@@ -410,6 +421,7 @@ pub fn seeded(seed: u64) -> Spec {
         bottom_every: 0,
         rules: None,
         keepouts: Vec::new(),
+        pours: Vec::new(),
         constraints: Vec::new(),
         drawings: Vec::new(),
     }
