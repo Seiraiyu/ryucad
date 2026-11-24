@@ -5,9 +5,16 @@
 //! with the catalogue: a frame reads at most the rows held.
 
 use serde_json::{Value, json};
+use std::time::{Duration, Instant};
 
 /// How many rows beyond those shown are read, each way.
 pub const AHEAD: usize = 200;
+
+/// How long the list must rest after scrolling before a window is asked
+/// for: a window asked mid-scroll is still out when a search is typed, and
+/// the search's window queues behind it on the daemon (at 100,000 items
+/// each costs a freshness scan, ryu-session's #1018).
+pub const PAUSE: Duration = Duration::from_millis(80);
 
 /// The list's filter and sort, as `view.set` and `item.list` take them.
 pub type Filter = ryuplm::view::List;
@@ -81,12 +88,23 @@ pub struct Rows {
     want: (usize, usize),
     /// The last read failed: the tile greys what it holds.
     pub error: bool,
+    /// When the rows shown last moved (a scroll).
+    scrolled: Option<Instant>,
 }
 
 impl Rows {
     /// The tile shows rows `first..first + count`.
     pub fn view(&mut self, first: usize, count: usize) {
-        self.want = (first, count.max(1));
+        self.view_at(first, count, Instant::now());
+    }
+
+    /// [`Rows::view`] at `now`.
+    pub fn view_at(&mut self, first: usize, count: usize, now: Instant) {
+        let want = (first, count.max(1));
+        if want != self.want {
+            self.want = want;
+            self.scrolled = Some(now);
+        }
     }
 
     /// The catalogue's revision is `revision` (`project.changed`'s or
@@ -115,7 +133,22 @@ impl Rows {
     /// the rows held cover the rows shown at this filter and revision.
     /// It counts as asked.
     pub fn ask(&mut self) -> Option<Ask> {
+        self.ask_at(Instant::now())
+    }
+
+    /// [`Rows::ask`] at `now`. Rows held at this filter and revision that
+    /// only scrolled out of view wait for the list to rest ([`PAUSE`]); a
+    /// new filter, sort or revision, or nothing held, asks at once.
+    pub fn ask_at(&mut self, now: Instant) -> Option<Ask> {
         if self.out.is_some() || self.covered() {
+            return None;
+        }
+        let current = self.held.as_ref() == Some(&(self.filter.clone(), self.revision.clone()));
+        if current
+            && self
+                .scrolled
+                .is_some_and(|t| now.saturating_duration_since(t) < PAUSE)
+        {
             return None;
         }
         let (first, count) = self.want;
@@ -163,6 +196,12 @@ impl Rows {
     /// Row `i` of the list, when held.
     pub fn get(&self, i: usize) -> Option<&Row> {
         i.checked_sub(self.offset).and_then(|k| self.rows.get(k))
+    }
+
+    /// How long until a scrolled list may ask, when it waits to rest.
+    pub fn wait(&self, now: Instant) -> Option<Duration> {
+        let t = self.scrolled?;
+        Some(PAUSE.saturating_sub(now.saturating_duration_since(t))).filter(|d| !d.is_zero())
     }
 
     /// Whether an ask is out.
@@ -221,14 +260,15 @@ mod tests {
         r.view(10, 30);
         assert_eq!(r.ask(), None, "held");
         r.view(500, 30);
-        let b = r.ask().unwrap();
+        assert_eq!(r.ask(), None, "a scroll waits for the list to rest");
+        let b = r.ask_at(Instant::now() + PAUSE).unwrap();
         assert_eq!((b.offset, b.limit), (300, 430));
         assert!(r.get(0).is_some(), "the old rows stay until the new arrive");
         r.answered(&b, &answer(&b, 1000));
         assert!(r.get(0).is_none() && r.get(520).is_some());
         // Past the end: what there is.
         r.view(990, 30);
-        let c = r.ask().unwrap();
+        let c = r.ask_at(Instant::now() + PAUSE).unwrap();
         r.answered(&c, &answer(&c, 1000));
         r.view(990, 30);
         assert_eq!(r.ask(), None);
@@ -288,5 +328,31 @@ mod tests {
                    "source": "erp", "sort": "number", "offset": 0, "limit": 230})
         );
         assert!(ryuplm::proto::Request::from_rpc("item.list", Some(p)).is_ok());
+    }
+
+    #[test]
+    fn a_scroll_waits_to_rest_and_a_search_never_does() {
+        let t0 = Instant::now();
+        let mut r = Rows::default();
+        r.moved("rev-1");
+        r.view_at(0, 30, t0);
+        let a = r.ask_at(t0).expect("nothing held: at once");
+        r.answered(&a, &answer(&a, 100_000));
+        // Scrolled far: nothing asked mid-scroll.
+        r.view_at(5_000, 30, t0);
+        assert_eq!(r.ask_at(t0 + Duration::from_millis(10)), None);
+        assert_eq!(
+            r.wait(t0 + Duration::from_millis(10)),
+            Some(Duration::from_millis(70))
+        );
+        // A search typed meanwhile asks at once, from the top.
+        r.filter(Filter {
+            text: Some("bolt".into()),
+            ..Default::default()
+        });
+        let b = r
+            .ask_at(t0 + Duration::from_millis(10))
+            .expect("a new filter asks at once");
+        assert_eq!((b.offset, b.filter.text.as_deref()), (0, Some("bolt")));
     }
 }

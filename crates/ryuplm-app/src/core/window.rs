@@ -948,7 +948,7 @@ impl Window {
                 self.toasts.error("Open", &e, 0, now);
             }
         }
-        if let Some(a) = self.rows.ask() {
+        if let Some(a) = self.rows.ask_at(now) {
             self.send(req("item.list", Rows::params(&a)), Why::Rows(a));
         }
         // The first rows are asked before anything else, so they lead the
@@ -959,7 +959,9 @@ impl Window {
         }
         if self.select.ready(now) {
             let refs = self.selection.clone();
-            self.send(req("selection.set", json!({"refs": refs})), Why::Quiet);
+            // Pointing goes aside, as the readers do: the main connection
+            // is the Items list's, so a search never waits behind it.
+            self.send_aside(req("selection.set", json!({"refs": refs})), Why::Quiet);
         }
         if self.view.ready(now) && self.following.is_none() {
             let v = self.view_now();
@@ -971,13 +973,18 @@ impl Window {
                 p["tab"] = json!(t);
             }
             self.sent.set(v);
-            self.send(req("view.set", p), Why::Quiet);
+            self.send_aside(req("view.set", p), Why::Quiet);
         }
         let flash = self.flash.due().then_some(Duration::from_millis(33));
-        [self.select.wait(now), self.view.wait(now), flash]
-            .into_iter()
-            .flatten()
-            .min()
+        [
+            self.select.wait(now),
+            self.view.wait(now),
+            self.rows.wait(now),
+            flash,
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     fn reconnect(&mut self, now: Instant) {
