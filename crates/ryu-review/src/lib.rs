@@ -221,7 +221,16 @@ impl Client {
             .with_config()
             .limit(limit)
             .read_to_vec()
-            .map_err(|e| self.unreachable(&e))
+            .map_err(|e| match e {
+                // A body longer than asked is the bytes' fault, not the
+                // network's: callers checking bytes read `details.limit`.
+                ureq::Error::BodyExceedsLimit(_) => Error::new(
+                    Code::ReviewFailed,
+                    format!("{full} answered more than {limit} bytes"),
+                )
+                .with("limit", limit),
+                e => self.unreachable(&e),
+            })
     }
 
     fn answer(

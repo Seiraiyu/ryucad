@@ -26,6 +26,7 @@ pub mod client;
 pub mod daemon;
 pub mod diff;
 pub mod digest;
+pub mod docstore;
 pub mod document;
 pub mod documents;
 pub mod drivers;
