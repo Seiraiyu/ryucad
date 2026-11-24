@@ -1618,6 +1618,78 @@ fn a_rounded_box_through_step_is_defeatured() {
     }
 }
 
+/// ryukei 23.C's bridged twin (`ryukei_testkit::partial_deletes`) written
+/// to STEP in millimetres, in `dir`.
+fn bridged_step(dir: &std::path::Path) -> std::path::PathBuf {
+    use ryustep::{LengthUnit, Product, WriteModel, WriteOptions, write};
+    let bytes = write(
+        &WriteModel {
+            products: vec![Product {
+                id: "bridged".into(),
+                name: "bridged".into(),
+                bodies: vec![ryukei_testkit::partial_deletes::body()],
+                ..Default::default()
+            }],
+        },
+        &WriteOptions {
+            unit: LengthUnit::Millimeter,
+            time_stamp: "2026-11-23T00:00:00".into(),
+            ..WriteOptions::default()
+        },
+    )
+    .unwrap();
+    let out = dir.join("bridged.step");
+    std::fs::write(&out, bytes).unwrap();
+    out
+}
+
+/// Part `p` holding the bridged twin imported as a solid, and the
+/// import's ID (the twin's solid). The two directories hold the STEP file
+/// and the project.
+fn bridged() -> (tempfile::TempDir, tempfile::TempDir, Session, String) {
+    let files = tempfile::tempdir().unwrap();
+    let step = bridged_step(files.path());
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut s = Session::open(dir.path()).unwrap();
+    let v = must(
+        &mut s,
+        "import",
+        json!({"path": step.to_str().unwrap(), "part": "p", "solid": true}),
+    );
+    let imp = v["parts"][0]["features"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    (files, dir, s, imp)
+}
+
+/// The twin through STEP keeps its blends: the 2 mm fillet, both 4 mm
+/// bridges and the 10 mm disc, as `blends.get` lists them; and a plain
+/// delete below 5 mm is the kernel's refusal.
+#[test]
+fn the_bridged_twin_through_step_holds_its_blends() {
+    let (_f, _d, mut s, _imp) = bridged();
+    let listed = must(&mut s, "blends.get", json!({"part": "p"}));
+    let mut radii: Vec<f64> = listed["blends"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["radius"]["m"].as_f64().unwrap())
+        .collect();
+    radii.sort_by(f64::total_cmp);
+    assert_eq!(radii.len(), 4, "{listed}");
+    for (r, want) in radii.iter().zip([0.002, 0.004, 0.004, 0.01]) {
+        assert!((r - want).abs() < 1e-8, "{radii:?}");
+    }
+    add(
+        &mut s,
+        json!({"type": "delete_blend", "id": "d", "below": "5 mm"}),
+    );
+    let e = failure(&mut s, "d");
+    assert_eq!(e.code, Code::TweakFailed, "{e}");
+}
+
 /// The committed NIST corpus (ryustep's `tests/corpus`), each file
 /// imported as solids, each solid's blends at most 2 mm deleted under the
 /// default edit budget: every outcome is a body that passes the kernel's
