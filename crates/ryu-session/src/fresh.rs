@@ -46,6 +46,8 @@ pub struct Stamps {
     /// snapshot is held copies it once (copy on write).
     files: Arc<Files>,
     stamped_at: SystemTime,
+    /// How many files the last scan read (#1050).
+    reads: usize,
 }
 
 impl Default for Stamps {
@@ -54,6 +56,7 @@ impl Default for Stamps {
             stamps: BTreeMap::new(),
             files: Arc::default(),
             stamped_at: SystemTime::now(),
+            reads: 0,
         }
     }
 }
@@ -79,6 +82,7 @@ impl Stamps {
             stamps,
             files: Arc::new(files),
             stamped_at: SystemTime::now(),
+            reads: 0,
         }
     }
 
@@ -125,6 +129,7 @@ impl Stamps {
                 untrusted.push((path, modified, len));
             }
         }
+        self.reads = untrusted.len();
         // Read side by side (#238: a new session reads every file, 107,500
         // at design 192's benchmark), the first failure in order winning.
         let read: Vec<_> = untrusted
@@ -199,6 +204,12 @@ impl Stamps {
             .collect();
         changes.sort();
         Ok(changes)
+    }
+
+    /// How many files the last scan read: those whose stamp moved or
+    /// was too recent to trust (#1050).
+    pub fn last_reads(&self) -> usize {
+        self.reads
     }
 
     /// Every file as last read, relative to the root the stamps were

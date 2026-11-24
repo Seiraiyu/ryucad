@@ -125,7 +125,7 @@ fn ten_thousand_occurrences_flatten_and_check_within_the_bars() {
     println!("a write and the next read through a warm daemon: {worst:?} at worst of five");
     let sync = &spent["result"]["timings"]["syncer"];
     println!(
-        "  rounds (bare CLI/write/read, ms): {}; daemon: {}; {}; {}; {}; {}; {}; syncer: {} batches, {} files, {:.1} ms, longest batch {:.1} ms, longest file {:.1} ms",
+        "  rounds (bare CLI/write/read, ms): {}; daemon: {}; {}; {}; {}; {}; {}; {}; {}; files read {}; syncer: {} batches, {} files, {:.1} ms, longest batch {:.1} ms, longest file {:.1} ms",
         rounds.join(" "),
         method("net.rename"),
         method("net.show"),
@@ -133,6 +133,9 @@ fn ten_thousand_occurrences_flatten_and_check_within_the_bars() {
         method("write.prepare"),
         method("write.files"),
         method("write.adopt"),
+        method("refresh.list"),
+        method("refresh.scan"),
+        spent["result"]["timings"]["methods"]["refresh.reads"]["count"],
         sync["batches"],
         sync["files"],
         sync["total_ms"].as_f64().unwrap_or(0.0),

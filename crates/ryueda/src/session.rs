@@ -363,7 +363,16 @@ impl Session {
     /// Brings the session up to date with the files, returning those that
     /// changed (relative, with `/`) and how.
     pub fn refresh_changes(&mut self) -> Result<Vec<(String, &'static str)>> {
-        let changes = self.stamps.scan(&self.root, listed(&self.root))?;
+        // The walk, the scan and how many files it read, apart (#1050).
+        let t = std::time::Instant::now();
+        let files = listed(&self.root);
+        self.phase("refresh.list", t.elapsed());
+        let t = std::time::Instant::now();
+        let changes = self.stamps.scan(&self.root, files)?;
+        self.phase("refresh.scan", t.elapsed());
+        for _ in 0..self.stamps.last_reads() {
+            self.phase("refresh.reads", std::time::Duration::ZERO);
+        }
         if !changes.is_empty() {
             self.set_project(load(&self.root, &self.stamps, &*self.pins)?);
             self.pins_key = pins_key(&self.root, &self.project.manifest);
