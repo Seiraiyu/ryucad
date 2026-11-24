@@ -99,6 +99,8 @@ fn ryueda_env(dir: &Path, threads: usize, args: &[&str], env: &[(&str, &str)]) -
 /// The envelope `ryueda` prints, whether it succeeded or not.
 fn ryueda_out(dir: &Path, threads: usize, args: &[&str], env: &[(&str, &str)]) -> Value {
     let mut cmd = Command::cargo_bin("ryueda").unwrap();
+    // No repository above the test's folder is found (#1004).
+    cmd.env("GIT_CEILING_DIRECTORIES", std::env::temp_dir());
     cmd.current_dir(dir)
         .env("RYUEDA_NO_DAEMON", "1")
         .env("RYUEDA_ID_SEED", "golden")
@@ -1258,6 +1260,16 @@ fn kicad_imported(threads: usize) -> (tempfile::TempDir, std::path::PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("k");
     std::fs::create_dir_all(&root).unwrap();
+    // Its own repository, so the install lands there and never in one
+    // above the temp folder (#1004).
+    assert!(
+        ryu_git::git_env::isolated()
+            .args(["init", "-q"])
+            .arg(&root)
+            .status()
+            .unwrap()
+            .success()
+    );
     ryueda::server::init(&root, None, false).unwrap();
     let mut s = ryueda::session::Session::open(&root).unwrap();
     rayon::ThreadPoolBuilder::new()

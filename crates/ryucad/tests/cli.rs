@@ -51,6 +51,8 @@ impl Pair {
     /// The command `run_in` runs, to spawn and read as it goes.
     fn spawned(&self, root: &Path, args: &[&str]) -> std::process::Child {
         let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin("ryucad"));
+        // No repository above the test's folder is found (#1004).
+        cmd.env("GIT_CEILING_DIRECTORIES", std::env::temp_dir());
         cmd.current_dir(root)
             .args(args)
             .env("RYUCAD_RUNTIME_DIR", &self.run)
@@ -70,6 +72,8 @@ impl Pair {
 
     fn run_in(&self, root: &Path, sub: &str, args: &[&str]) -> (i32, Value) {
         let mut cmd = Command::cargo_bin("ryucad").unwrap();
+        // No repository above the test's folder is found (#1004).
+        cmd.env("GIT_CEILING_DIRECTORIES", std::env::temp_dir());
         cmd.current_dir(root.join(sub))
             .args(args)
             .env("RYUCAD_RUNTIME_DIR", &self.run)
@@ -167,6 +171,8 @@ impl Pair {
     /// and stderr piped, in process for `direct`.
     fn session(&self, root: &Path, sub: &str) -> std::process::Child {
         let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin("ryucad"));
+        // No repository above the test's folder is found (#1004).
+        cmd.env("GIT_CEILING_DIRECTORIES", std::env::temp_dir());
         cmd.current_dir(root.join(sub))
             .args(["session", "--stdio"])
             .env("RYUCAD_RUNTIME_DIR", &self.run)
@@ -423,6 +429,7 @@ fn batch_from_the_cli() {
     // `-` reads the batch from stdin (in process: the two differ from here).
     let out = Command::cargo_bin("ryucad")
         .unwrap()
+        .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
         .current_dir(&p.direct)
         .args(["batch", "-", "--no-rebuild"])
         .env("RYUCAD_NO_DAEMON", "1")
@@ -1295,6 +1302,7 @@ fn every_error_code_has_its_exit_code() {
 fn pretty_output_is_the_same_document() {
     let out = Command::cargo_bin("ryucad")
         .unwrap()
+        .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
         .args(["version", "--pretty"])
         .output()
         .unwrap();
@@ -1302,6 +1310,7 @@ fn pretty_output_is_the_same_document() {
     assert!(text.lines().count() > 3);
     let compact = Command::cargo_bin("ryucad")
         .unwrap()
+        .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
         .arg("version")
         .output()
         .unwrap();
@@ -1316,6 +1325,7 @@ fn version_flags_are_the_version_command() {
     let run = |args: &[&str]| {
         let out = Command::cargo_bin("ryucad")
             .unwrap()
+            .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
             .args(args)
             .output()
             .unwrap();
@@ -1329,6 +1339,7 @@ fn version_flags_are_the_version_command() {
     // With anything else it is still a usage error, as before.
     let out = Command::cargo_bin("ryucad")
         .unwrap()
+        .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
         .args(["part", "list", "--version"])
         .output()
         .unwrap();
@@ -1359,6 +1370,7 @@ fn vectors_may_start_with_a_minus() {
 fn sketch_edit_help_lists_every_type() {
     let out = Command::cargo_bin("ryucad")
         .unwrap()
+        .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
         .args(["sketch", "edit", "--help"])
         .output()
         .unwrap();
@@ -1375,6 +1387,7 @@ fn sketch_edit_help_lists_every_type() {
 fn a_reader_closing_early_is_no_panic() {
     use std::process::Stdio;
     let mut child = std::process::Command::new(assert_cmd::cargo::cargo_bin("ryucad"))
+        .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
         .args(["version", "--pretty"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1689,6 +1702,7 @@ fn every_protocol_method_has_a_command() {
         };
         let out = Command::cargo_bin("ryucad")
             .unwrap()
+            .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
             .args(*args)
             .arg("--help")
             .output()
@@ -1723,6 +1737,7 @@ fn feature_types_lists_what_each_type_takes() {
     p.fails(&["feature", "types", "gear"], "unknown_feature_type", 1);
     let help = Command::cargo_bin("ryucad")
         .unwrap()
+        .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
         .args(["feature", "add", "--help"])
         .output()
         .unwrap();
@@ -2090,6 +2105,7 @@ fn git_diff_reads_values_through_textconv() {
     let file = root.join("parts/p/features/b.json");
     let out = Command::cargo_bin("ryucad")
         .unwrap()
+        .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
         .args(["git", "textconv"])
         .arg(&file)
         .output()
@@ -2119,6 +2135,7 @@ fn git_diff_reads_values_through_textconv() {
     // A file that isn't there is an error, in JSON.
     let out = Command::cargo_bin("ryucad")
         .unwrap()
+        .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
         .args(["git", "textconv", "nowhere.json"])
         .current_dir(root)
         .output()
@@ -2144,6 +2161,7 @@ fn the_merge_driver_merges_three_files() {
     let driver = |base: &Path, ours: &Path, theirs: &Path| -> (i32, String) {
         let out = Command::cargo_bin("ryucad")
             .unwrap()
+            .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
             .args(["git", "merge-driver"])
             .args([base, ours, theirs])
             .arg("parts/p/features/s.json")
@@ -2178,6 +2196,7 @@ fn the_merge_driver_merges_three_files() {
     // A file that isn't there: exit 4, a message for Git to show.
     let out = Command::cargo_bin("ryucad")
         .unwrap()
+        .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
         .args(["git", "merge-driver", "nowhere", "nor", "here"])
         .output()
         .unwrap();
@@ -2196,6 +2215,7 @@ fn git_install_registers_the_drivers_and_the_hook() {
     let run_in = |at: &Path, args: &[&str]| -> (i32, Value) {
         let out = Command::cargo_bin("ryucad")
             .unwrap()
+            .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
             .args(args)
             .current_dir(at)
             .env("HOME", &home)
@@ -3406,6 +3426,7 @@ fn review_needs_a_github_clone() {
     let run = |args: &[&str]| {
         let out = Command::cargo_bin("ryucad")
             .unwrap()
+            .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
             .current_dir(dir.path())
             .args(args)
             .env("RYUCAD_REVIEW_TOKEN", "t")
@@ -3574,6 +3595,8 @@ fn review_against_a_fake_service() {
     let empty = tempfile::tempdir().unwrap();
     let run = |args: &[&str], token: Option<&str>| {
         let mut cmd = Command::cargo_bin("ryucad").unwrap();
+        // No repository above the test's folder is found (#1004).
+        cmd.env("GIT_CEILING_DIRECTORIES", std::env::temp_dir());
         cmd.current_dir(dir.path())
             .args(args)
             .env("RYUCAD_REVIEW_URL", &fake.url)
@@ -8949,6 +8972,7 @@ fn boms_from_the_cli() {
 fn alone(dir: &Path, args: &[&str]) -> Value {
     let out = Command::cargo_bin("ryucad")
         .unwrap()
+        .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
         .current_dir(dir)
         .args(args)
         .env("RYUCAD_NO_DAEMON", "1")
@@ -9165,6 +9189,8 @@ fn org_where_used_against_a_fake_service() {
     let empty = tempfile::tempdir().unwrap();
     let run = |args: &[&str], url: &str, token: Option<&str>| {
         let mut cmd = Command::cargo_bin("ryucad").unwrap();
+        // No repository above the test's folder is found (#1004).
+        cmd.env("GIT_CEILING_DIRECTORIES", std::env::temp_dir());
         cmd.current_dir(dir.path())
             .args(args)
             .env("RYUCAD_NO_DAEMON", "1")
@@ -9395,6 +9421,7 @@ fn credential_helpers_are_told_not_to_prompt() {
     let run = |args: &[&str]| {
         Command::cargo_bin("ryucad")
             .unwrap()
+            .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
             .current_dir(&root)
             .args(args)
             .env("RYUCAD_NO_DAEMON", "1")
@@ -10031,6 +10058,7 @@ fn inserts_and_deletes_from_the_cli() {
     // Textconv names the pin.
     let out = Command::cargo_bin("ryucad")
         .unwrap()
+        .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
         .current_dir(&p.direct)
         .args(["git", "textconv", "parts/enclosure/features/board.json"])
         .env("RYUCAD_NO_DAEMON", "1")

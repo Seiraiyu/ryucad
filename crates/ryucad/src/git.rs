@@ -56,7 +56,7 @@ pub fn revision(root: &Path, rev: &str) -> Result<Revision> {
 pub fn release_guard(
     here: &Path,
 ) -> Result<Vec<(std::path::PathBuf, Vec<ryupdm::check::Finding>)>> {
-    let Ok(repo) = gix::discover(here) else {
+    let Some(repo) = ryu_git::discover_upwards(here, false) else {
         return Ok(Vec::new());
     };
     let Some(workdir) = repo.workdir().map(Path::to_path_buf) else {

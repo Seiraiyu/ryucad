@@ -66,6 +66,7 @@ fn the_committed_corpus_imports_as_references_under_a_second() {
 /// cache folders, and gives its envelope, refusing a failure.
 fn ryucad(dir: &std::path::Path, args: &[&str]) -> serde_json::Value {
     let out = std::process::Command::new(env!("CARGO_BIN_EXE_ryucad"))
+        .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
         .current_dir(dir)
         .env("RYUCAD_RUNTIME_DIR", dir.join("run"))
         .env("RYUCAD_CONFIG_DIR", dir.join("config"))

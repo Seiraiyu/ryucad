@@ -28,6 +28,8 @@ use std::path::Path;
 /// `ryueda` in `dir`, in process, its IDs a fixed sequence.
 fn ryueda(dir: &Path, threads: usize, args: &[&str]) -> Value {
     let mut cmd = Command::cargo_bin("ryueda").unwrap();
+    // No repository above the test's folder is found (#1004).
+    cmd.env("GIT_CEILING_DIRECTORIES", std::env::temp_dir());
     cmd.current_dir(dir)
         .env("RYUEDA_NO_DAEMON", "1")
         .env("RYUEDA_ID_SEED", "corpus")
@@ -452,6 +454,8 @@ fn a_scene_is_drawn_within_its_bar() {
     let through = |args: &[&str]| {
         let t = Instant::now();
         let mut cmd = Command::cargo_bin("ryueda").unwrap();
+        // No repository above the test's folder is found (#1004).
+        cmd.env("GIT_CEILING_DIRECTORIES", std::env::temp_dir());
         cmd.current_dir(&board)
             .env("RYUEDA_RUNTIME_DIR", &run)
             .env("RYUEDA_IDLE_TIMEOUT", "60")
@@ -716,6 +720,8 @@ fn a_dry_run_is_the_commit() {
 /// it succeeds.
 fn ryueda_envelope(dir: &Path, args: &[&str]) -> Value {
     let mut cmd = Command::cargo_bin("ryueda").unwrap();
+    // No repository above the test's folder is found (#1004).
+    cmd.env("GIT_CEILING_DIRECTORIES", std::env::temp_dir());
     cmd.current_dir(dir)
         .env("RYUEDA_NO_DAEMON", "1")
         .env("RYUEDA_ID_SEED", "corpus")

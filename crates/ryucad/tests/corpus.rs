@@ -454,6 +454,8 @@ fn the_scripts_make_the_committed_projects() {
             .arg(&script)
             .arg(&exe)
             .arg(&made)
+            // No repository above the test's folder is found (#1004).
+            .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
             .output()
             .unwrap();
         assert!(

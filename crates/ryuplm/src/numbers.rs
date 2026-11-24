@@ -392,7 +392,7 @@ pub fn next_document(
 pub fn others(here: &Path, folders: &[PathBuf]) -> Vec<PathBuf> {
     let me = here.canonicalize().unwrap_or_else(|_| here.to_path_buf());
     let mut tops: Vec<PathBuf> = folders.to_vec();
-    if let Ok(repo) = gix::discover(here)
+    if let Some(repo) = ryu_git::discover_upwards(here, false)
         && let Some(w) = repo.workdir()
     {
         tops.push(w.to_path_buf());

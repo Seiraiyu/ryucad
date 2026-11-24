@@ -19,6 +19,10 @@ pub const LOCATION: [&str; 8] = [
     "GIT_PREFIX",
 ];
 
+/// The variable that stops Git's search for a repository below the
+/// folders it names (`git`'s, and `ryu_git::discover_upwards`').
+pub const CEILING: &str = "GIT_CEILING_DIRECTORIES";
+
 /// `git` finding its repository from its working folder alone: for code
 /// that runs Git in a folder it was given.
 pub fn here() -> Command {
@@ -31,13 +35,15 @@ pub fn here() -> Command {
 
 /// Every `GIT_` variable this process has, and [`LOCATION`]: what a test
 /// removes from any command it spawns (git or a ryu binary), then sets
-/// what it needs.
+/// what it needs. [`CEILING`] is kept: it only narrows what a child finds,
+/// and a test run fenced inside a folder stays fenced (#1004).
 pub fn inherited() -> Vec<OsString> {
     let mut out: Vec<OsString> = LOCATION.iter().map(OsString::from).collect();
     for (k, _) in std::env::vars_os() {
-        if k.to_str()
-            .is_some_and(|s| s.to_ascii_uppercase().starts_with("GIT_"))
-        {
+        if k.to_str().is_some_and(|s| {
+            let s = s.to_ascii_uppercase();
+            s.starts_with("GIT_") && s != CEILING
+        }) {
             out.push(k);
         }
     }
