@@ -1684,7 +1684,8 @@ fn put(o: &mut serde_json::Map<String, Value>, key: &str, given: &Option<Value>)
 }
 
 /// A blend delete's own fields from what was given, over `o` (its file's):
-/// its faces as text (`[]` for none), `below` and `tolerance`.
+/// its faces as text (`[]` for none), `below`, `tolerance` and `partial`
+/// (`false` takes it away).
 fn delete_blend_given(
     o: &mut serde_json::Map<String, Value>,
     f: &FeatureFields,
@@ -1699,6 +1700,15 @@ fn delete_blend_given(
     }
     put(o, "below", &f.below);
     put(o, "tolerance", &f.tolerance);
+    match f.partial {
+        Some(true) => {
+            o.insert("partial".into(), json!(true));
+        }
+        Some(false) => {
+            o.remove("partial");
+        }
+        None => {}
+    }
     Ok(())
 }
 
@@ -3645,6 +3655,30 @@ mod tests {
         assert!(draft_warnings(&part, &id, &rep("neutral", t - 0.01, t + 0.01)).is_empty());
         // Any other report (an import's, a fill's) says nothing here.
         assert!(draft_warnings(&part, &id, &json!({"sides": []})).is_empty());
+    }
+
+    /// Plan 23.D: `partial` given true is written, at format 27; given
+    /// false it is taken away, and the feature is format 20 again.
+    #[test]
+    fn a_blend_deletes_partial_is_given_and_taken_away() {
+        let part = Id::parse("p", "part").unwrap();
+        let env = crate::expr::Env::empty();
+        let given = |v: serde_json::Value| -> FeatureFields { serde_json::from_value(v).unwrap() };
+        let make = |was: Option<&Feature>, v: serde_json::Value| {
+            let mut f = given(v);
+            take_given("delete_blend", &mut f).unwrap();
+            from_given("delete_blend", was, &f, &part, crate::units::Unit::Mm, &env).unwrap()
+        };
+        let d = make(
+            None,
+            json!({"target": "b", "below": "2 mm", "partial": true}),
+        );
+        assert_eq!(d.to_json()["partial"], true);
+        assert_eq!(d.to_json()["format"], crate::doc::edit::PARTIAL_FORMAT);
+        let d = make(Some(&d), json!({"partial": false}));
+        assert!(d.to_json().get("partial").is_none());
+        assert_eq!(d.to_json()["format"], crate::doc::edit::FORMAT);
+        assert_eq!(d.to_json()["below"], "2 mm");
     }
 
     #[test]
