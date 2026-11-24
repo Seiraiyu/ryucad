@@ -97,10 +97,18 @@ pub fn write(name: &str, files: std::collections::BTreeMap<String, Vec<u8>>) -> 
     std::fs::create_dir_all(&root).unwrap();
     git(&root, &["init", "-q"]);
     cli(&root, &["init"]);
+    // The seeded manifest (its classes), with `ryuplm init`'s project ID.
+    let ours: Value =
+        serde_json::from_slice(&std::fs::read(root.join(ryuplm::catalogue::MANIFEST)).unwrap())
+            .unwrap();
     for (p, b) in files {
-        if p == ryuplm::catalogue::MANIFEST {
-            continue;
-        }
+        let b = if p == ryuplm::catalogue::MANIFEST {
+            let mut m: Value = serde_json::from_slice(&b).unwrap();
+            m["project"] = ours["project"].clone();
+            ryuplm::canonical::to_string(&m).into_bytes()
+        } else {
+            b
+        };
         let at = root.join(&p);
         std::fs::create_dir_all(at.parent().unwrap()).unwrap();
         std::fs::write(at, b).unwrap();
@@ -145,10 +153,18 @@ pub fn ryuplm_exe() -> PathBuf {
         return exe;
     }
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("../ryuplm/src");
+    // Newer than its sources, and of this build's commit: the window
+    // refuses a daemon of another build.
     let fresh = exe
         .metadata()
         .and_then(|m| m.modified())
-        .is_ok_and(|t| t >= newest(&src));
+        .is_ok_and(|t| t >= newest(&src))
+        && Command::new(&exe)
+            .arg("version")
+            .output()
+            .ok()
+            .and_then(|o| serde_json::from_slice::<Value>(&o.stdout).ok())
+            .is_some_and(|v| v["result"]["commit"] == ryuplm::proto::VersionInfo::current().commit);
     if !fresh {
         let mut cmd = Command::new(env!("CARGO"));
         cmd.args(["build", "-p", "ryuplm", "--bin", "ryuplm"]);
