@@ -924,12 +924,23 @@ impl Project {
                     board_faults.push(f.with("path", &path));
                 }
             }
+            if let Ok(board) = &b.board.item
+                && let Some(preset) = crate::board::preset::resolve(&p, &board.preset)
+            {
+                for (pid, pour) in &b.pours {
+                    let Ok(pour) = &pour.item else { continue };
+                    let path = crate::board::file::route_path(id, crate::board::file::POURS, pid);
+                    for f in crate::board::pour::floors(pour, &preset) {
+                        board_faults.push(f.with("path", &path));
+                    }
+                }
+            }
             // Route nets against the design's flattened nets: only for
             // boards with routes, and only when the design flattens (its
             // own faults say why when it doesn't).
             if let Ok(board) = &b.board.item
                 && p.conn.designs.contains_key(&board.design)
-                && (!b.tracks.is_empty() || !b.vias.is_empty())
+                && (!b.tracks.is_empty() || !b.vias.is_empty() || !b.pours.is_empty())
                 && let Ok(n) = crate::netlist::flatten(&p, &board.design)
             {
                 let nets: std::collections::BTreeSet<String> = n
@@ -945,6 +956,9 @@ impl Project {
                     })
                     .chain(b.vias.iter().filter_map(|(i, v)| {
                         Some((crate::board::VIAS, i, &v.item.as_ref().ok()?.net))
+                    }))
+                    .chain(b.pours.iter().filter_map(|(i, p)| {
+                        Some((crate::board::file::POURS, i, &p.item.as_ref().ok()?.net))
                     }));
                 for (folder, rid, net) in routes {
                     if !nets.contains(net) {

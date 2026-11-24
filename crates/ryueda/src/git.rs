@@ -69,6 +69,7 @@ pub fn project_file(rel: &str) -> bool {
             crate::board::HOLES,
             crate::board::file::KEEPOUTS,
             crate::board::file::DRAWINGS,
+            crate::board::file::POURS,
         ]
         .contains(p),
         [d, _, _] => *d == crate::conn::BLOCKS || *d == library::DIR || *d == crate::pdm::RELEASES,
@@ -390,6 +391,7 @@ pub(crate) mod tests {
             "boards/b/placements/s1.u1.json",
             "boards/b/keepouts/k1.json",
             "boards/b/drawings/d1.json",
+            "boards/b/pours/p1.json",
         ] {
             assert!(project_file(f), "{f}");
         }
