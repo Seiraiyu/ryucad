@@ -165,7 +165,48 @@ fn gather_with(
         out.rings.push(ring);
     }
     in_order(&mut out);
+    weld_pinches(b, g, &mut out);
     (out, moved)
+}
+
+/// A loop through one tolerant vertex twice (a pinch) leaves it along two
+/// edges, whose pcurves may start apart by up to the vertex's tolerance:
+/// each visit then takes its own parameters, and the segments arriving at
+/// the two cross where they meet (#1029: a tolerant intersect's plane
+/// face, two visits 2.4e-7 apart, moved by 1e-5). In the
+/// tube model both are the vertex, so a later visit whose point and whose
+/// way to the first visit (the parameters' midpoint) lie on the surface
+/// within the vertex's tolerance of it takes the first visit's parameters,
+/// in [`in_order`]'s order. Not across a seam (the midpoint lies a half
+/// period away) or on a collapsed row (where the poles' joins hold the
+/// visits). Exact bodies' vertices never pass `TOUCH_TOLERANCE`, so they
+/// mesh as before.
+fn weld_pinches(b: &Body, g: &FaceGeom, loops: &mut Loops) {
+    let mut seen: BTreeMap<VertexId, Vec<Point2>> = BTreeMap::new();
+    for ring in &mut loops.rings {
+        for p in ring.iter_mut() {
+            let Anchor::Vertex(v) = p.anchor else {
+                continue;
+            };
+            let vertex = &b.vertices[v];
+            let tol = vertex.tolerance.get();
+            if tol <= TOUCH_TOLERANCE || g.pole(p.uv).is_some() {
+                continue;
+            }
+            let on = |uv: Point2| g.surface.point(uv.x, uv.y).distance(vertex.point) <= tol;
+            let at = seen.entry(v).or_default();
+            let first = at.iter().copied().find(|&q| {
+                q == p.uv
+                    || on(q)
+                        && on(p.uv)
+                        && on(Point2::new(0.5 * (q.x + p.uv.x), 0.5 * (q.y + p.uv.y)))
+            });
+            match first {
+                Some(q) => p.uv = q,
+                None => at.push(p.uv),
+            }
+        }
+    }
 }
 
 /// A face's rings and lone vertices in an order of their parameters
