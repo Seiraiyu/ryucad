@@ -44,14 +44,25 @@ impl Fixture {
     }
 
     fn start(&self, idle: u64) -> Child {
+        self.start_with(idle, &[])
+    }
+
+    /// Where a daemon [`Fixture::start`] started writes its log.
+    fn log(&self) -> PathBuf {
+        self.run.with_file_name("daemon.log")
+    }
+
+    /// [`Fixture::start`], with `env` in the daemon's environment.
+    fn start_with(&self, idle: u64, env: &[(&str, &str)]) -> Child {
         let child = Command::new(cargo_bin("ryucad"))
             .args(["daemon", "run", "--idle-timeout", &idle.to_string()])
+            .envs(env.iter().copied())
             .current_dir(&self.root)
             .env(RUNTIME_DIR_VAR, &self.run)
             .env("RYUCAD_CONFIG_DIR", self.run.with_file_name("config"))
             .env("RYUCAD_CACHE_DIR", self.run.with_file_name("cache"))
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(std::fs::File::create(self.log()).unwrap())
             .spawn()
             .unwrap();
         self.wait_until(|| self.connect().is_some());
@@ -267,6 +278,33 @@ fn stop_all_stops_every_project() {
         2
     );
     assert_eq!(cli(&b, &["daemon", "status"])["result"]["running"], false);
+}
+
+/// #1028: a daemon asked to shut down while a request holds its lock and
+/// never reaches a cancel goes anyway, after its stop wait, saying so in
+/// its log.
+#[test]
+fn a_daemon_asked_to_stop_goes_while_a_request_holds_its_lock() {
+    let f = fixture();
+    let mut d = f.start_with(600, &[(ryucad::daemon::TEST_HOLD_VAR, "1")]);
+    // Ten minutes with the lock, on a connection of its own.
+    let holder = f.connect().unwrap();
+    let hold = r#"{"jsonrpc":"2.0","id":1,"method":"daemon.hold","params":{"ms":600000}}"#;
+    (&holder).write_all(format!("{hold}\n").as_bytes()).unwrap();
+    // Time for the hold to take the lock before the stop is asked.
+    std::thread::sleep(Duration::from_millis(500));
+    let t = Instant::now();
+    let v = cli(&f, &["daemon", "stop", "--all"]);
+    assert!(t.elapsed() < Duration::from_secs(60), "{:?}", t.elapsed());
+    assert_eq!(v["result"]["stopped"], 1, "{v}");
+    assert!(v["result"].get("still_running").is_none(), "{v}");
+    assert!(exited(&mut d, Duration::from_secs(10)));
+    let log = std::fs::read_to_string(f.log()).unwrap();
+    assert!(
+        log.contains("stopping: asked to shut down; the lock wasn't free"),
+        "{log}"
+    );
+    drop(holder);
 }
 
 #[test]
