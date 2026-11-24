@@ -10752,3 +10752,37 @@ fn ensure_through_a_stdio_session() {
     );
     assert_eq!(a[1].0["result"]["written"], 0);
 }
+
+/// `errors` lists every code with its exit code, title and declared keys,
+/// from the build itself: no project, the same both ways (design 698).
+#[test]
+fn errors_lists_every_code_and_its_keys() {
+    let p = Pair::new();
+    let all = p.ok(&["errors"]);
+    let codes = all["codes"].as_array().unwrap();
+    assert!(codes.len() > 300, "{}", codes.len());
+    let nf = codes.iter().find(|c| c["code"] == "not_found").unwrap();
+    assert_eq!((&nf["exit"], &nf["declared"]), (&json!(1), &json!(true)));
+    assert!(
+        nf["keys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|k| k["name"] == "ref" && k["alias_of"] == "reference"),
+        "{nf}"
+    );
+    assert!(
+        all["common"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|k| k["name"] == "pointer")
+    );
+    let one = p.ok(&["errors", "usage"]);
+    assert_eq!(
+        (&one["codes"][0]["exit"], &one["codes"][0]["title"]),
+        (&json!(2), &json!("Bad arguments"))
+    );
+    let e = p.fails(&["errors", "nope"], "invalid_param", 1);
+    assert_eq!(e["details"]["param"], "code");
+}

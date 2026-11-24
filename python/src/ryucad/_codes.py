@@ -432,6 +432,9 @@ class Code(str, Enum):
     DOCUMENT_IN_USE = "document_in_use"
     DOCUMENT_RELEASED = "document_released"
     DOCUMENT_UNRELEASED = "document_unreleased"
+    DOCUMENT_NOT_UPLOADED = "document_not_uploaded"
+    DRIVE_NOT_CONNECTED = "drive_not_connected"
+    DRIVE_FILE_UNAVAILABLE = "drive_file_unavailable"
     ITEM_HISTORY_LABEL_FOREIGN = "item_history_label_foreign"
     PART_NUMBER_TAKEN = "part_number_taken"
     LEDGER_UNAVAILABLE = "ledger_unavailable"
@@ -860,6 +863,9 @@ EXIT: dict[Code, int] = {
     Code.DOCUMENT_IN_USE: 1,
     Code.DOCUMENT_RELEASED: 1,
     Code.DOCUMENT_UNRELEASED: 1,
+    Code.DOCUMENT_NOT_UPLOADED: 1,
+    Code.DRIVE_NOT_CONNECTED: 4,
+    Code.DRIVE_FILE_UNAVAILABLE: 1,
     Code.ITEM_HISTORY_LABEL_FOREIGN: 1,
     Code.PART_NUMBER_TAKEN: 1,
     Code.LEDGER_UNAVAILABLE: 4,

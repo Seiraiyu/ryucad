@@ -24,7 +24,9 @@ const MANIFEST: &str = include_str!("../Cargo.toml");
 fn depends_on_no_product() {
     assert_eq!(
         names(MANIFEST, "[dependencies]"),
-        ["ryu-doc", "ryu-git", "serde_json", "ureq"]
+        // blake3: optional, behind `testing` only (the store stand-in's
+        // keys, ryuplm 3.B).
+        ["ryu-doc", "ryu-git", "serde_json", "ureq", "blake3"]
     );
     for section in ["[dependencies]", "[dev-dependencies]"] {
         for name in names(MANIFEST, section) {
