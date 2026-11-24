@@ -142,7 +142,10 @@ function Install-Ryucad {
         # Its stderr is dropped, never an error record (Windows PowerShell
         # 5.1 throws on one under 'Stop').
         try { $stopped = & $new daemon stop --all 2> $null | Out-String } catch { $stopped = '' }
-        if ($stopped -match 'still_running') {
+        # One that took the connection and never answered (#1042) is said too.
+        if ($stopped -match '"answered":false') {
+            Write-Host "ryucad-install: warning: a ryucad daemon didn't stop (not answering) and still runs the old version; end it in Task Manager, then run: ryucad daemon stop --all"
+        } elseif ($stopped -match 'still_running') {
             Write-Host "ryucad-install: warning: a ryucad daemon didn't stop and still runs the old version; close its window, or end it in Task Manager, then run: ryucad daemon stop --all"
         }
         Clear-OldCopy $exe

@@ -663,44 +663,135 @@ pub fn status<P: Serve>(root: &Path) -> Result<Value> {
 }
 
 /// [`status`], with what the daemon spent by method when `timings`
-/// (#849).
+/// (#849). A daemon that takes the connection and doesn't answer within
+/// [`ANSWER_WAIT`] is reported `"answered": false`, not waited on (#1042).
 pub fn status_with<P: Serve>(root: &Path, timings: bool) -> Result<Value> {
     let endpoint = Endpoint::<P>::for_project(root)?;
-    match Connection::connect(&endpoint) {
-        Err(_) => Ok(json!({"running": false})),
-        Ok(mut conn) => {
-            let mut s = conn.call(&daemon_status(timings)).map_err(unavailable)??;
+    match call_within(&endpoint, daemon_status(timings), ANSWER_WAIT) {
+        Asked::Nobody => Ok(json!({"running": false})),
+        Asked::Answered(a) => {
+            let mut s = a.map_err(unavailable)??;
             s["running"] = json!(true);
             Ok(s)
         }
+        Asked::Mute => Ok(json!({
+            "running": true,
+            "answered": false,
+            "address": endpoint.address,
+            "log": endpoint.log,
+        })),
     }
 }
 
-/// Asks one endpoint's daemon to stop: whether one was running, and
-/// whether it went within [`STOP_WAIT`].
-fn stop_endpoint<P>(endpoint: &Endpoint<P>) -> (bool, bool) {
-    match Connection::connect(endpoint) {
-        Ok(mut conn) => {
-            let _ = conn.call(&daemon_shutdown());
-            drop(conn);
-            (true, wait_gone(endpoint, STOP_WAIT))
-        }
+/// How long `daemon stop` and `daemon status` wait for a daemon to take
+/// the connection, and then for its answer, before they report it as not
+/// answering (#1042): one that took the connection and is stopped, hung
+/// or swapped out.
+const ANSWER_WAIT: Duration = Duration::from_secs(10);
+
+/// What asking one endpoint's daemon something found.
+enum Asked {
+    /// Nothing was listening.
+    Nobody,
+    /// Its answer, or how the connection failed after it was made.
+    Answered(std::io::Result<Result<Value>>),
+    /// It didn't take the connection, or didn't answer, within the wait.
+    Mute,
+}
+
+/// Connects to `endpoint` and sends `req`, waiting `wait` for the
+/// connection and `wait` again for the answer. Both run on a thread of
+/// their own, since neither a named pipe's connect nor a read on either
+/// kind of socket has a deadline; a thread left waiting on a mute daemon
+/// ends with the process (#1042).
+fn call_within<P>(endpoint: &Endpoint<P>, req: Basic, wait: Duration) -> Asked {
+    // The thread outlives this call, so it takes an endpoint of its own,
+    // free of `P`.
+    let e = Endpoint::<()> {
+        address: endpoint.address.clone(),
+        log: endpoint.log.clone(),
+        product: std::marker::PhantomData,
+    };
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || match Connection::connect(&e) {
         Err(_) => {
+            let _ = tx.send(None);
+        }
+        Ok(mut conn) => {
+            let _ = tx.send(Some(None));
+            let a = conn.call(&req);
+            drop(conn);
+            let _ = tx.send(Some(Some(a)));
+        }
+    });
+    match rx.recv_timeout(wait) {
+        Ok(None) | Err(mpsc::RecvTimeoutError::Disconnected) => Asked::Nobody,
+        Err(mpsc::RecvTimeoutError::Timeout) => Asked::Mute,
+        Ok(Some(_)) => match rx.recv_timeout(wait) {
+            Ok(Some(Some(a))) => Asked::Answered(a),
+            Ok(_) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                Asked::Answered(Err(std::io::ErrorKind::UnexpectedEof.into()))
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => Asked::Mute,
+        },
+    }
+}
+
+/// What asking one endpoint's daemon to stop found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stopped {
+    /// Nothing was listening.
+    None,
+    /// It was asked and went within [`STOP_WAIT`].
+    Gone,
+    /// It was asked but was still there after the wait (#391).
+    Running,
+    /// It didn't take the connection or answer within [`ANSWER_WAIT`]
+    /// (#1042).
+    Mute,
+}
+
+/// Asks one endpoint's daemon to stop, and waits for it to go.
+fn stop_endpoint<P>(endpoint: &Endpoint<P>) -> Stopped {
+    stop_endpoint_within(endpoint, ANSWER_WAIT, STOP_WAIT)
+}
+
+/// [`stop_endpoint`], waiting `answer` for the reply and `gone` for the
+/// daemon to go.
+fn stop_endpoint_within<P>(endpoint: &Endpoint<P>, answer: Duration, gone: Duration) -> Stopped {
+    match call_within(endpoint, daemon_shutdown(), answer) {
+        Asked::Nobody => {
             // A socket file nobody answers on is a crashed daemon's.
             #[cfg(unix)]
             let _ = std::fs::remove_file(&endpoint.address);
-            (false, true)
+            Stopped::None
         }
+        // An answer, or the connection closed under us, which a daemon
+        // stopping does: either way, wait for it to go.
+        Asked::Answered(_) => {
+            if wait_gone(endpoint, gone) {
+                Stopped::Gone
+            } else {
+                Stopped::Running
+            }
+        }
+        Asked::Mute => Stopped::Mute,
     }
 }
 
 /// Stops the project's daemon, if one is running. `still_running` says
-/// it was asked to and hasn't gone yet (a request it is finishing).
+/// it was asked to and hasn't gone yet (a request it is finishing), and
+/// `answered: false` that it never answered (#1042).
 pub fn stop<P: Serve>(root: &Path) -> Result<Value> {
-    let (stopped, gone) = stop_endpoint(&Endpoint::<P>::for_project(root)?);
-    let mut v = json!({ "stopped": stopped });
-    if !gone {
-        v["still_running"] = json!(true);
+    let s = stop_endpoint(&Endpoint::<P>::for_project(root)?);
+    let mut v = json!({ "stopped": s != Stopped::None });
+    match s {
+        Stopped::None | Stopped::Gone => {}
+        Stopped::Running => v["still_running"] = json!(true),
+        Stopped::Mute => {
+            v["still_running"] = json!(true);
+            v["answered"] = json!(false);
+        }
     }
     Ok(v)
 }
@@ -708,7 +799,8 @@ pub fn stop<P: Serve>(root: &Path) -> Result<Value> {
 /// Stops every daemon this user has, of any version: the installers run
 /// this before replacing the binary. `still_running` names the endpoints
 /// of those asked that hadn't gone after [`STOP_WAIT`], with their logs,
-/// so an installer can say so rather than report a clean stop (#1023).
+/// so an installer can say so rather than report a clean stop (#1023),
+/// and whether each answered at all (#1042).
 pub fn stop_all<P: Serve>() -> Result<Value> {
     stop_these(&Endpoint::<P>::all()?, stop_endpoint)
 }
@@ -716,17 +808,21 @@ pub fn stop_all<P: Serve>() -> Result<Value> {
 /// [`stop_all`] over `endpoints`, each stopped by `stop`.
 fn stop_these<P>(
     endpoints: &[Endpoint<P>],
-    stop: impl Fn(&Endpoint<P>) -> (bool, bool),
+    stop: impl Fn(&Endpoint<P>) -> Stopped,
 ) -> Result<Value> {
     let mut stopped = 0;
     let mut still = Vec::new();
     for e in endpoints {
-        let (asked, gone) = stop(e);
-        if asked {
+        let s = stop(e);
+        if s != Stopped::None {
             stopped += 1;
-            if !gone {
-                still.push(json!({"address": e.address, "log": e.log}));
-            }
+        }
+        if matches!(s, Stopped::Running | Stopped::Mute) {
+            still.push(json!({
+                "address": e.address,
+                "log": e.log,
+                "answered": s == Stopped::Running,
+            }));
         }
     }
     let mut v = json!({ "stopped": stopped });
@@ -808,11 +904,11 @@ mod tests {
             .collect();
         let v = stop_these(&es, |e| {
             if e.log.ends_with("gone.log") {
-                (true, true)
+                Stopped::Gone
             } else if e.log.ends_with("stuck.log") {
-                (true, false)
+                Stopped::Running
             } else {
-                (false, true)
+                Stopped::None
             }
         })
         .unwrap();
@@ -821,8 +917,35 @@ mod tests {
         assert_eq!(still.len(), 1, "{v}");
         assert_eq!(still[0]["address"], es[1].address.as_str());
         assert_eq!(still[0]["log"], json!(es[1].log));
-        let v = stop_these(&es[..1], |_| (true, true)).unwrap();
+        assert_eq!(still[0]["answered"], true, "{v}");
+        let v = stop_these(&es[..1], |_| Stopped::Gone).unwrap();
         assert_eq!(v, json!({"stopped": 1}));
+    }
+
+    /// #1042: a daemon that takes the connection and never answers is
+    /// reported, not waited on forever.
+    #[test]
+    fn a_daemon_that_never_answers_is_named_within_the_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        let e = endpoint_in(dir.path(), "mute");
+        let listener = ListenerOptions::new()
+            .name(e.name().unwrap())
+            .create_sync()
+            .unwrap();
+        let held = std::thread::spawn(move || {
+            let conn = listener.accept().unwrap();
+            std::thread::sleep(Duration::from_secs(5));
+            drop(conn);
+        });
+        let t = Instant::now();
+        let v = stop_these(std::slice::from_ref(&e), |e| {
+            stop_endpoint_within(e, Duration::from_millis(300), STOP_WAIT)
+        })
+        .unwrap();
+        assert!(t.elapsed() < Duration::from_secs(3), "{:?}", t.elapsed());
+        assert_eq!(v["stopped"], 1, "{v}");
+        assert_eq!(v["still_running"][0]["answered"], false, "{v}");
+        held.join().unwrap();
     }
 
     #[test]

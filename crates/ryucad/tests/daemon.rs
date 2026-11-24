@@ -285,6 +285,76 @@ fn stop_all_stops_every_project() {
     assert_eq!(cli(&b, &["daemon", "status"])["result"]["running"], false);
 }
 
+/// #1042: `daemon stop --all` returns, naming a daemon that took the
+/// connection but couldn't answer (stopped by SIGSTOP; suspended on
+/// Windows), within the answer wait, rather than waiting on it forever.
+#[test]
+fn stop_all_names_a_daemon_that_cannot_answer() {
+    let f = fixture();
+    let mut d = f.start(600);
+    let pid = d.id();
+    pause(pid);
+    let t = Instant::now();
+    let v = cli(&f, &["daemon", "stop", "--all"]);
+    let took = t.elapsed();
+    resume(pid);
+    assert!(took < Duration::from_secs(25), "{took:?}");
+    assert_eq!(v["result"]["stopped"], 1, "{v}");
+    assert_eq!(v["result"]["still_running"][0]["answered"], false, "{v}");
+    // Running again, it takes the stop it was asked for, or this one.
+    cli(&f, &["daemon", "stop", "--all"]);
+    assert!(exited(&mut d, Duration::from_secs(30)));
+}
+
+#[cfg(unix)]
+fn pause(pid: u32) {
+    // SAFETY: a signal to the daemon this test started.
+    assert_eq!(unsafe { libc::kill(pid as i32, libc::SIGSTOP) }, 0);
+}
+
+#[cfg(unix)]
+fn resume(pid: u32) {
+    // SAFETY: as in `pause`.
+    assert_eq!(unsafe { libc::kill(pid as i32, libc::SIGCONT) }, 0);
+}
+
+#[cfg(windows)]
+#[link(name = "ntdll")]
+unsafe extern "system" {
+    fn NtSuspendProcess(process: *mut core::ffi::c_void) -> i32;
+    fn NtResumeProcess(process: *mut core::ffi::c_void) -> i32;
+}
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut core::ffi::c_void;
+    fn CloseHandle(h: *mut core::ffi::c_void) -> i32;
+}
+
+/// Runs `f` on a handle to process `pid` that may suspend and resume it.
+#[cfg(windows)]
+fn with_process(pid: u32, f: unsafe extern "system" fn(*mut core::ffi::c_void) -> i32) {
+    const PROCESS_SUSPEND_RESUME: u32 = 0x0800;
+    // SAFETY: plain Win32 and NT calls on the daemon this test started.
+    unsafe {
+        let h = OpenProcess(PROCESS_SUSPEND_RESUME, 0, pid);
+        assert!(!h.is_null());
+        assert_eq!(f(h), 0);
+        CloseHandle(h);
+    }
+}
+
+#[cfg(windows)]
+fn pause(pid: u32) {
+    with_process(pid, NtSuspendProcess)
+}
+
+#[cfg(windows)]
+fn resume(pid: u32) {
+    with_process(pid, NtResumeProcess)
+}
+
 /// #1028: a daemon asked to shut down while a request holds its lock and
 /// never reaches a cancel goes anyway, after its stop wait, saying so in
 /// its log.
