@@ -1005,6 +1005,13 @@ enum Command {
     Review(ReviewCmd),
     /// Print the ryucad, ryukei and protocol versions.
     Version,
+    /// Every error code with its exit code, title and the detail keys it
+    /// declares, or one code's: answered by this build, with no project or
+    /// daemon.
+    Errors {
+        /// One code, such as not_found.
+        code: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -4805,6 +4812,7 @@ fn request(cmd: &Command) -> Option<Request> {
     Some(match cmd {
         Command::Init { .. }
         | Command::Version
+        | Command::Errors { .. }
         | Command::Daemon(_)
         | Command::Session { .. }
         | Command::Git(_)
@@ -6401,6 +6409,7 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
     let here = here(cli)?;
     match &cli.command {
         Command::Version => Ok(json!(VersionInfo::current())),
+        Command::Errors { code } => ryucad::error::details::listing(code.as_deref()),
         // `main` serves a session before `run`.
         Command::Session { .. } => Err(Error::new(Code::Internal, "a session isn't a command")),
         Command::Init { unit } => {
@@ -7520,6 +7529,7 @@ fn finish(outcome: Result<Value>, warnings: Vec<String>, pretty: bool) -> ExitCo
             0,
         ),
         Err(e) => {
+            ryucad::error::details::check(&e);
             let code = e.code.exit_code();
             (json!({"ok": false, "error": e, "warnings": warnings}), code)
         }
@@ -8234,5 +8244,15 @@ mod tests {
             let c = Cli::try_parse_from(["ryucad", "part", "list"]).unwrap();
             assert!(batch_request(&c.command, dir.path()).unwrap().is_none());
         });
+    }
+
+    #[test]
+    fn the_envelope_checks_its_error() {
+        if !cfg!(debug_assertions) || std::env::var_os(ryucad::error::details::RECORD).is_some() {
+            return;
+        }
+        let bad = Error::new(Code::LabelNotFound, "x").with("colour", "red");
+        let panic = std::panic::catch_unwind(|| finish(Err(bad), Vec::new(), false)).unwrap_err();
+        assert!(panic.downcast_ref::<String>().unwrap().contains("`colour`"));
     }
 }

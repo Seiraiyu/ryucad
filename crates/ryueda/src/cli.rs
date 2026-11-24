@@ -61,6 +61,13 @@ struct Rev {
 enum Command {
     /// This build's version.
     Version,
+    /// Every error code with its exit code, title and the detail keys it
+    /// declares, or one code's: answered by this build, with no project or
+    /// daemon.
+    Errors {
+        /// One code, such as not_found.
+        code: Option<String>,
+    },
     /// Open a project (this folder by default) in the desktop app,
     /// ryueda-app; RYUEDA_APP names another.
     Open {
@@ -2895,7 +2902,13 @@ enum DaemonCmd {
         #[arg(long)]
         idle_timeout: Option<u64>,
     },
-    Status,
+    /// Whether the project's daemon is running, and its details.
+    Status {
+        /// What the daemon spent by request method: time waiting for its
+        /// lock, holding it, and publishing.
+        #[arg(long)]
+        timings: bool,
+    },
     Stop {
         /// Every ryueda daemon of this user.
         #[arg(long)]
@@ -4743,6 +4756,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             repairs: repairs.clone(),
         },
         Command::Version
+        | Command::Errors { .. }
         | Command::Open { .. }
         | Command::Init { .. }
         | Command::Watch { .. }
@@ -4775,6 +4789,7 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
     };
     match &cli.command {
         Command::Version => Ok(json!(VersionInfo::current())),
+        Command::Errors { code } => ryueda::error::details::listing(code.as_deref()),
         Command::Open { dir } => {
             let dir = dir.as_ref().map_or_else(|| here.clone(), |d| here.join(d));
             let dir = ryueda::source::plain(dir.canonicalize().map_err(|e| Error::io(&dir, &e))?);
@@ -4789,7 +4804,9 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
             let idle = idle_timeout.map_or(daemon::DEFAULT_IDLE, Duration::from_secs);
             daemon::run(&find_root(&here)?, idle).map(|()| Value::Null)
         }
-        Command::Daemon(DaemonCmd::Status) => client::status(&find_root(&here)?),
+        Command::Daemon(DaemonCmd::Status { timings }) => {
+            client::status_with(&find_root(&here)?, *timings)
+        }
         Command::Git(GitCmd::Install { global }) => ryueda::drivers::install(&here, !global),
         Command::WhereUsed {
             part,
@@ -5319,6 +5336,7 @@ fn finish(outcome: Result<Value>, warnings: Vec<String>, pretty: bool) -> ExitCo
             0,
         ),
         Err(e) => {
+            ryueda::error::details::check(&e);
             let code = e.code.exit_code();
             (json!({"ok": false, "error": e, "warnings": warnings}), code)
         }

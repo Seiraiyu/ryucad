@@ -14,6 +14,9 @@
 //!   recognised) made again at its own size, half it or one and a half
 //!   times it.
 //!
+//! [`partial_case`] and [`run_partial`] make the blend deletes partial
+//! ones (plan 23.C), apart from [`edit_case`]'s seeds.
+//!
 //! [`run`] makes the edit under a [`Work`]; recognition and feature
 //! finding run inside it, so a fuzz case's budget covers them.
 
@@ -25,9 +28,10 @@ use ryukei::blend::{BlendKind, Chamfer, blend};
 use ryukei::name::{Journal, Name, OpKey};
 use ryukei::topo::Body;
 use ryukei::tweak::{
-    Blends, DeleteBlends, DeleteSpec, Heal, RecogniseOptions, Topology, delete_blends_with,
-    delete_faces_with, draft_with, feature_faces, move_faces_with, offset_faces_with,
-    recognise_blends_with, replace_faces_with, resize_blends_with,
+    Blends, DeleteBlends, DeleteSpec, Heal, PartialDelete, RecogniseOptions, Topology,
+    delete_blends_partial_with, delete_blends_with, delete_faces_with, draft_with, feature_faces,
+    move_faces_with, offset_faces_with, recognise_blends_with, replace_faces_with,
+    resize_blends_with,
 };
 use ryukei::work::Work;
 
@@ -266,6 +270,32 @@ pub fn run(case: &EditCase, key: OpKey, work: &Work) -> Result<(Body, Journal), 
             resize_blends_with(key, body, &sizes, &opts, work)
         }
     }
+}
+
+/// A partial blend delete's case (plan 23.C): [`edit_case`] with the
+/// delete-blends kind forced, so `edit_case`'s own seeds don't move.
+pub fn partial_case(data: &[u8]) -> Option<EditCase> {
+    let mut d = data.to_vec();
+    *d.first_mut()? = 2;
+    edit_case(&d)
+}
+
+/// A [`partial_case`] made under `work` with
+/// [`delete_blends_partial_with`]: the body, journal and report.
+pub fn run_partial(
+    case: &EditCase,
+    key: OpKey,
+    work: &Work,
+) -> Result<(Body, Journal, PartialDelete), Error> {
+    let Op::DeleteBlends { max_size, face } = &case.op else {
+        unreachable!("partial_case gives blend deletes")
+    };
+    let spec = DeleteBlends {
+        max_size: *max_size,
+        faces: face.iter().copied().collect(),
+        options: RecogniseOptions::default(),
+    };
+    delete_blends_partial_with(key, &case.body, &spec, work)
 }
 
 #[cfg(test)]

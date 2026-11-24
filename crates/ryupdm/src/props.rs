@@ -192,7 +192,7 @@ pub fn read(src: &dyn Source, part: &Id) -> Result<Properties> {
 
 /// The part's properties in a project of `P`: none when it has no file.
 pub fn read_for<P: Product>(src: &dyn Source, part: &Id) -> Result<Properties> {
-    let at = path_for::<P>(part);
+    let at = P::properties_path_in(src, part);
     match crate::read_json_in(src, &at, P::NAME)? {
         None => Ok(Properties::default()),
         Some(v) => P::properties_from(&v)

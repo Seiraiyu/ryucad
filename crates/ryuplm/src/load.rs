@@ -17,6 +17,11 @@ pub struct Catalogue {
     /// Every file under `items/` that doesn't read as an item at its
     /// shard, in path order; each has `details.path`.
     pub faults: Vec<Error>,
+    /// Every document record that reads, by ID (design 937).
+    pub documents: BTreeMap<Id, crate::document::Document>,
+    /// The names of the files in each document's folder, sorted: what is
+    /// there, whatever the records say. Bytes are never read here.
+    pub document_files: BTreeMap<Id, Vec<String>>,
 }
 
 /// Every file path under `dir`, sorted.
@@ -84,10 +89,45 @@ impl Catalogue {
                 None => {}
             }
         }
+        let mut documents = BTreeMap::new();
+        let mut document_files: BTreeMap<Id, Vec<String>> = BTreeMap::new();
+        let mut doc_paths = Vec::new();
+        walk(src, crate::ids::DOCUMENTS, &mut doc_paths)?;
+        doc_paths.sort();
+        for path in doc_paths {
+            if let Some(id) = crate::ids::document_of(&path) {
+                let Some(bytes) = src.read_shared(&path)? else {
+                    continue; // listed, then gone
+                };
+                match crate::document::Document::read(&id, &bytes) {
+                    Ok(d) => {
+                        documents.insert(id, d);
+                    }
+                    Err(e) => faults.push(e),
+                }
+            } else if let Some((id, name)) = crate::ids::bytes_of(&path) {
+                document_files.entry(id).or_default().push(name.to_owned());
+            } else {
+                let mut e = ryu_doc::files::invalid(
+                    "",
+                    "not a document file: documents/<first two characters of the ID>/<ID>.json, its bytes in documents/<first two>/<ID>/",
+                )
+                .with("path", &path);
+                if let Some(name) =
+                    crate::ids::doc_shard_of(&path).and_then(|n| Id::parse(n, "document").ok())
+                {
+                    e = e.with("expected", crate::ids::document_path(&name));
+                }
+                faults.push(e);
+            }
+        }
+        faults.sort_by(|a, b| a.details["path"].as_str().cmp(&b.details["path"].as_str()));
         Ok(Catalogue {
             manifest,
             items,
             faults,
+            documents,
+            document_files,
         })
     }
 
@@ -122,6 +162,62 @@ impl Catalogue {
             )
             .with("item", s)
         })
+    }
+
+    /// The documents whose number, or else whose previous number, is `n`.
+    pub fn documents_by_number(&self, n: &str) -> Vec<Id> {
+        let now = self
+            .documents
+            .iter()
+            .filter(|(_, d)| d.number == n)
+            .map(|(id, _)| id.clone());
+        let before = self
+            .documents
+            .iter()
+            .filter(|(_, d)| d.number != n && d.previous_numbers.iter().any(|p| p == n))
+            .map(|(id, _)| id.clone());
+        now.chain(before).collect()
+    }
+
+    /// The document `s` names: its ID, or its number (current first), or
+    /// `document_not_found`.
+    pub fn find_document(&self, s: &str) -> Result<Id> {
+        if let Ok(id) = Id::parse(s, "document")
+            && self.documents.contains_key(&id)
+        {
+            return Ok(id);
+        }
+        self.documents_by_number(s)
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                Error::new(
+                    Code::DocumentNotFound,
+                    format!("no document with ID or number {s:?}"),
+                )
+                .with("document", s)
+            })
+    }
+
+    /// The item or document `s` names, items first: what release commands
+    /// take. Neither is `item_not_found`, its message naming both.
+    pub fn find_part(&self, s: &str) -> Result<Id> {
+        self.find(s).or_else(|e| {
+            self.find_document(s).map_err(|_| {
+                Error::new(
+                    Code::ItemNotFound,
+                    format!("no item or document with ID or number {s:?}"),
+                )
+                .with("item", s)
+                .with("cause", &e.message)
+            })
+        })
+    }
+
+    /// Whether `id` is an item's or a document's: one ID space (ryupdm's
+    /// parts).
+    pub fn holds(&self, id: &Id) -> bool {
+        self.items.contains_key(id) || self.documents.contains_key(id)
     }
 }
 
@@ -244,5 +340,41 @@ pub(crate) mod tests {
         assert_eq!(c.find("0000000000001").unwrap(), id);
         assert_eq!(c.find("B-1").unwrap(), id);
         assert_eq!(c.find("Z-9").unwrap_err().code, Code::ItemNotFound);
+    }
+
+    #[test]
+    fn documents_are_read_and_their_folders_listed() {
+        let mut f = files(&[("0000000000001", "A-1")]);
+        let d = Id::parse("k3v9q2m8x4c1p", "document").unwrap();
+        let rec = crate::document::Document::new(
+            "DOC-1",
+            "Spec",
+            crate::document::File::of("Spec.pdf", b"%PDF", None).unwrap(),
+        );
+        f.insert(crate::ids::document_path(&d), rec.to_text().into_bytes());
+        f.insert(crate::ids::bytes_path(&d, "Spec.pdf"), b"%PDF".to_vec());
+        f.insert(crate::ids::bytes_path(&d, "notes.txt"), b"x".to_vec());
+        f.insert("documents/zz/zzzzzzzzzzzzf.json".into(), b"{".to_vec());
+        f.insert("documents/README.md".into(), b"hi".to_vec());
+        let c = Catalogue::load(&f).unwrap();
+        assert_eq!(c.documents.keys().collect::<Vec<_>>(), [&d]);
+        assert_eq!(c.document_files[&d], ["Spec.pdf", "notes.txt"]);
+        let paths: Vec<&str> = c
+            .faults
+            .iter()
+            .map(|e| e.details["path"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            paths,
+            ["documents/README.md", "documents/zz/zzzzzzzzzzzzf.json"]
+        );
+        assert_eq!(c.find_document("DOC-1").unwrap(), d);
+        assert_eq!(c.find_document("k3v9q2m8x4c1p").unwrap(), d);
+        assert_eq!(
+            c.find_document("A-1").unwrap_err().code,
+            Code::DocumentNotFound
+        );
+        assert_eq!(c.find_part("DOC-1").unwrap(), d);
+        assert_eq!(c.find_part("A-1").unwrap().as_str(), "0000000000001");
     }
 }

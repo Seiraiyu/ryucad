@@ -1449,7 +1449,16 @@ fn listed(root: &Path, rel: &str) -> Vec<(String, std::fs::Metadata)> {
     let mut out: Vec<(String, std::fs::Metadata)> = entries
         .flatten()
         .filter_map(|e| {
-            let meta = std::fs::metadata(e.path()).ok()?;
+            // The entry's own metadata: on Windows it comes with the
+            // listing, where fs::metadata opens every file, which made
+            // every request's freshness scan cost tens of milliseconds
+            // over a few hundred files (#981). A link is followed, as
+            // fs::metadata does.
+            let meta = if e.file_type().ok()?.is_symlink() {
+                std::fs::metadata(e.path()).ok()?
+            } else {
+                e.metadata().ok()?
+            };
             Some((e.file_name().to_string_lossy().into_owned(), meta))
         })
         .collect();
@@ -1460,6 +1469,32 @@ fn listed(root: &Path, rel: &str) -> Vec<(String, std::fs::Metadata)> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    /// #981: entries are listed from the folder's own listing, a linked
+    /// file with its target's metadata, a broken link left out, sorted.
+    #[cfg(unix)]
+    #[test]
+    fn a_folders_entries_carry_their_metadata_and_links_are_followed() {
+        let d = tempfile::tempdir().unwrap();
+        let blocks = d.path().join("blocks");
+        std::fs::create_dir_all(blocks.join("top")).unwrap();
+        std::fs::write(blocks.join("b.json"), "12345").unwrap();
+        std::fs::write(d.path().join("target.json"), "1234567").unwrap();
+        std::os::unix::fs::symlink(d.path().join("target.json"), blocks.join("a.json")).unwrap();
+        std::os::unix::fs::symlink(d.path().join("gone.json"), blocks.join("c.json")).unwrap();
+        let got: Vec<(String, bool, u64)> = listed(d.path(), "blocks")
+            .into_iter()
+            .map(|(n, m)| (n, m.is_dir(), if m.is_file() { m.len() } else { 0 }))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("a.json".to_owned(), false, 7),
+                ("b.json".to_owned(), false, 5),
+                ("top".to_owned(), true, 0)
+            ]
+        );
+    }
 
     #[test]
     fn the_paper_series_is_the_sizes_up_to_the_projects() {

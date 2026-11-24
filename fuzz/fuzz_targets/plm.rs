@@ -9,7 +9,8 @@
 //! the JSON and XML readers and their surveys, nor a seeded history
 //! planned from any bytes, nor a date read by any pattern; a reference
 //! that parses prints back the same and stands or doesn't without
-//! panicking.
+//! panicking; a document record that reads writes canonically and reads
+//! back; a clean merge of three readable documents reads.
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
@@ -18,7 +19,7 @@ use std::collections::BTreeMap;
 fuzz_target!(|data: &[u8]| {
     let Some((&mode, rest)) = data.split_first() else { return };
     let id = ryuplm::id::Id::parse("k3v9q2m8x4c1p", "item").unwrap();
-    match mode % 14 {
+    match mode % 16 {
         0 => {
             if let Ok(item) = ryuplm::item::Item::read(&id, rest) {
                 let text = item.to_text();
@@ -144,7 +145,7 @@ fuzz_target!(|data: &[u8]| {
                 }
             }
         }
-        _ => {
+        13 => {
             // A seeded history planned from any bytes, and any first line
             // read as a date pattern over the rest: never a panic.
             use ryuplm::import::transform::{DatePattern, Dates, read_date};
@@ -163,6 +164,39 @@ fuzz_target!(|data: &[u8]| {
             if let Ok(p) = DatePattern::parse(pattern) {
                 for d in [Dates::S1900, Dates::S1904] {
                     let _ = read_date(value, std::slice::from_ref(&p), d);
+                }
+            }
+        }
+        14 => {
+            // A document record: if it reads, it writes canonically, reads
+            // back the same, and has a content hash and textconv lines.
+            let id = ryuplm::id::Id::parse("k3v9q2m8x4c1p", "document").unwrap();
+            if let Ok(d) = ryuplm::document::Document::read(&id, rest) {
+                let text = d.to_text();
+                assert!(ryuplm::canonical::is_canonical(&text));
+                assert_eq!(ryuplm::document::Document::read(&id, text.as_bytes()).unwrap(), d);
+                let _ = ryuplm::pdm::document_content(&d);
+                let _ = ryuplm::textconv::textconv(text.as_bytes());
+            }
+            // A seeded catalogue with these bytes as a document's: judged
+            // without panicking.
+            let mut f = ryuplm::testing::documents("fuzz", 12, 6);
+            f.insert(ryuplm::ids::bytes_path(&id, "f.bin"), rest.to_vec());
+            f.insert(ryuplm::ids::document_path(&id), rest.to_vec());
+            if let Ok(c) = ryuplm::load::Catalogue::load(&f) {
+                let _ = ryuplm::judge::all(&f, &c, &Default::default());
+            }
+        }
+        _ => {
+            // Three document records split by NUL bytes: a clean merge of
+            // readable records is a record.
+            let id = ryuplm::id::Id::parse("k3v9q2m8x4c1p", "document").unwrap();
+            let parts: Vec<&[u8]> = rest.splitn(3, |b| *b == 0).collect();
+            if let [b, o, t] = parts.as_slice() {
+                let (out, outcome) = ryuplm::merge::bytes(b, o, t);
+                let reads = |x: &[u8]| ryuplm::document::Document::read(&id, x).is_ok();
+                if outcome == ryuplm::merge::Outcome::Clean && reads(o) && reads(t) && (b.is_empty() || reads(b)) {
+                    ryuplm::document::Document::read(&id, &out).expect("a clean merge of documents is a document");
                 }
             }
         }

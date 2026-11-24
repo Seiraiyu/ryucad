@@ -1829,7 +1829,12 @@ pub enum Request {
         topics: Vec<String>,
     },
     #[serde(rename = "daemon.status")]
-    DaemonStatus {},
+    DaemonStatus {
+        /// What the daemon spent by method (#981, as ryucad's #849):
+        /// `timings` in the answer.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        timings: bool,
+    },
     /// Cancels the caller's running long request named `token` (the
     /// connection's participant's, or on a connection that said no hello
     /// the agent `as`'s). Answered without waiting for the request.

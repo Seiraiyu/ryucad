@@ -55,6 +55,7 @@ pub fn all(src: &dyn Source, cat: &Catalogue, cx: &Context) -> Vec<Fault> {
     }
     out.extend(crate::links::judge(cat).into_iter().map(err));
     out.extend(crate::bom::judge(cat).into_iter().map(err));
+    out.extend(crate::documents::judge(src, cat));
     if let Some(c) = &config {
         out.extend(properties(src, cat, c).into_iter().map(err));
         out.extend(numbers(src, cat, c, cx));
@@ -135,6 +136,16 @@ fn numbers(src: &dyn Source, cat: &Catalogue, config: &Config, cx: &Context) -> 
         .map(err)
         .collect();
     out.extend(crate::numbers::unschemed(cat, config).into_iter().map(warn));
+    out.extend(
+        crate::numbers::document_duplicates(src, cat)
+            .into_iter()
+            .map(err),
+    );
+    out.extend(
+        crate::numbers::document_unschemed(cat, config)
+            .into_iter()
+            .map(warn),
+    );
     let others = match &cx.here {
         Some(h) => crate::numbers::others(h, &cx.elsewhere),
         None => cx

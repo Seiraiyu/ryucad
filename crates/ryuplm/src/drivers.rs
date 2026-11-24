@@ -9,10 +9,14 @@ use std::path::Path;
 pub const HEADER: &str =
     "# ryuplm: canonical JSON, merged and diffed by ryuplm (`ryuplm git install`)";
 
-pub const LINES: [&str; 5] = [
+pub const LINES: [&str; 7] = [
     "ryuplm.json merge=ryuplm diff=ryuplm text eol=lf",
     "ryupdm.json merge=ryuplm diff=ryuplm text eol=lf",
     "items/*/*.json merge=ryuplm diff=ryuplm text eol=lf",
+    "documents/*/*.json merge=ryuplm diff=ryuplm text eol=lf",
+    // Documents' bytes (design 937): binary, never normalized, never
+    // merged or diffed as text.
+    "documents/*/*/** -text -diff -merge",
     "releases/*/*.json merge=ryuplm diff=ryuplm text eol=lf",
     ".gitattributes text eol=lf",
 ];

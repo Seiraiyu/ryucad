@@ -85,6 +85,20 @@ fn grow(
     )
 }
 
+/// The blends `spec` picks: those holding its faces, and every one no
+/// larger than its size. `NotABlend` for a face no blend or corner holds.
+pub(crate) fn pick(rec: &Recognition, spec: &DeleteBlends) -> Result<BTreeSet<usize>, Error> {
+    let mut picked = holding(rec, &spec.faces)?;
+    if let Some(s) = spec.max_size {
+        for (i, b) in rec.blends.iter().enumerate() {
+            if size(&b.kind) <= s {
+                picked.insert(i);
+            }
+        }
+    }
+    Ok(picked)
+}
+
 pub(crate) fn delete_blends(
     key: OpKey,
     body: &Body,
@@ -97,14 +111,7 @@ pub(crate) fn delete_blends(
         return Err(TweakError::BadDistance.into());
     }
     let rec = recognise::recognise(body, &spec.options, m)?;
-    let mut picked = holding(&rec, &spec.faces)?;
-    if let Some(s) = spec.max_size {
-        for (i, b) in rec.blends.iter().enumerate() {
-            if size(&b.kind) <= s {
-                picked.insert(i);
-            }
-        }
-    }
+    let picked = pick(&rec, spec)?;
     if picked.is_empty() {
         return Ok((body.clone(), Journal::new()));
     }
@@ -684,7 +691,7 @@ fn rename(input: &Body, out: &mut Body, x: EntityId, name: Name) {
 /// `Modified` for each name both have that a step touched or that was
 /// given back; `Deleted` for each `input` name `out` lacks; `Created`
 /// for each `out` name `input` lacks.
-fn net(input: &Body, out: &Body, steps: &[&Journal], back: &BTreeSet<Name>) -> Journal {
+pub(crate) fn net(input: &Body, out: &Body, steps: &[&Journal], back: &BTreeSet<Name>) -> Journal {
     let names = |b: &Body| -> BTreeSet<Name> {
         b.faces()
             .map(|f| b.faces[f].name)

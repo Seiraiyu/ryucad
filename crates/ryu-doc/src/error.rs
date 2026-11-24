@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::fmt;
 
+pub mod details;
+
 /// A stable error code. Agents branch on these, so a code is never renamed
 /// or reused; new failures get new codes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1241,6 +1243,40 @@ pub enum Code {
     /// a column the source hasn't, or a property, class or scheme the
     /// catalogue doesn't declare (an error).
     ImportMappingInvalid,
+    /// No document of that ID or number in the catalogue (ryuplm 3).
+    DocumentNotFound,
+    /// A Git-stored document's bytes aren't at `documents/<ab>/<id>/<name>`
+    /// (an error): restore them from Git, or `document replace`. Also a
+    /// service-stored document's bytes a command can't reach.
+    DocumentBytesMissing,
+    /// A document's bytes aren't the length and BLAKE3 its record names (an
+    /// error): `details.expected` and `details.actual`; restore them, or
+    /// `document replace` to record the new bytes.
+    DocumentBytesChanged,
+    /// ryuplm check finding (a warning): a file in a document's folder that
+    /// isn't its bytes, a folder with no record, or bytes committed for a
+    /// document whose record says they are on the service.
+    DocumentFileUnknown,
+    /// ryuplm check finding (a warning): a Git-stored document over 50 MiB;
+    /// a large file that changes often belongs on the service.
+    DocumentLarge,
+    /// A Git-stored document over 100 MiB, which GitHub refuses (an error).
+    DocumentTooLarge,
+    /// An item names a document this catalogue hasn't (an error).
+    DocumentMissing,
+    /// ryuplm check finding (a warning): an item names another catalogue's
+    /// document that no catalogue this clone can see holds.
+    DocumentUnresolved,
+    /// Removing a document items still name (`details.items`); detach it
+    /// first, or pass `--detach`.
+    DocumentInUse,
+    /// Removing a document that has release records: obsolete its releases
+    /// instead.
+    DocumentReleased,
+    /// Releasing an item that names a document with no release record of its
+    /// current content (an error of release readiness); release the document
+    /// in the same proposal, or first.
+    DocumentUnreleased,
     /// ryuplm check finding (a warning): the label an item's legacy
     /// history carried isn't one of the catalogue's revision scheme, so its
     /// first release takes the scheme's first label (design 935).
@@ -1677,6 +1713,17 @@ impl Code {
         Code::ImportConflict,
         Code::ImportMissing,
         Code::ImportMappingInvalid,
+        Code::DocumentNotFound,
+        Code::DocumentBytesMissing,
+        Code::DocumentBytesChanged,
+        Code::DocumentFileUnknown,
+        Code::DocumentLarge,
+        Code::DocumentTooLarge,
+        Code::DocumentMissing,
+        Code::DocumentUnresolved,
+        Code::DocumentInUse,
+        Code::DocumentReleased,
+        Code::DocumentUnreleased,
         Code::ItemHistoryLabelForeign,
         Code::PartNumberTaken,
         Code::LedgerUnavailable,
@@ -1704,6 +1751,12 @@ impl Code {
             _ => 1,
         }
     }
+
+    /// The keys this code's details declare, beside the common ones
+    /// ([`details::COMMON`]); `None` while it is undeclared (design 698).
+    pub fn keys(self) -> Option<&'static [details::Key]> {
+        details::keys(self)
+    }
 }
 
 /// An error with a stable code, a message for people, and structured
@@ -1725,12 +1778,20 @@ impl Error {
         }
     }
 
-    /// Adds `key: value` to the details object.
+    /// Adds `key: value` to the details object. When `key` is an older
+    /// spelling this code declares as an alias (`ref` of `reference`), the
+    /// declared key gets the same value too, unless it is already there.
     pub fn with(mut self, key: &str, value: impl Serialize) -> Self {
         if !self.details.is_object() {
             self.details = json!({});
         }
-        self.details[key] = serde_json::to_value(value).unwrap_or(Value::Null);
+        let value = serde_json::to_value(value).unwrap_or(Value::Null);
+        if let Some(of) = details::alias_of(self.code, key)
+            && self.details.get(of).is_none()
+        {
+            self.details[of] = value.clone();
+        }
+        self.details[key] = value;
         self
     }
 
@@ -1783,6 +1844,27 @@ mod tests {
             &Code::ALL[Code::ALL.len() - 2..],
             &[Code::PartNumberTaken, Code::LedgerUnavailable]
         );
+    }
+
+    #[test]
+    fn document_codes() {
+        for (c, s) in [
+            (Code::DocumentNotFound, "document_not_found"),
+            (Code::DocumentBytesMissing, "document_bytes_missing"),
+            (Code::DocumentBytesChanged, "document_bytes_changed"),
+            (Code::DocumentFileUnknown, "document_file_unknown"),
+            (Code::DocumentLarge, "document_large"),
+            (Code::DocumentTooLarge, "document_too_large"),
+            (Code::DocumentMissing, "document_missing"),
+            (Code::DocumentUnresolved, "document_unresolved"),
+            (Code::DocumentInUse, "document_in_use"),
+            (Code::DocumentReleased, "document_released"),
+            (Code::DocumentUnreleased, "document_unreleased"),
+        ] {
+            assert_eq!(json!(c), json!(s));
+            assert_eq!(c.exit_code(), 1);
+            assert!(Code::ALL.contains(&c), "{c:?} in ALL");
+        }
     }
 
     #[test]
@@ -2486,5 +2568,27 @@ mod tests {
         );
         let bare = serde_json::to_value(Error::new(Code::Internal, "x")).unwrap();
         assert_eq!(bare, json!({"code": "internal", "message": "x"}));
+    }
+
+    /// An older spelling brings its declared key with the same value
+    /// (design 698, question 1015); the call sites don't change.
+    #[test]
+    fn an_alias_brings_its_declared_key() {
+        let e = Error::new(Code::InvalidParam, "x").with("field", "radius");
+        assert_eq!(e.details, json!({"field": "radius", "param": "radius"}));
+        let e = Error::new(Code::NotFound, "x").with("ref", "p/f1");
+        assert_eq!(e.details, json!({"ref": "p/f1", "reference": "p/f1"}));
+        let e = Error::new(Code::Internal, "x").with("file", "a.step");
+        assert_eq!(e.details, json!({"file": "a.step", "path": "a.step"}));
+        // A declared key already there is kept.
+        let e = Error::new(Code::InvalidParam, "x")
+            .with("param", "a")
+            .with("parameter", "b");
+        assert_eq!(e.details, json!({"param": "a", "parameter": "b"}));
+        // An undeclared code gets only what it was given.
+        let e = Error::new(Code::Conflict, "x").with("expected", "r1");
+        assert_eq!(e.details, json!({"expected": "r1"}));
+        assert!(Code::InvalidParam.keys().is_some());
+        assert!(Code::Conflict.keys().is_none());
     }
 }

@@ -215,3 +215,28 @@ fn history_imports_answer_the_same_everywhere() {
     g.section("mapping").str(&m.to_text());
     g.finish();
 }
+
+#[test]
+fn documents_answer_the_same_everywhere() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut g = Golden::new(dir.join("tests/golden/documents.txt"));
+    let files = ryuplm::testing::documents("golden", 300, 200);
+    for (p, b) in &files {
+        g.section("files").str(p).bytes(b);
+    }
+    let cat = Catalogue::load(&files).unwrap();
+    let faults = ryuplm::judge::all(&files, &cat, &Default::default());
+    g.section("check")
+        .str(&serde_json::to_string(&ryuplm::fault::list(&faults)).unwrap());
+    let config = ryupdm::config::Config::read_in(&files, "ryuplm").unwrap();
+    g.section("next")
+        .str(&ryuplm::numbers::next_document(&files, &cat, &config, None).unwrap());
+    for (id, d) in &cat.documents {
+        g.section("content")
+            .str(id.as_str())
+            .str(&ryuplm::pdm::document_content(d));
+        g.section("textconv")
+            .bytes(&ryuplm::textconv::textconv(d.to_text().as_bytes()));
+    }
+    g.finish();
+}
