@@ -2274,7 +2274,8 @@ pub fn resolved(
             );
         }
         // A blend edit's kept report: each blend it took, each corner, each
-        // blend it made again, as references and quantities.
+        // blend it made again, and each a partial delete kept, as references
+        // and quantities.
         if let crate::rebuild::Output::Solids(m) = out
             && let Some(rep) = &m.report
         {
@@ -2297,6 +2298,9 @@ pub fn resolved(
             }
             if let Some(Value::Array(rs)) = rep.get("resized") {
                 v["resized"] = Value::Array(rs.iter().map(show).collect());
+            }
+            if let Some(Value::Array(ks)) = rep.get("kept") {
+                v["kept"] = Value::Array(ks.iter().map(show).collect());
             }
         }
         if let crate::rebuild::Output::Solids(m) = out

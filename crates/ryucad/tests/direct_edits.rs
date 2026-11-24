@@ -1726,6 +1726,20 @@ fn a_partial_blend_delete_keeps_the_bridges() {
     }
     let want = ryukei_testkit::partial_deletes::kept_volume() * 1e9;
     near(volume(&mut s, "d", &imp), want, 2e-3);
+    // inspect --feature and feature.show give the kept blends as the
+    // deleted ones: references and quantities, each with its reason.
+    let v = must(&mut s, "inspect", json!({"part": "p", "feature": "d"}));
+    let d = &v["delete_blend"];
+    assert_eq!(d["partial"], true, "{v}");
+    assert_eq!(d["kept"].as_array().unwrap().len(), 2, "{v}");
+    assert_eq!(d["kept"][0]["radius"]["value"], "4 mm", "{v}");
+    assert_eq!(d["kept"][0]["reason"], "heal_ambiguous", "{v}");
+    assert!(
+        d["kept"][0]["faces"][0].as_str().unwrap().starts_with("p/"),
+        "{v}"
+    );
+    let shown = must(&mut s, "feature.show", json!({"part": "p", "id": "d"}));
+    assert_eq!(shown["partial"], true, "{shown}");
     // Without partial it is the kernel's refusal.
     must(
         &mut s,
