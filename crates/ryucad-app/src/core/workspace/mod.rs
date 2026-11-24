@@ -1278,6 +1278,12 @@ impl Workspace {
                 // A closed annotation loses its number: the one it had
                 // names it where it has no comment (a suggestion, #744).
                 let before = self.annotations.numbers();
+                let chosen_was_open = self
+                    .annotations
+                    .chosen_annotation
+                    .as_ref()
+                    .and_then(|c| self.annotations.all.get(c))
+                    .is_some_and(crate::core::annotations::Entry::is_open);
                 let news = self.annotations.changed(params, &me);
                 let numbers = self.annotations.numbers();
                 let tag = |id: &str| {
@@ -1304,11 +1310,20 @@ impl Workspace {
                     let note = note.clone().unwrap_or_default();
                     self.toasts.annotation(&by, true, &text, &note, id, now);
                 }
+                // Gone, or closed by this change: a chosen annotation someone
+                // closed is put down, so its marks stop drawing where the
+                // geometry has moved (#1052); Show Done or All chooses it
+                // again.
                 if self
                     .annotations
                     .chosen_annotation
                     .as_ref()
-                    .is_some_and(|c| !self.annotations.all.contains_key(c))
+                    .is_some_and(|c| {
+                        self.annotations
+                            .all
+                            .get(c)
+                            .is_none_or(|e| chosen_was_open && !e.is_open())
+                    })
                 {
                     self.choose_annotation(None);
                 }
