@@ -204,6 +204,12 @@ impl Rows {
         Some(PAUSE.saturating_sub(now.saturating_duration_since(t))).filter(|d| !d.is_zero())
     }
 
+    /// Whether the rows held were read at the filter and revision shown:
+    /// not a previous filter's, still on screen until the new ones come.
+    pub fn current(&self) -> bool {
+        self.held.as_ref() == Some(&(self.filter.clone(), self.revision.clone()))
+    }
+
     /// Whether an ask is out.
     pub fn busy(&self) -> bool {
         self.out.is_some()
@@ -350,6 +356,7 @@ mod tests {
             text: Some("bolt".into()),
             ..Default::default()
         });
+        assert!(!r.current(), "the held rows are the old filter's");
         let b = r
             .ask_at(t0 + Duration::from_millis(10))
             .expect("a new filter asks at once");

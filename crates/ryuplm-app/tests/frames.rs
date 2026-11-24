@@ -102,23 +102,28 @@ fn a_hundred_thousand_items_in_the_window() {
         text: Some("item 4242".into()),
         ..Default::default()
     });
-    while !h.state().opened().is_some_and(|w| {
-        w.rows.filter.text.as_deref() == Some("item 4242")
-            && !w.rows.busy()
-            && w.rows.total.is_some()
-    }) {
+    // The search's own rows, never the previous filter's still held.
+    while !h
+        .state()
+        .opened()
+        .is_some_and(|w| w.rows.filter.text.as_deref() == Some("item 4242") && w.rows.current())
+    {
         h.step();
     }
+    h.step();
     within("a search's rows", t.elapsed(), Duration::from_millis(100));
 
     // A pick seen by an agent.
     let w = h.state_mut().opened_mut().unwrap();
     w.set_filter(Default::default());
-    while h.state().opened().unwrap().rows.get(0).is_none()
-        || h.state().opened().unwrap().rows.busy()
-    {
+    while !h.state().opened().is_some_and(|w| {
+        w.rows.filter.text.is_none() && w.rows.current() && w.rows.get(0).is_some()
+    }) {
         h.step();
     }
+    // Drawn, so the row is there to click.
+    h.step();
+    h.step();
     let r = h.state().opened().unwrap().rows.get(0).unwrap().clone();
     let t = Instant::now();
     h.get_by_label(format!("{} {}", r.number, r.name.clone().unwrap_or_default()).trim())
