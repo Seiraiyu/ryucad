@@ -717,6 +717,15 @@ fn open_unwound(
             };
         }
     }
+    // A single loop that winds round nothing yet reaches more than a
+    // period one way (a disc on a torus whose lift runs further round
+    // than a turn, #838: a torus through a holed plate) fits no window of
+    // that way: opened, its edges would land either end of the window at
+    // once. Both ways stay periodic, and the domain meshes it in its lift
+    // (`Domain::with_requests`) or cut at the other way's seam.
+    if loops.len() == 1 && span >= period[k] {
+        return none;
+    }
     let margin = (0.25 * (period[k] - span))
         .min(0.05 * period[k])
         .max(1e-9 * period[k]);
