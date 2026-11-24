@@ -389,6 +389,9 @@ fn a_document_opens_through_the_opener() {
         .number
         .clone();
     h.get_by_label(&format!("Open {number}")).click();
+    // The opener is a shell script: its bytes are checked on Unix only.
+    #[cfg(not(unix))]
+    let _ = size;
     #[cfg(unix)]
     {
         let end = Instant::now() + Duration::from_secs(10);
