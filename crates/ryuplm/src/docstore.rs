@@ -323,6 +323,124 @@ pub fn upload_all(
     Ok(json!({"uploaded": u.uploaded, "held": u.held, "missing": []}))
 }
 
+/// The pinned bytes fetched into the cache when the record will store
+/// them in Git.
+fn ready_for(store: &DocStore, pin: &DrivePin, git: bool) -> Result<()> {
+    let cache = Cache::open()?;
+    if git && !cache.has(&pin.blake3, pin.size) {
+        store.fetch(&cache, &pin.blake3, pin.size)?;
+    }
+    Ok(())
+}
+
+/// `document add --drive <id>`: the Drive file's head revision pinned on
+/// the service, its bytes fetched for Git storage, and `req` (a
+/// `document.add` without file or drive) sent with the pin.
+pub fn drive_add(
+    send: &mut Sender,
+    open: &dyn Fn() -> Result<DocStore>,
+    drive_id: &str,
+    req: Request,
+    warnings: &mut Vec<String>,
+) -> Result<Value> {
+    let Request::DocumentAdd {
+        number,
+        next,
+        fields,
+        storage,
+        expected_revision,
+        ..
+    } = req
+    else {
+        return send(req);
+    };
+    let store = open()?;
+    let pin = store.pin(drive_id)?;
+    // The storage the session will choose: the request's, else the catalogue's.
+    let git = match storage.as_deref() {
+        Some(s) => s == "git",
+        None => {
+            send(Request::SettingsShow {})?["catalogue"]["documents"]["storage"] != json!("service")
+        }
+    };
+    ready_for(&store, &pin, git)?;
+    let add = Request::DocumentAdd {
+        file: None,
+        number,
+        next,
+        fields,
+        storage,
+        drive: Some(pin),
+        expected_revision,
+    };
+    around(
+        send,
+        &|| {
+            Ok(DocStore {
+                client: store.client.clone(),
+                slug: store.slug.clone(),
+            })
+        },
+        add,
+        warnings,
+    )
+}
+
+/// `document sync [<document>…] [--all] [--dry-run]`: each named document
+/// (every one with a Drive pin under `--all`) pinned again and synced.
+/// `{documents: [the session's answer for each]}`.
+pub fn sync_all(
+    send: &mut Sender,
+    open: &dyn Fn() -> Result<DocStore>,
+    documents: &[String],
+    all: bool,
+    dry_run: bool,
+    warnings: &mut Vec<String>,
+) -> Result<Value> {
+    if documents.is_empty() && !all {
+        return Err(Error::new(
+            Code::Usage,
+            "name documents to sync, or pass --all",
+        ));
+    }
+    let v = send(Request::DocumentLocate {
+        documents: documents.to_vec(),
+        rev: None,
+        storage: None,
+        pinned: true,
+    })?;
+    let store = open()?;
+    let mut out = Vec::new();
+    for row in v["documents"].as_array().cloned().unwrap_or_default() {
+        let drive_id = row["pin"]["drive_id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        let pin = store.pin(&drive_id)?;
+        if !dry_run {
+            ready_for(&store, &pin, row["storage"] == "git")?;
+        }
+        let req = Request::DocumentSync {
+            document: row["id"].as_str().unwrap_or_default().to_owned(),
+            pin,
+            dry_run,
+            expected_revision: None,
+        };
+        out.push(around(
+            send,
+            &|| {
+                Ok(DocStore {
+                    client: store.client.clone(),
+                    slug: store.slug.clone(),
+                })
+            },
+            req,
+            warnings,
+        )?);
+    }
+    Ok(json!({"documents": out}))
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -497,5 +615,58 @@ pub(crate) mod tests {
         assert_eq!(e.code, Code::DocumentBytesMissing);
         assert_eq!(e.details["missing"][0]["number"], "D-3");
         assert_eq!(state.lock().unwrap().puts, 2);
+    }
+
+    #[test]
+    fn drive_files_are_pinned_added_and_synced() {
+        let _l = crate::documents::tests::CACHE_LOCK.lock().unwrap();
+        let _c = crate::documents::tests::cache_env();
+        let (fake, state) = Fake::start("acme/widgets");
+        state.lock().unwrap().drive.insert(
+            "f1".into(),
+            vec![ryu_review::testing::Revision::file(
+                "r1",
+                "Spec.pdf",
+                "application/pdf",
+                b"one",
+            )],
+        );
+        let (_d, root) = crate::ledger::tests::catalogue(false);
+        let open = || Ok(DocStore::at(&fake.url, "t", "acme/widgets"));
+        let mut send = crate::ledger::tests::sender(&root);
+        let mut warnings = Vec::new();
+        let v = drive_add(
+            &mut send,
+            &open,
+            "f1",
+            Request::DocumentAdd {
+                file: None,
+                number: Some("D-1".into()),
+                next: None,
+                fields: crate::documents::New::default(),
+                storage: None,
+                drive: None,
+                expected_revision: None,
+            },
+            &mut warnings,
+        )
+        .unwrap();
+        assert_eq!(v["document"]["pin"]["revision"], "r1");
+        assert_eq!(
+            std::fs::read(root.join(v["bytes"].as_str().unwrap())).unwrap(),
+            b"one"
+        );
+        let same = sync_all(&mut send, &open, &[], true, false, &mut warnings).unwrap();
+        assert_eq!(same["documents"][0]["unchanged"], true);
+        state.lock().unwrap().drive.get_mut("f1").unwrap().push(
+            ryu_review::testing::Revision::file("r2", "Spec.pdf", "application/pdf", b"two"),
+        );
+        let dry = sync_all(&mut send, &open, &[], true, true, &mut warnings).unwrap();
+        assert_eq!(dry["documents"][0]["written"], false);
+        let v = sync_all(&mut send, &open, &[], true, false, &mut warnings).unwrap();
+        assert_eq!(v["documents"][0]["document"]["pin"]["revision"], "r2");
+        state.lock().unwrap().connected = false;
+        let e = sync_all(&mut send, &open, &[], true, false, &mut warnings).unwrap_err();
+        assert_eq!(e.code, Code::DriveNotConnected);
     }
 }

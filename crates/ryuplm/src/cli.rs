@@ -519,9 +519,19 @@ impl DocArgs {
 
 #[derive(Subcommand)]
 enum DocumentCmd {
-    /// A new document: FILE's bytes in Git beside its record.
+    /// A new document: FILE's bytes in Git beside its record, or on the
+    /// service (--storage service), or a Google Drive file's (--drive).
     Add {
-        file: PathBuf,
+        #[arg(required_unless_present = "drive")]
+        file: Option<PathBuf>,
+        /// A Google Drive file the organization's connection can read,
+        /// instead of FILE: its head revision pinned by hash.
+        #[arg(long, conflicts_with = "file")]
+        drive: Option<String>,
+        /// git or service; the catalogue's default (documents.storage) when
+        /// absent.
+        #[arg(long)]
+        storage: Option<String>,
         #[arg(long)]
         number: Option<String>,
         /// Take the next number of SCHEME (or of the document scheme there is).
@@ -575,6 +585,16 @@ enum DocumentCmd {
         media_type: Option<String>,
         #[command(flatten)]
         expect: Expect,
+    },
+    /// Pin each document's Drive file again and take a newer revision.
+    Sync {
+        documents: Vec<String>,
+        /// Every document with a Drive pin.
+        #[arg(long)]
+        all: bool,
+        /// Say what would change; write nothing.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Upload service-stored documents' bytes the service lacks, from
     /// this machine's cache (all of them when none are named).
@@ -870,6 +890,8 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
         Command::Import(ImportCmd::List) => (root()?, Request::ImportList {}),
         Command::Document(DocumentCmd::Add {
             file,
+            drive: _,
+            storage,
             number,
             next,
             fields,
@@ -878,11 +900,13 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
         }) => (
             root()?,
             Request::DocumentAdd {
-                file: Some(abs_file(here, file)),
+                // A Drive file goes as a pin, once the CLI has pinned it
+                // (`run`); the request never names the Drive ID itself.
+                file: file.as_ref().map(|f| abs_file(here, f)),
                 number: number.clone(),
                 next: next.clone(),
                 fields: fields.fields(media_type.clone()),
-                storage: None,
+                storage: storage.clone(),
                 drive: None,
                 expected_revision: exp(expect),
             },
@@ -1363,6 +1387,7 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
         | Command::Review(_)
         | Command::Number(_)
         | Command::Document(DocumentCmd::Upload { .. })
+        | Command::Document(DocumentCmd::Sync { .. })
         | Command::WhereUsed { org: true, .. } => return Ok(None),
     }))
 }
@@ -1479,6 +1504,43 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
                 ReviewCmd::Approvals { pr } => Action::Approvals { pr: *pr },
             };
             ryuplm::review::run(&here, action)
+        }
+        Command::Document(DocumentCmd::Sync {
+            documents,
+            all,
+            dry_run,
+        }) => {
+            let root = find_root(&here)?;
+            let mut sent = Vec::new();
+            let out = {
+                let mut send_one = |r: Request| send(cli, &root, r, &mut sent);
+                let open = || ryuplm::docstore::DocStore::open(&root);
+                ryuplm::docstore::sync_all(
+                    &mut send_one,
+                    &open,
+                    documents,
+                    *all,
+                    *dry_run,
+                    warnings,
+                )
+            };
+            warnings.extend(sent);
+            out
+        }
+        Command::Document(DocumentCmd::Add {
+            drive: Some(id), ..
+        }) => {
+            let Some((root, req)) = request(&cli.command, &here)? else {
+                return Err(Error::new(Code::Internal, "document add is a request"));
+            };
+            let mut sent = Vec::new();
+            let out = {
+                let mut send_one = |r: Request| send(cli, &root, r, &mut sent);
+                let open = || ryuplm::docstore::DocStore::open(&root);
+                ryuplm::docstore::drive_add(&mut send_one, &open, id, req, warnings)
+            };
+            warnings.extend(sent);
+            out
         }
         Command::Document(DocumentCmd::Upload { documents }) => {
             let root = find_root(&here)?;
