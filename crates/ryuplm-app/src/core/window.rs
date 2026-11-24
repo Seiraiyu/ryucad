@@ -889,13 +889,18 @@ impl Window {
         self.send_selection(std::time::Instant::now());
     }
 
-    /// The selection to the daemon, when the throttle allows. Pointing
-    /// goes aside, as the readers do: the main connection is the Items
-    /// list's, so a search never waits behind it.
+    /// The selection to the daemon, when the throttle allows: on the main
+    /// connection while the Items list has nothing out there (a pick then
+    /// waits behind no view.set or tile reader), else aside, so a search
+    /// never waits behind it.
     fn send_selection(&mut self, now: Instant) {
         if self.select.ready(now) {
-            let refs = self.selection.clone();
-            self.send_aside(req("selection.set", json!({"refs": refs})), Why::Quiet);
+            let r = req("selection.set", json!({"refs": self.selection.clone()}));
+            if self.rows.busy() {
+                self.send_aside(r, Why::Quiet);
+            } else {
+                self.send(r, Why::Quiet);
+            }
         }
     }
 
