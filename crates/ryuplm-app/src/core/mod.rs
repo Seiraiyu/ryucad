@@ -2,8 +2,11 @@
 
 pub mod activity;
 pub mod command;
+pub mod flash;
 pub mod keys;
 pub mod link;
+pub mod lists;
+pub mod marks;
 pub mod people;
 pub mod prefs;
 pub mod product;
