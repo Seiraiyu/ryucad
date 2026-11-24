@@ -1749,6 +1749,37 @@ fn a_partial_blend_delete_keeps_the_bridges() {
     assert_eq!(failure(&mut s, "d").code, Code::TweakFailed);
 }
 
+/// Plan 23.D, Decision 2: a partial delete has `edit.budget` for each of
+/// its units (three here). Just past what the kernel's own recognition
+/// spends, every unit is kept with reason `budget` and the body is as it
+/// was. A budget of 1 refuses in that recognition, before anything is
+/// built: `edit_budget_exceeded`, as a plain delete. The default budget
+/// builds as before.
+#[test]
+fn a_partial_blend_delete_has_its_budget_per_unit() {
+    let (_f, _d, mut s, imp) = bridged();
+    add(
+        &mut s,
+        json!({"type": "delete_blend", "id": "d", "below": "5 mm", "partial": true}),
+    );
+    let all = built(&mut s, "d", &imp).body.dump();
+    let body = built(&mut s, &imp, &imp).body;
+    let w = ryukei::work::Work::unlimited();
+    ryukei::tweak::recognise_blends_with(&body, &Default::default(), &w).unwrap();
+    let each = (w.spent() + 64) / 3 + 1;
+    s.set_edit_budget(each);
+    let rep = report(&mut s, "d");
+    assert!(rep["blends"].as_array().unwrap().is_empty(), "{rep}");
+    let kept = rep["kept"].as_array().unwrap();
+    assert_eq!(kept.len(), 3, "{rep}");
+    assert!(kept.iter().all(|k| k["reason"] == "budget"), "{rep}");
+    assert_eq!(built(&mut s, "d", &imp).body.dump(), body.dump());
+    s.set_edit_budget(1);
+    assert_eq!(failure(&mut s, "d").code, Code::EditBudgetExceeded);
+    s.set_edit_budget(ryucad::tweak::DEFAULT_EDIT_BUDGET);
+    assert_eq!(built(&mut s, "d", &imp).body.dump(), all);
+}
+
 /// The committed NIST corpus (ryustep's `tests/corpus`), each file
 /// imported as solids, each solid's blends at most 2 mm deleted under the
 /// default edit budget: every outcome is a body that passes the kernel's
