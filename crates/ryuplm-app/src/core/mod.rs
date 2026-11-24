@@ -9,6 +9,7 @@ pub mod launch;
 pub mod link;
 pub mod lists;
 pub mod marks;
+pub mod opener;
 pub mod people;
 pub mod pointing;
 pub mod prefs;

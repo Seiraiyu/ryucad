@@ -8,6 +8,7 @@ use crate::core::documents;
 use crate::core::flash::Flash;
 use crate::core::link::{Daemon, Event, Link, Wake};
 use crate::core::lists::{self, BomLine, Card, Change, Entry, Finding, Import, Release, Used};
+use crate::core::opener;
 use crate::core::people::{ItemView, People};
 use crate::core::pointing::{Sent, Throttle};
 use crate::core::product::Plm;
@@ -150,6 +151,8 @@ enum Why {
     /// A write (undo, redo): its failure toasts.
     Write(&'static str),
     People,
+    /// `document.get` into this file, then the opener.
+    Opened(PathBuf),
     Quiet,
 }
 
@@ -162,6 +165,8 @@ pub struct Window {
     pub lost: bool,
     pub lost_why: Option<Error>,
     retry: Option<Retry>,
+    /// A service-stored document's bytes on their way through the CLI.
+    opening: Option<(PathBuf, Receiver<Result<()>>)>,
     pending: BTreeMap<u64, Why>,
     readers: Readers,
     /// How many times each reader's request was sent: the window tests
@@ -239,6 +244,7 @@ impl Window {
             lost: false,
             lost_why: None,
             retry: None,
+            opening: None,
             pending: BTreeMap::new(),
             readers: Readers::default(),
             asks: BTreeMap::new(),
@@ -486,6 +492,50 @@ impl Window {
         }
     }
 
+    /// Opens document `id`'s bytes with the OS's opener: written by the
+    /// daemon for a Git-stored document, by the CLI (which fetches them
+    /// first) for a service-stored one.
+    pub fn open_document(&mut self, id: &str) {
+        let Some(c) = self.doc_cards.get(id).and_then(|g| g.value.clone()) else {
+            return;
+        };
+        let out = opener::temp_path(&c.id, &c.file_name);
+        if let Some(dir) = out.parent()
+            && let Err(e) = std::fs::create_dir_all(dir)
+        {
+            self.toasts
+                .error("Open", &Error::io(dir, &e), 0, Instant::now());
+            return;
+        }
+        if c.storage == "git" {
+            self.send(
+                req(
+                    "document.get",
+                    json!({"document": c.id, "out": out.display().to_string()}),
+                ),
+                Why::Opened(out),
+            );
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (exe, root, wake, file) = (
+            self.daemon.exe.clone(),
+            self.root.clone(),
+            self.wake.clone(),
+            out.clone(),
+        );
+        std::thread::spawn(move || {
+            let _ = tx.send(opener::fetch_cli(&exe, &root, &c.id, &file));
+            wake();
+        });
+        self.opening = Some((out, rx));
+    }
+
+    /// Whether a document is being opened.
+    pub fn opening(&self) -> bool {
+        self.opening.is_some()
+    }
+
     /// The Items list's filter and sort.
     pub fn set_filter(&mut self, f: Filter) {
         if f != self.rows.filter {
@@ -629,6 +679,10 @@ impl Window {
                     self.toasts.error(title, &e, 0, now);
                 }
             }
+            Why::Opened(out) => match a.and_then(|_| opener::open(&out)) {
+                Ok(()) => {}
+                Err(e) => self.toasts.error("Open", &e, 0, now),
+            },
             Why::People => {
                 if let Ok(v) = a {
                     self.people.reset(&v["participants"]);
@@ -895,6 +949,15 @@ impl Window {
                     .as_ref()
                     .map_or(RETRY_FIRST, |r| r.at.saturating_duration_since(now)),
             );
+        }
+        if let Some((out, rx)) = &self.opening
+            && let Ok(r) = rx.try_recv()
+        {
+            let out = out.clone();
+            self.opening = None;
+            if let Err(e) = r.and_then(|()| opener::open(&out)) {
+                self.toasts.error("Open", &e, 0, now);
+            }
         }
         if let Some(a) = self.rows.ask() {
             self.send(req("item.list", Rows::params(&a)), Why::Rows(a));
