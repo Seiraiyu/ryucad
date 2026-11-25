@@ -3285,6 +3285,81 @@ fn edited_section(golden: &mut Golden, name: &'static str, part: &str) {
     s.str(&one.hash);
 }
 
+/// ryukei 23.D's partial blend delete: the bridged twin
+/// (`ryukei_testkit::partial_deletes`) through STEP in millimetres,
+/// imported as a solid, `delete_blend --below 5mm --partial`: the result's
+/// body and the kept report (its `spent` left out, so a unit's cost may
+/// move without moving the section), on one thread and four alike.
+fn partial_blend_delete_section(golden: &mut Golden) {
+    let mut s = golden.section("partial_blend_delete");
+    let files = tempfile::tempdir().unwrap();
+    let bytes = ryustep::write(
+        &ryustep::WriteModel {
+            products: vec![ryustep::Product {
+                id: "bridged".into(),
+                name: "bridged".into(),
+                bodies: vec![ryukei_testkit::partial_deletes::body()],
+                ..Default::default()
+            }],
+        },
+        &ryustep::WriteOptions {
+            unit: ryustep::LengthUnit::Millimeter,
+            time_stamp: "2026-11-23T00:00:00".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let step = files.path().join("bridged.step");
+    std::fs::write(&step, bytes).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut session = ryucad::session::Session::open(dir.path()).unwrap();
+    common::must(
+        &mut session,
+        "import",
+        serde_json::json!({"path": step.to_str().unwrap(), "part": "p", "solid": true}),
+    );
+    common::must(
+        &mut session,
+        "feature.add",
+        serde_json::json!({"part": "p", "type": "delete_blend", "id": "d",
+            "below": "5 mm", "partial": true}),
+    );
+    let p = session
+        .project()
+        .part(&Id::parse("p", "part").unwrap())
+        .unwrap()
+        .clone();
+    let on = |n: usize| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(n)
+            .build()
+            .unwrap()
+            .install(|| rebuild_part(&p))
+    };
+    let (one, four) = (on(1), on(4));
+    assert_eq!(one.failed(), 0, "{:?}", one.features);
+    assert_eq!(one.hash, four.hash);
+    let (_, o) = one
+        .features
+        .iter()
+        .find(|(i, _)| i.as_str() == "d")
+        .unwrap();
+    let o = o.as_ref().unwrap();
+    for (solid, b) in o.solids() {
+        s.str(solid.as_str());
+        s.str(&b.body.dump());
+    }
+    if let ryucad::rebuild::Output::Solids(m) = o
+        && let Some(r) = &m.report
+    {
+        let mut r = r.as_ref().clone();
+        r.as_object_mut().unwrap().remove("spent");
+        s.str(&ryucad::doc::canonical::to_string(&r));
+    }
+    s.str(&one.hash);
+}
+
 fn deletes_section(golden: &mut Golden) {
     edited_section(golden, "deletes", "de");
 }
@@ -7649,6 +7724,7 @@ sections! {
     body_deletes => body_deletes_section(&mut golden),
     topology_tweaks => topology_tweaks_section(&mut golden),
     blend_edits => blend_edits_section(&mut golden),
+    partial_blend_delete => partial_blend_delete_section(&mut golden),
     draft_reports => draft_reports_section(&mut golden),
     mirrors => mirrors_section(&mut golden),
     splits => splits_section(&mut golden),

@@ -508,6 +508,10 @@ pub struct FeatureFields {
     /// fillet's radius, a chamfer's larger distance; `""` takes it away).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub below: Option<Value>,
+    /// A delete_blend that deletes what it can, unit by unit, and keeps
+    /// what refuses, with its cause (`false` takes it away).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partial: Option<bool>,
     /// A resize_blend's one chamfer group: the face its first distance
     /// runs along, `<part>/<solid>/<name>` (its blends are `faces`).
     #[serde(default, skip_serializing_if = "Option::is_none")]

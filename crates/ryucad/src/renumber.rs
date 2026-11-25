@@ -1917,8 +1917,10 @@ mod tests {
         let old = |k: u8| format!("{k:032x}");
         let new = |k: u8| format!("{:032x}", k + 100);
         let r = |k: u8| json!({"feature": "b", "name": old(k)});
-        let del = json!({"format": crate::doc::edit::FORMAT, "kind": "ryucad.feature",
-            "type": "delete_blend", "target": "b", "below": "2 mm", "faces": [r(1)]});
+        // Partial (plan 23.D): renumbering keeps it.
+        let del = json!({"format": crate::doc::edit::PARTIAL_FORMAT, "kind": "ryucad.feature",
+            "type": "delete_blend", "target": "b", "below": "2 mm", "faces": [r(1)],
+            "partial": true});
         let rz = json!({"format": crate::doc::edit::FORMAT, "kind": "ryucad.feature",
             "type": "resize_blend", "target": "b", "groups": [
                 {"form": "distances", "d1": "1 mm", "d2": "2 mm", "face": r(2), "faces": [r(3)]}]});
@@ -1940,6 +1942,7 @@ mod tests {
         let out = renumbered(&f, &rename, &names);
         let to = |k: u8| json!({"feature": "b-1", "name": new(k)});
         let d = serde_json::from_slice::<Value>(&out["parts/a/features/d.json"]).unwrap();
+        assert_eq!(d["partial"], true);
         assert_eq!(
             (&d["target"], &d["faces"]),
             (&json!("b-1"), &json!([to(1)]))

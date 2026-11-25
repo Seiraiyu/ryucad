@@ -195,6 +195,52 @@ pub(crate) fn blend_delete_report(
     })
 }
 
+/// A partial blend delete's kept report (plan 23.D): the deleted units'
+/// blends and corners, as a plain delete's, and `kept`, each blend of each
+/// kept unit as `blend_raw` gives it with its `reason` and, where one
+/// applies, its `hint`.
+pub(crate) fn partial_report(
+    target: &Id,
+    body: &ryukei::topo::Body,
+    rep: &ryukei::tweak::PartialDelete,
+    changes: bool,
+) -> Value {
+    let rec = &rep.recognition;
+    let gone: std::collections::BTreeSet<usize> = rep
+        .deleted
+        .iter()
+        .flat_map(|u| u.blends.iter().copied())
+        .collect();
+    let mut v = blend_delete_report(target, rec, &gone);
+    let mut kept = Vec::new();
+    for k in &rep.kept {
+        let (reason, hint) = match &k.cause {
+            ryukei::Error::InvalidTweak(t) => {
+                let r = refusal(t);
+                (r.reason, hint_for(&r, changes, body))
+            }
+            ryukei::Error::BudgetExceeded { .. } => (
+                "budget",
+                Some(
+                    "raise edit.budget (ryucad config set edit.budget <units>) to let each unit run longer",
+                ),
+            ),
+            ryukei::Error::NotASolid { .. } => ("not_a_solid", None),
+            _ => ("kernel", None),
+        };
+        for &i in &k.unit.blends {
+            let mut b = crate::blends::blend_raw(rec, i);
+            b["reason"] = json!(reason);
+            if let Some(h) = hint {
+                b["hint"] = json!(h);
+            }
+            kept.push(b);
+        }
+    }
+    v["kept"] = Value::Array(kept);
+    v
+}
+
 /// What a tweak asks the kernel.
 pub(crate) enum Spec {
     Move(MoveSpec),
@@ -215,11 +261,13 @@ pub(crate) enum Spec {
         heal: ryukei::tweak::Heal,
     },
     /// A blend delete: every blend at most `below` meters and those
-    /// holding `faces`, recognised at `tolerance`.
+    /// holding `faces`, recognised at `tolerance`; with `partial`, deleted
+    /// unit by unit, keeping what refuses (ryukei 23.D).
     DeleteBlend {
         below: Option<f64>,
         faces: Vec<Name>,
         tolerance: f64,
+        partial: bool,
     },
     /// A resize: each group's faces and the kind it gives their blends,
     /// recognised at `tolerance`.
@@ -702,6 +750,7 @@ pub(crate) fn resolve<'a>(
                     below: x.below.as_ref().map(|q| q.meters()),
                     faces,
                     tolerance: recognition(x.tolerance.as_ref()),
+                    partial: x.partial,
                 },
             })
         }
@@ -1227,6 +1276,8 @@ pub fn build(
     };
     let key = crate::rebuild::op_key(&part.id, id);
     let body = &r.built.body;
+    // A partial blend delete's own count: it has a budget of its own.
+    let mut partial_spent: Option<u64> = None;
     let (made, report) = match &r.spec {
         Spec::Move(s) => (ryukei::tweak::move_faces_with(key, body, s, &work), None),
         Spec::Offset(s) => (ryukei::tweak::offset_faces_with(key, body, s, &work), None),
@@ -1253,11 +1304,17 @@ pub fn build(
             below,
             faces,
             tolerance,
+            partial,
         } => {
             let options = ryukei::tweak::RecogniseOptions {
                 tolerance: *tolerance,
             };
-            match ryukei::tweak::recognise_blends_with(body, &options, &work) {
+            // A partial delete recognises under the cancel alone, then has
+            // `edit.budget` for each unit it may try (plan 23.D); a plain
+            // one recognises under its budget, as before.
+            let cancel_only = crate::work::work(run.job);
+            let seeing = if *partial { &cancel_only } else { &work };
+            match ryukei::tweak::recognise_blends_with(body, &options, seeing) {
                 Err(e) => (Err(e), None),
                 Ok(rec) => {
                     let taken = crate::blends::taken(&rec, *below, faces);
@@ -1266,10 +1323,26 @@ pub fn build(
                         faces: faces.clone(),
                         options,
                     };
-                    (
-                        ryukei::tweak::delete_blends_with(key, body, &spec, &work),
-                        Some(blend_delete_report(r.target, &rec, &taken)),
-                    )
+                    if *partial {
+                        let units = crate::blends::units(&rec, &taken).max(1);
+                        let each = crate::work::work(run.job)
+                            .with_budget(run.edit_budget.saturating_mul(units));
+                        let made =
+                            ryukei::tweak::delete_blends_partial_with(key, body, &spec, &each);
+                        partial_spent = Some(each.spent());
+                        match made {
+                            Ok((b, j, rep)) => (
+                                Ok((b, j)),
+                                Some(partial_report(r.target, body, &rep, changes)),
+                            ),
+                            Err(e) => (Err(e), None),
+                        }
+                    } else {
+                        (
+                            ryukei::tweak::delete_blends_with(key, body, &spec, &work),
+                            Some(blend_delete_report(r.target, &rec, &taken)),
+                        )
+                    }
                 }
             }
         }
@@ -1310,7 +1383,7 @@ pub fn build(
     let built = crate::rebuild::finish(id, ty, made, origins)?;
     let report = if budgeted {
         let mut rep = report.unwrap_or_else(|| json!({"target": r.target}));
-        rep["spent"] = json!(work.spent());
+        rep["spent"] = json!(partial_spent.unwrap_or(work.spent()));
         Some(rep)
     } else {
         report
@@ -1684,7 +1757,8 @@ fn put(o: &mut serde_json::Map<String, Value>, key: &str, given: &Option<Value>)
 }
 
 /// A blend delete's own fields from what was given, over `o` (its file's):
-/// its faces as text (`[]` for none), `below` and `tolerance`.
+/// its faces as text (`[]` for none), `below`, `tolerance` and `partial`
+/// (`false` takes it away).
 fn delete_blend_given(
     o: &mut serde_json::Map<String, Value>,
     f: &FeatureFields,
@@ -1699,6 +1773,15 @@ fn delete_blend_given(
     }
     put(o, "below", &f.below);
     put(o, "tolerance", &f.tolerance);
+    match f.partial {
+        Some(true) => {
+            o.insert("partial".into(), json!(true));
+        }
+        Some(false) => {
+            o.remove("partial");
+        }
+        None => {}
+    }
     Ok(())
 }
 
@@ -2191,7 +2274,8 @@ pub fn resolved(
             );
         }
         // A blend edit's kept report: each blend it took, each corner, each
-        // blend it made again, as references and quantities.
+        // blend it made again, and each a partial delete kept, as references
+        // and quantities.
         if let crate::rebuild::Output::Solids(m) = out
             && let Some(rep) = &m.report
         {
@@ -2214,6 +2298,9 @@ pub fn resolved(
             }
             if let Some(Value::Array(rs)) = rep.get("resized") {
                 v["resized"] = Value::Array(rs.iter().map(show).collect());
+            }
+            if let Some(Value::Array(ks)) = rep.get("kept") {
+                v["kept"] = Value::Array(ks.iter().map(show).collect());
             }
         }
         if let crate::rebuild::Output::Solids(m) = out
@@ -3645,6 +3732,30 @@ mod tests {
         assert!(draft_warnings(&part, &id, &rep("neutral", t - 0.01, t + 0.01)).is_empty());
         // Any other report (an import's, a fill's) says nothing here.
         assert!(draft_warnings(&part, &id, &json!({"sides": []})).is_empty());
+    }
+
+    /// Plan 23.D: `partial` given true is written, at format 27; given
+    /// false it is taken away, and the feature is format 20 again.
+    #[test]
+    fn a_blend_deletes_partial_is_given_and_taken_away() {
+        let part = Id::parse("p", "part").unwrap();
+        let env = crate::expr::Env::empty();
+        let given = |v: serde_json::Value| -> FeatureFields { serde_json::from_value(v).unwrap() };
+        let make = |was: Option<&Feature>, v: serde_json::Value| {
+            let mut f = given(v);
+            take_given("delete_blend", &mut f).unwrap();
+            from_given("delete_blend", was, &f, &part, crate::units::Unit::Mm, &env).unwrap()
+        };
+        let d = make(
+            None,
+            json!({"target": "b", "below": "2 mm", "partial": true}),
+        );
+        assert_eq!(d.to_json()["partial"], true);
+        assert_eq!(d.to_json()["format"], crate::doc::edit::PARTIAL_FORMAT);
+        let d = make(Some(&d), json!({"partial": false}));
+        assert!(d.to_json().get("partial").is_none());
+        assert_eq!(d.to_json()["format"], crate::doc::edit::FORMAT);
+        assert_eq!(d.to_json()["below"], "2 mm");
     }
 
     #[test]

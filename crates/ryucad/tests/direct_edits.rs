@@ -1618,6 +1618,238 @@ fn a_rounded_box_through_step_is_defeatured() {
     }
 }
 
+/// ryukei 23.C's bridged twin (`ryukei_testkit::partial_deletes`) written
+/// to STEP in millimetres, in `dir`.
+fn bridged_step(dir: &std::path::Path) -> std::path::PathBuf {
+    use ryustep::{LengthUnit, Product, WriteModel, WriteOptions, write};
+    let bytes = write(
+        &WriteModel {
+            products: vec![Product {
+                id: "bridged".into(),
+                name: "bridged".into(),
+                bodies: vec![ryukei_testkit::partial_deletes::body()],
+                ..Default::default()
+            }],
+        },
+        &WriteOptions {
+            unit: LengthUnit::Millimeter,
+            time_stamp: "2026-11-23T00:00:00".into(),
+            ..WriteOptions::default()
+        },
+    )
+    .unwrap();
+    let out = dir.join("bridged.step");
+    std::fs::write(&out, bytes).unwrap();
+    out
+}
+
+/// Part `p` holding the bridged twin imported as a solid, and the
+/// import's ID (the twin's solid). The two directories hold the STEP file
+/// and the project.
+fn bridged() -> (tempfile::TempDir, tempfile::TempDir, Session, String) {
+    let files = tempfile::tempdir().unwrap();
+    let step = bridged_step(files.path());
+    let dir = tempfile::tempdir().unwrap();
+    ryucad::server::init(dir.path(), None).unwrap();
+    let mut s = Session::open(dir.path()).unwrap();
+    let v = must(
+        &mut s,
+        "import",
+        json!({"path": step.to_str().unwrap(), "part": "p", "solid": true}),
+    );
+    let imp = v["parts"][0]["features"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    (files, dir, s, imp)
+}
+
+/// The twin through STEP keeps its blends: the 2 mm fillet, both 4 mm
+/// bridges and the 10 mm disc, as `blends.get` lists them; and a plain
+/// delete below 5 mm is the kernel's refusal.
+#[test]
+fn the_bridged_twin_through_step_holds_its_blends() {
+    let (_f, _d, mut s, _imp) = bridged();
+    let listed = must(&mut s, "blends.get", json!({"part": "p"}));
+    let mut radii: Vec<f64> = listed["blends"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["radius"]["m"].as_f64().unwrap())
+        .collect();
+    radii.sort_by(f64::total_cmp);
+    assert_eq!(radii.len(), 4, "{listed}");
+    for (r, want) in radii.iter().zip([0.002, 0.004, 0.004, 0.01]) {
+        assert!((r - want).abs() < 1e-8, "{radii:?}");
+    }
+    add(
+        &mut s,
+        json!({"type": "delete_blend", "id": "d", "below": "5 mm"}),
+    );
+    let e = failure(&mut s, "d");
+    assert_eq!(e.code, Code::TweakFailed, "{e}");
+}
+
+/// Plan 23.D: a partial delete of the twin below 5 mm builds. The fillet
+/// goes (`blends`), both bridges stay (`kept`, each `heal_ambiguous` with
+/// its faces and size), at the slab and disc's volume with the bridges,
+/// every bridge face under its name. Without `partial` it is the kernel's
+/// refusal again.
+#[test]
+fn a_partial_blend_delete_keeps_the_bridges() {
+    let (_f, _d, mut s, imp) = bridged();
+    add(
+        &mut s,
+        json!({"type": "delete_blend", "id": "d", "below": "5 mm", "partial": true}),
+    );
+    let rep = report(&mut s, "d");
+    let blends = rep["blends"].as_array().unwrap();
+    assert_eq!(blends.len(), 1, "{rep}");
+    assert!(
+        (blends[0]["size"].as_f64().unwrap() - 0.002).abs() < 1e-8,
+        "{rep}"
+    );
+    let kept = rep["kept"].as_array().unwrap();
+    assert_eq!(kept.len(), 2, "{rep}");
+    for k in kept {
+        assert!((k["size"].as_f64().unwrap() - 0.004).abs() < 1e-8, "{rep}");
+        assert_eq!(k["reason"], "heal_ambiguous", "{rep}");
+    }
+    let after = names(&mut s, "d");
+    for k in kept {
+        for f in k["faces"].as_array().unwrap() {
+            assert!(
+                after.contains(&f.as_str().unwrap().to_owned()),
+                "{f} renamed"
+            );
+        }
+    }
+    let want = ryukei_testkit::partial_deletes::kept_volume() * 1e9;
+    near(volume(&mut s, "d", &imp), want, 2e-3);
+    // inspect --feature and feature.show give the kept blends as the
+    // deleted ones: references and quantities, each with its reason.
+    let v = must(&mut s, "inspect", json!({"part": "p", "feature": "d"}));
+    let d = &v["delete_blend"];
+    assert_eq!(d["partial"], true, "{v}");
+    assert_eq!(d["kept"].as_array().unwrap().len(), 2, "{v}");
+    assert_eq!(d["kept"][0]["radius"]["value"], "4 mm", "{v}");
+    assert_eq!(d["kept"][0]["reason"], "heal_ambiguous", "{v}");
+    assert!(
+        d["kept"][0]["faces"][0].as_str().unwrap().starts_with("p/"),
+        "{v}"
+    );
+    let shown = must(&mut s, "feature.show", json!({"part": "p", "id": "d"}));
+    assert_eq!(shown["partial"], true, "{shown}");
+    // Without partial it is the kernel's refusal.
+    must(
+        &mut s,
+        "feature.edit",
+        json!({"part": "p", "id": "d", "partial": false}),
+    );
+    assert_eq!(failure(&mut s, "d").code, Code::TweakFailed);
+}
+
+/// Plan 23.D, Decision 2: a partial delete has `edit.budget` for each of
+/// its units (three here). Just past what the kernel's own recognition
+/// spends, every unit is kept with reason `budget` and the body is as it
+/// was. A budget of 1 refuses in that recognition, before anything is
+/// built: `edit_budget_exceeded`, as a plain delete. The default budget
+/// builds as before.
+#[test]
+fn a_partial_blend_delete_has_its_budget_per_unit() {
+    let (_f, _d, mut s, imp) = bridged();
+    add(
+        &mut s,
+        json!({"type": "delete_blend", "id": "d", "below": "5 mm", "partial": true}),
+    );
+    let all = built(&mut s, "d", &imp).body.dump();
+    let body = built(&mut s, &imp, &imp).body;
+    let w = ryukei::work::Work::unlimited();
+    ryukei::tweak::recognise_blends_with(&body, &Default::default(), &w).unwrap();
+    let each = (w.spent() + 64) / 3 + 1;
+    s.set_edit_budget(each);
+    let rep = report(&mut s, "d");
+    assert!(rep["blends"].as_array().unwrap().is_empty(), "{rep}");
+    let kept = rep["kept"].as_array().unwrap();
+    assert_eq!(kept.len(), 3, "{rep}");
+    assert!(kept.iter().all(|k| k["reason"] == "budget"), "{rep}");
+    assert_eq!(built(&mut s, "d", &imp).body.dump(), body.dump());
+    s.set_edit_budget(1);
+    assert_eq!(failure(&mut s, "d").code, Code::EditBudgetExceeded);
+    s.set_edit_budget(ryucad::tweak::DEFAULT_EDIT_BUDGET);
+    assert_eq!(built(&mut s, "d", &imp).body.dump(), all);
+}
+
+/// Plan 23.D: after a partial delete, a later feature naming a kept
+/// bridge's face resolves (deleting it is the kernel's refusal, never an
+/// unresolved reference), and one naming the deleted fillet's face is
+/// refused naming the delete.
+#[test]
+fn references_to_a_partial_deletes_kept_and_deleted_faces() {
+    let (_f, _d, mut s, imp) = bridged();
+    add(
+        &mut s,
+        json!({"type": "delete_blend", "id": "d", "below": "5 mm", "partial": true}),
+    );
+    let rep = report(&mut s, "d");
+    let at = |hex: &Value| format!("p/{imp}/{}", hex.as_str().unwrap());
+    let kept = at(&rep["kept"][0]["faces"][0]);
+    let gone = at(&rep["blends"][0]["faces"][0]);
+    add(
+        &mut s,
+        json!({"type": "delete_face", "id": "k", "faces": [kept], "heal": "grow"}),
+    );
+    let e = failure(&mut s, "k");
+    assert_eq!(e.code, Code::TweakFailed, "{e}");
+    must(&mut s, "feature.delete", json!({"part": "p", "id": "k"}));
+    // Refused as it is added: the face is gone from the solid.
+    let e = call(
+        &mut s,
+        "feature.add",
+        json!({"part": "p", "type": "delete_face", "id": "g", "faces": [gone], "heal": "grow"}),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, Code::ReferenceUnresolved, "{e}");
+    assert_eq!(e.details["removed_by"], "d", "{e}");
+}
+
+/// Plan 23.D: a partial delete builds the same bits on one thread and
+/// eight, and recomputed from nothing (`rebuild_part`, no session cache)
+/// as the session built it.
+#[test]
+fn a_partial_blend_delete_is_the_same_everywhere() {
+    let (_f, _d, mut s, imp) = bridged();
+    add(
+        &mut s,
+        json!({"type": "delete_blend", "id": "d", "below": "5 mm", "partial": true}),
+    );
+    let warm = built(&mut s, "d", &imp).body.dump();
+    let part = Id::parse("p", "part").unwrap();
+    let p = s.project().part(&part).unwrap().clone();
+    let on = |n: usize| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(n)
+            .build()
+            .unwrap()
+            .install(|| ryucad::rebuild::rebuild_part(&p))
+    };
+    let one = on(1);
+    assert_eq!(one.hash, on(8).hash);
+    let (_, o) = one
+        .features
+        .iter()
+        .find(|(i, _)| i.as_str() == "d")
+        .unwrap();
+    let cold: Vec<String> = o
+        .as_ref()
+        .unwrap()
+        .solids()
+        .iter()
+        .map(|(_, b)| b.body.dump())
+        .collect();
+    assert_eq!(cold, [warm]);
+}
+
 /// The committed NIST corpus (ryustep's `tests/corpus`), each file
 /// imported as solids, each solid's blends at most 2 mm deleted under the
 /// default edit budget: every outcome is a body that passes the kernel's

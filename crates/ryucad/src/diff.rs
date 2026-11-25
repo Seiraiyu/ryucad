@@ -5561,6 +5561,14 @@ mod tests {
             1,
             "{t}"
         );
+        let p = json!({"format": 27, "kind": "ryucad.feature", "type": "delete_blend",
+            "target": "b", "below": "2 mm", "partial": true});
+        let t = text(p);
+        assert!(
+            t.starts_with("ryucad.feature delete_blend (format 27)\n"),
+            "{t}"
+        );
+        assert!(t.lines().any(|l| l == "partial = true"), "{t}");
         let z = json!({"format": 20, "kind": "ryucad.feature", "type": "resize_blend",
             "target": "b", "groups": [
                 {"radius": "3 mm", "faces": [r(1)]},
