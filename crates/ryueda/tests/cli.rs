@@ -6498,3 +6498,51 @@ fn pours_from_the_cli() {
     );
     p.ok(&["board", "pour", "delete", id, "gnd"]);
 }
+
+/// The daemon's kept board state (ryueda 7.E) answers what a process
+/// reading the files does: after writes (`both_in` compares the two),
+/// after an undo, and after an edit from outside the session.
+#[test]
+fn a_kept_board_answers_as_a_fresh_one() {
+    let p = Pair::breakout();
+    for args in breakout_board::script() {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        p.ok(&args);
+    }
+    let id = breakout_board::BOARD;
+    let drc = ["board", "drc", id];
+    p.both_in("board", &drc);
+    p.ok(&[
+        "board", "track", "add", id, "--net", "rail:gnd", "--layer", "bottom", "--path", "22,3",
+        "24,3", "--id", "k1",
+    ]);
+    p.both_in("board", &drc);
+    // Undo, in the daemon's folder only: the daemon's answer, then a
+    // process reading that folder's files.
+    let (code, v) = p.run_in(&p.daemon, "board", &["undo"]);
+    assert_eq!(code, 0, "{v}");
+    let kept = p.run_in(&p.daemon, "board", &drc);
+    let mut fresh = p.command_in(&p.daemon, "board", &drc);
+    fresh.env("RYUEDA_NO_DAEMON", "1");
+    let fresh = parse(fresh.output().unwrap(), &p.daemon);
+    assert_eq!(kept, fresh, "after an undo");
+    // The other folder catches up by a delete, so the two match again.
+    let (code, v) = p.run_in(&p.direct, "board", &["board", "track", "delete", id, "k1"]);
+    assert_eq!(code, 0, "{v}");
+    p.both_in("board", &drc);
+    // An edit from outside: a placement file rewritten on disk, in both.
+    let dir = p.daemon.join("board/boards").join(id).join("placements");
+    let f = fs::read_dir(&dir).unwrap().flatten().next().unwrap().path();
+    let rel = f
+        .strip_prefix(&p.daemon)
+        .unwrap()
+        .to_string_lossy()
+        .replace('\\', "/");
+    let mut v: Value = serde_json::from_str(&fs::read_to_string(&f).unwrap()).unwrap();
+    v["rotation_mdeg"] = json!(90_000);
+    let text = ryueda::canonical::to_string(&v);
+    for top in [&p.direct, &p.daemon] {
+        fs::write(top.join(&rel), &text).unwrap();
+    }
+    p.both_in("board", &drc);
+}

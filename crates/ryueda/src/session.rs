@@ -56,12 +56,10 @@ pub struct Session {
     /// What a long request's lock-free fetches got
     /// ([`crate::libdeps::prepare`]), taken by its answer.
     pub(crate) fetched: Option<crate::libdeps::Prefetched>,
-    /// The last [`BOARDS`] boards' shapes built, by the board and the
-    /// revisions they were built from, most recently used first.
-    pub(crate) boards: Vec<(String, std::sync::Arc<crate::board::shapes::BoardShapes>)>,
-    /// The last [`BOARDS`] boards' checks, by the same keys as their
-    /// shapes, most recently used first.
-    pub(crate) checks: Vec<(String, std::sync::Arc<crate::board::drc::BoardCheck>)>,
+    /// The last [`BOARDS`] boards' kept states (ryueda 7.E), most recently
+    /// used first, each with the key ([`Session::board_key`]) it was last
+    /// carried to.
+    pub(crate) lives: Vec<(crate::id::Id, String, crate::board::live::Live)>,
     /// The last [`NETLISTS`] designs flattened from the working files,
     /// most recently used first: dropped whenever the project is read
     /// again ([`Session::set_project`]).
@@ -132,7 +130,7 @@ fn listed_at(root: &Path, rel: &str) -> Vec<(PathBuf, std::fs::Metadata)> {
 /// How many designs' working netlists a session keeps (#976).
 pub const NETLISTS: usize = 4;
 
-/// How many boards' shapes a session keeps.
+/// How many boards' kept states a session keeps.
 const BOARDS: usize = 4;
 
 /// The refs every same-repository pinned library's release branch is
@@ -224,8 +222,7 @@ impl Session {
             pins,
             pins_key,
             fetched: None,
-            boards: Vec::new(),
-            checks: Vec::new(),
+            lives: Vec::new(),
             netlists: Vec::new(),
             watching: None,
         })
@@ -252,51 +249,54 @@ impl Session {
         Ok(h.finalize().to_hex().to_string())
     }
 
-    /// The board's check, built once per the same revisions as its shapes.
+    /// The board's check: its kept state ([`crate::board::live::Live`])
+    /// carried to the board's, the project's, its libraries' and its
+    /// blocks' revisions, or built when the session keeps none.
     pub fn board_check(
         &mut self,
         board: &crate::id::Id,
     ) -> Result<std::sync::Arc<crate::board::drc::BoardCheck>> {
         let key = self.board_key(board)?;
-        if let Some(i) = self.checks.iter().position(|(k, _)| *k == key) {
-            let hit = self.checks.remove(i);
-            let c = hit.1.clone();
-            self.checks.insert(0, hit);
+        let p = &self.project;
+        let b = &p.boards[board];
+        if let Some(i) = self.lives.iter().position(|(id, _, _)| id == board) {
+            // Taken out first: an update that fails leaves no state kept.
+            let mut hit = self.lives.remove(i);
+            if hit.1 != key {
+                let _s = crate::profile::stage("live_update");
+                hit.2.update(p, b)?;
+                hit.1 = key;
+            }
+            let c = hit.2.check().clone();
+            self.lives.insert(0, hit);
             return Ok(c);
         }
-        let shapes = self.board_shapes(board)?;
-        let _s = crate::profile::stage("check");
-        let p = &self.project;
-        let built = std::sync::Arc::new(crate::board::drc::check_shapes(
-            p,
-            &p.boards[board],
-            shapes,
-        )?);
-        self.checks.insert(0, (key, built.clone()));
-        self.checks.truncate(BOARDS);
-        Ok(built)
+        let _s = crate::profile::stage("live_build");
+        let live = crate::board::live::Live::build(p, b)?;
+        let c = live.check().clone();
+        self.lives.insert(0, (board.clone(), key, live));
+        self.lives.truncate(BOARDS);
+        Ok(c)
     }
 
-    /// The board's shapes, built once per the board's, the project's, its
-    /// libraries' and its blocks' revisions.
+    /// The board's shapes, as its check has them; a board that can't be
+    /// checked (a design that doesn't flatten) has them built, uncached,
+    /// so their own error is what the caller sees.
     pub fn board_shapes(
         &mut self,
         board: &crate::id::Id,
     ) -> Result<std::sync::Arc<crate::board::shapes::BoardShapes>> {
-        let key = self.board_key(board)?;
-        let p = &self.project;
-        let b = &p.boards[board];
-        if let Some(i) = self.boards.iter().position(|(k, _)| *k == key) {
-            let hit = self.boards.remove(i);
-            let shapes = hit.1.clone();
-            self.boards.insert(0, hit);
-            return Ok(shapes);
+        match self.board_check(board) {
+            Ok(c) => Ok(c.shapes.clone()),
+            Err(_) => {
+                let p = &self.project;
+                let b = p.boards.get(board).ok_or_else(|| {
+                    Error::new(Code::BoardNotFound, format!("there is no board {board}"))
+                        .with("board", board)
+                })?;
+                Ok(std::sync::Arc::new(crate::board::shapes::build(p, b)?))
+            }
         }
-        let _s = crate::profile::stage("shapes");
-        let built = std::sync::Arc::new(crate::board::shapes::build(p, b)?);
-        self.boards.insert(0, (key, built.clone()));
-        self.boards.truncate(BOARDS);
-        Ok(built)
     }
 
     /// [`Session::at`], with the key it is kept by.
