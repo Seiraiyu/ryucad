@@ -782,7 +782,7 @@ pub fn unplace(
 /// `board show`: the board's file and, per occurrence of its design with a
 /// footprint, its placement or none; how many are unplaced, and the
 /// placements whose occurrence is gone.
-pub fn show(p: &Project, board: &str, pads: bool) -> Result<Value> {
+pub fn show(p: &Project, board: &str, pads: bool, pours: bool) -> Result<Value> {
     let b = find(p, board)?;
     let mut v = answer(p, &b.id);
     let Ok(file) = board_of(b) else {
@@ -836,12 +836,34 @@ pub fn show(p: &Project, board: &str, pads: bool) -> Result<Value> {
                     if pads {
                         v["pads"] = super::shapes::pads_json(&s);
                     }
+                    if pours {
+                        v["pours"] = pours_json(&s, &b.id);
+                    }
                 }
                 Err(e) => v["shapes_error"] = json!(e),
             }
         }
     }
     Ok(v)
+}
+
+/// `board show --pours`' list: each fill's net, layer, regions, area,
+/// islands removed, thermals and resolved rules. The area is a string:
+/// it can pass 2^53.
+pub fn pours_json(s: &super::shapes::BoardShapes, id: &crate::id::Id) -> Value {
+    let names = super::stackup::names(s.n());
+    json!(s
+        .pours
+        .iter()
+        .map(|f| json!({"id": f.id, "reference": format!("{id}:pour/{}", f.id), "net": f.net,
+            "layer": names[f.layer],
+            "regions": (0..f.regions.len()).map(|k| format!("{id}:pour/{}#{k}", f.id)).collect::<Vec<_>>(),
+            "area_nm2": (f.polygons.area2() / 2).to_string(),
+            "islands_removed": f.islands_removed,
+            "thermals": f.thermals.iter().map(|(p, k)| json!({"pad": p, "spokes": k})).collect::<Vec<_>>(),
+            "rules": {"clearance_nm": f.rules.clearance, "min_width_nm": f.rules.min_width,
+                      "thermal_gap_nm": f.rules.gap, "thermal_spoke_nm": f.rules.spoke}}))
+        .collect::<Vec<_>>())
 }
 
 /// `board render`: the board's shapes (kept by the session) drawn.

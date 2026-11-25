@@ -254,6 +254,41 @@ fuzz_target!(|data: &[u8]| {
         };
         put(&mut files, &format!("boards/f/drawings/d{i}.json"), "ryueda.board-drawing", d);
     }
+    // Pours (ryueda 7.D): a net of the design or not, any layer, the
+    // whole board, a rectangle or a contour that doesn't close, and drawn
+    // settings.
+    for i in 0..b.next() % 3 {
+        let net = if b.next() % 5 == 0 { "nope".to_owned() } else { nets[b.next() % nets.len()].clone() };
+        let mut pour = json!({"net": net, "layer": LAYERS[b.next() % LAYERS.len()]});
+        let (x, y, w, h) = (b.coord(), b.coord(), b.length(), b.length());
+        match b.next() % 4 {
+            0 | 1 => pour["whole"] = json!(true),
+            2 => {
+                pour["contour"] = json!({"start": [x, y], "edges": [{"type": "line", "to": [x + w, y]}, {"type": "line", "to": [x + w, y + h]},
+                    {"type": "line", "to": [x, y + h]}, {"type": "line", "to": [x, y]}]})
+            }
+            _ => pour["contour"] = json!({"start": [x, y], "edges": [{"type": "line", "to": [x + w, y]}, {"type": "line", "to": [x + w, y + h]}]}),
+        }
+        if b.next() % 2 == 0 {
+            pour["priority"] = json!(b.next() as i64 % 4 - 1);
+        }
+        if b.next() % 2 == 0 {
+            pour["clearance_nm"] = json!(b.length());
+        }
+        if b.next() % 2 == 0 {
+            pour["min_width_nm"] = json!(b.length());
+        }
+        if b.next() % 3 == 0 {
+            pour["connect"] = json!("solid");
+        }
+        if b.next() % 3 == 0 {
+            pour["thermal"] = json!({"gap_nm": b.length(), "spoke_nm": b.length()});
+        }
+        if b.next() % 3 == 0 {
+            pour["islands"] = json!("keep");
+        }
+        put(&mut files, &format!("boards/f/pours/p{i}.json"), "ryueda.pour", pour);
+    }
     let p = load(&files);
     let _ = p.faults();
     let (one, eight) = pools();

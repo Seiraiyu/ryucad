@@ -74,6 +74,8 @@ impl BoardShapes {
             inner: false,
             net: net.map(Into::into),
             mask: [Some(copper.clone()), None],
+            connect: None,
+            thermal: None,
             copper,
         });
         self
@@ -103,6 +105,8 @@ impl BoardShapes {
             inner: true,
             net: net.map(Into::into),
             mask: [Some(copper.clone()), Some(copper.clone())],
+            connect: None,
+            thermal: None,
             copper,
         });
         self.holes.push(HoleInfo {

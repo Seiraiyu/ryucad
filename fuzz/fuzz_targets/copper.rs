@@ -3,7 +3,10 @@
 //! input edge are classified as the exact windings say, and one thread
 //! and eight give the same polygons. Then a two-layer layout of the same
 //! rings: connectivity never panics, one thread and eight agree, and
-//! inserting and removing items equals building again.
+//! inserting and removing items equals building again. And a fill of
+//! the first operand less the second, grown by a byte's clearance, with
+//! a thermal pad at a byte's point: simple polygons in order, inside its
+//! area, one thread and eight alike.
 
 #![no_main]
 
@@ -12,6 +15,7 @@ use ryu_board::geom::{Point, Region};
 use ryu_board::model::{Polarity, Side};
 use ryu_board::shape::{Shape, polygon};
 use ryu_copper::connect::Copper;
+use ryu_copper::fill::{self, Ask, ThermalPad};
 use ryu_copper::layout::{Hole, HoleShape, Item, Layer, Layout};
 use ryu_copper::measure::{BodyOptions, Verdict};
 use ryu_copper::poly::{self, FillRule, FlattenOptions, Op, Rings};
@@ -156,6 +160,38 @@ fuzz_target!(|data: &[u8]| {
         let faults = poly::faults(&p);
         assert!(faults.is_empty(), "{faults:?}");
     }
+    // A fill of `a` less `b`, grown by a byte's clearance.
+    let area = poly::simplify(&a, FillRule::NonZero);
+    let byte = |k: usize| i64::from(data[k % data.len()]);
+    let grown = byte(1) * scale / 8 + 1;
+    let obstacle = poly::grow(&poly::simplify(&b, FillRule::EvenOdd), grown, &fill::opts());
+    let ask = Ask {
+        area: area.clone(),
+        obstacles: vec![obstacle.clone()],
+        spoke_obstacles: vec![obstacle],
+        thermals: vec![ThermalPad {
+            at: Point::new((byte(2) % 64) * scale, (byte(3) % 64) * scale),
+            rotation_mdeg: byte(4) * 1_411,
+            half: [scale, 2 * scale],
+            gap: scale,
+            spoke: scale,
+        }],
+        min_width: byte(5) % 4 * scale / 2,
+        own: vec![area.body()],
+        keep_islands: byte(6) & 1 == 1,
+    };
+    let fill_on = |threads: usize| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+            .install(|| fill::fill(&ask))
+    };
+    let f = fill_on(1);
+    let faults = poly::faults(&f.polygons);
+    assert!(faults.is_empty(), "fill: {faults:?}");
+    assert!(poly::difference(&f.polygons, &area).is_empty(), "fill outside its area");
+    assert_eq!(f, fill_on(8));
     // Connectivity of the same rings.
     let l = layout_of(&a, &b, scale);
     let build = |threads: usize| {

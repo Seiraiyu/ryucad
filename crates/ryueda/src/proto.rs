@@ -757,6 +757,8 @@ pub enum Request {
         board: String,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         pads: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        pours: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rev: Option<String>,
     },
@@ -977,6 +979,81 @@ pub enum Request {
     BoardKeepoutDelete {
         board: String,
         keepouts: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// A pour (ryueda 7.D): copper of one net over a contour, a rectangle
+    /// or the whole board on one layer; or, with `ops`, several.
+    #[serde(rename = "board.pour.add")]
+    BoardPourAdd {
+        board: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        net: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        layer: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        whole: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rect: Option<Vec<String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        contour: Option<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        priority: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        clearance: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        min_width: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        connect: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thermal_gap: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thermal_spoke: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        islands: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ops: Option<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// A pour's fields given replaced.
+    #[serde(rename = "board.pour.edit")]
+    BoardPourEdit {
+        board: String,
+        pour: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        layer: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        whole: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rect: Option<Vec<String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        contour: Option<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cutouts: Option<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        priority: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        clearance: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        min_width: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        connect: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thermal_gap: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thermal_spoke: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        islands: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "board.pour.delete")]
+    BoardPourDelete {
+        board: String,
+        pours: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
@@ -1874,6 +1951,9 @@ impl Request {
                 | Request::BoardDrawingDelete { .. }
                 | Request::BoardKeepoutEdit { .. }
                 | Request::BoardKeepoutDelete { .. }
+                | Request::BoardPourAdd { .. }
+                | Request::BoardPourEdit { .. }
+                | Request::BoardPourDelete { .. }
                 | Request::BoardGroupFlip { .. }
                 | Request::BoardEdit { .. }
                 | Request::BoardDelete { .. }
@@ -1995,6 +2075,7 @@ mod tests {
             Request::BoardShow {
                 board: "main".into(),
                 pads: true,
+                pours: true,
                 rev: None,
             },
             Request::BoardTrackAdd {

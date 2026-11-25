@@ -7,6 +7,7 @@
 //! model; ryueda will build one from its own boards.
 
 pub mod connect;
+pub mod fill;
 pub mod index;
 pub mod layout;
 pub mod measure;

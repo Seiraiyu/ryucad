@@ -40,6 +40,10 @@ pub struct PadInfo {
     pub copper: Shape,
     /// Its solder mask openings on the top and bottom, placed.
     pub mask: [Option<Shape>; 2],
+    /// The footprint pad's own pour connection, when it sets one.
+    pub connect: Option<crate::footprint::ZoneConnect>,
+    /// The footprint pad's own thermal: (gap, spoke).
+    pub thermal: Option<(i64, i64)>,
 }
 
 /// A drilled hole and what owns it.
@@ -156,6 +160,8 @@ pub struct BoardShapes {
     pub courtyards: Vec<CourtyardInfo>,
     /// The board's keepouts and its parts' (ryueda 7.C).
     pub keepouts: Vec<KeepoutInfo>,
+    /// The board's pours as filled (ryueda 7.D).
+    pub pours: Vec<super::pour::PourInfo>,
     /// The outline less its cutouts.
     pub outline: Shape,
     /// The outline's and cutouts' boundaries, zero width.
@@ -413,6 +419,8 @@ fn one(
             net: p.number.as_ref().and_then(|n| o.nets.get(n)).cloned(),
             copper: copper.placed(&place, Polarity::Positive),
             mask,
+            connect: p.margins.zone_connect,
+            thermal: p.thermal.as_ref().map(|t| (t.gap_nm, t.spoke_nm)),
         });
     }
     let refdes = o.label().to_owned();
@@ -705,6 +713,28 @@ pub fn build(p: &Project, b: &BoardFiles) -> Result<BoardShapes> {
             .entry(g.layer.clone())
             .or_default()
             .push((format!("{board}:drawing/{did}"), shape));
+    }
+    if !b.pours.is_empty() {
+        let pours: Vec<(crate::id::Id, super::pour::Pour)> = b
+            .pours
+            .iter()
+            .filter(|(_, l)| fine(&l.faults))
+            .filter_map(|(id, l)| Some((id.clone(), l.item.as_ref().ok()?.clone())))
+            .collect();
+        let (region, edges) = outline(file);
+        out.outline = region;
+        out.edges = edges;
+        let rules = super::rules::of(p, b)?;
+        out.pours = super::pour::fill_all(&pours, &out, &rules, &preset);
+        for f in &out.pours {
+            let name = &super::stackup::names(n)[f.layer];
+            for r in &f.regions {
+                out.layers
+                    .entry(name.clone())
+                    .or_default()
+                    .push((format!("{board}:pour/{}", f.id), r.clone()));
+            }
+        }
     }
     let (region, edges) = outline(file);
     out.outline = region;
@@ -1142,6 +1172,62 @@ pub(crate) mod tests {
             s.notices
                 .iter()
                 .any(|n| n.error.code == Code::BoardFootprintUnsupported)
+        );
+    }
+
+    #[test]
+    fn pads_carry_their_own_pour_connections() {
+        use crate::footprint::{Thermal, ZoneConnect};
+        let (_dir, mut p, id) = placed();
+        for lib in p.libraries.values_mut().flatten() {
+            for f in lib.footprints.values_mut() {
+                if let Ok(f) = f.item.as_mut() {
+                    let mut pads = f.pads.values_mut();
+                    if let Some(a) = pads.next() {
+                        a.margins.zone_connect = Some(ZoneConnect::Solid);
+                    }
+                    if let Some(b) = pads.next() {
+                        b.thermal = Some(Thermal {
+                            spoke_nm: 300_000,
+                            gap_nm: 400_000,
+                            angle_mdeg: None,
+                        });
+                    }
+                }
+            }
+        }
+        let s = build(&p, &p.boards[&id]).unwrap();
+        assert!(s.pads.iter().any(|x| x.connect == Some(ZoneConnect::Solid)));
+        assert!(s.pads.iter().any(|x| x.thermal == Some((400_000, 300_000))));
+    }
+
+    #[test]
+    fn a_whole_pour_fills_its_layer() {
+        let (_d, p0, id) = placed();
+        let net = a_net(&p0);
+        let pour = super::super::pour::Pour::whole(&net, super::super::file::CopperLayer::Top);
+        let text = crate::doc::to_string(&pour, super::super::file::POUR_KIND, 1);
+        let (_d, p, _) = placed_with(&[("boards/b/pours/p1.json".into(), text)]);
+        let s = build(&p, &p.boards[&id]).unwrap();
+        assert_eq!(s.pours.len(), 1);
+        assert!(!s.pours[0].regions.is_empty());
+        assert!(
+            s.layers["copper.top"]
+                .iter()
+                .any(|(owner, _)| owner == "b:pour/p1")
+        );
+        let built = super::super::layout::build("b", &s);
+        let items: Vec<_> = built
+            .layout
+            .items
+            .iter()
+            .filter(|(k, _)| matches!(k, super::super::layout::Key::Pour { id, .. } if id == "p1"))
+            .collect();
+        assert_eq!(items.len(), s.pours[0].regions.len());
+        assert!(
+            items
+                .iter()
+                .all(|(_, it)| it.net.as_deref() == Some(net.as_str()))
         );
     }
 }

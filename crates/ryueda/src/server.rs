@@ -597,9 +597,9 @@ fn read_at(session: &mut Session, p: &Project, commit: &str, req: Request) -> Re
         }
         Request::NetShow { net, .. } => partcmd::net_show(p, &net).map(Answer::json),
         Request::BoardList { .. } => Ok(Answer::json(crate::board::cmd::list(p))),
-        Request::BoardShow { board, pads, .. } => {
-            crate::board::cmd::show(p, &board, pads).map(Answer::json)
-        }
+        Request::BoardShow {
+            board, pads, pours, ..
+        } => crate::board::cmd::show(p, &board, pads, pours).map(Answer::json),
         Request::SymbolShow { symbol, .. } => libcmd::symbol_show(p, &symbol).map(Answer::json),
         Request::LibcompShow { libcomp, .. } => libcmd::libcomp_show(p, &libcomp).map(Answer::json),
         Request::LibCheck {
@@ -1545,6 +1545,61 @@ fn dispatch(
         } => {
             crate::board::keepcmd::delete(session, &board, &keepouts, expected_revision.as_deref())
         }
+        Request::BoardPourAdd {
+            board,
+            net,
+            layer,
+            whole,
+            rect,
+            contour,
+            priority,
+            clearance,
+            min_width,
+            connect,
+            thermal_gap,
+            thermal_spoke,
+            islands,
+            id,
+            ops,
+            expected_revision,
+        } => {
+            let one = json!({"net": net, "layer": layer, "whole": whole, "rect": rect, "contour": contour,
+                "priority": priority, "clearance": clearance, "min_width": min_width, "connect": connect,
+                "thermal_gap": thermal_gap, "thermal_spoke": thermal_spoke, "islands": islands, "id": id});
+            crate::board::pourcmd::add(
+                session,
+                &board,
+                crate::board::route::asks(ops, one)?,
+                expected_revision.as_deref(),
+            )
+        }
+        Request::BoardPourEdit {
+            board,
+            pour,
+            layer,
+            whole,
+            rect,
+            contour,
+            cutouts,
+            priority,
+            clearance,
+            min_width,
+            connect,
+            thermal_gap,
+            thermal_spoke,
+            islands,
+            expected_revision,
+        } => {
+            let a = json!({"layer": layer, "whole": whole, "rect": rect, "contour": contour, "cutouts": cutouts,
+                "priority": priority, "clearance": clearance, "min_width": min_width, "connect": connect,
+                "thermal_gap": thermal_gap, "thermal_spoke": thermal_spoke, "islands": islands});
+            crate::board::pourcmd::edit(session, &board, &pour, &a, expected_revision.as_deref())
+        }
+        Request::BoardPourDelete {
+            board,
+            pours,
+            expected_revision,
+        } => crate::board::pourcmd::delete(session, &board, &pours, expected_revision.as_deref()),
         Request::BoardGroupList { board } => crate::board::group::list(session.project(), &board),
         Request::BoardGroupMove {
             board,
@@ -1616,9 +1671,9 @@ fn dispatch(
             crate::board::export::package(session, &board, allow_errors, env!("CARGO_PKG_VERSION"))
         }
         Request::BoardList { .. } => Ok(crate::board::cmd::list(session.project())),
-        Request::BoardShow { board, pads, .. } => {
-            crate::board::cmd::show(session.project(), &board, pads)
-        }
+        Request::BoardShow {
+            board, pads, pours, ..
+        } => crate::board::cmd::show(session.project(), &board, pads, pours),
         Request::BlockCreate {
             name,
             id,

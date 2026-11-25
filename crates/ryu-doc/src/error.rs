@@ -1190,6 +1190,11 @@ pub enum Code {
     DrcKeepout,
     /// A keepout's contour doesn't close, crosses itself, or has no area.
     BoardContourInvalid,
+    /// ryueda DRC finding (a warning): a pour whose fill is nothing.
+    PourEmpty,
+    /// ryueda DRC finding (a warning): a pad a pour reaches by fewer than
+    /// two thermal spokes (`details.spokes`).
+    PourThermalStarved,
     /// `board export` refused: the board has DRC errors (its report in
     /// `details.report`); fix them, or export with `--allow-errors`,
     /// which the manifest records.
@@ -1701,6 +1706,8 @@ impl Code {
         Code::PlacementNoRoom,
         Code::DrcKeepout,
         Code::BoardContourInvalid,
+        Code::PourEmpty,
+        Code::PourThermalStarved,
         Code::DrcFailed,
         Code::ItemNotFound,
         Code::ItemClassUnknown,
@@ -1960,6 +1967,18 @@ mod tests {
             (Code::FindingNotFound, "finding_not_found"),
             (Code::FindingNotWaivable, "finding_not_waivable"),
             (Code::PresetInUse, "preset_in_use"),
+        ] {
+            assert_eq!(json!(c), json!(s));
+            assert_eq!(c.exit_code(), 1);
+            assert!(Code::ALL.contains(&c), "{c:?} in ALL");
+        }
+    }
+
+    #[test]
+    fn pour_codes() {
+        for (c, s) in [
+            (Code::PourEmpty, "pour_empty"),
+            (Code::PourThermalStarved, "pour_thermal_starved"),
         ] {
             assert_eq!(json!(c), json!(s));
             assert_eq!(c.exit_code(), 1);

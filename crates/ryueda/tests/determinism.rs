@@ -739,6 +739,113 @@ fn placed(golden: &mut Golden, at: &Path) {
     }
 }
 
+/// Pours (ryueda 7.D): the round's board with a whole `bottom` ground
+/// plane and a `top` pour of `rail:v3v3` round U1 over it in priority:
+/// `board show --pours`, DRC, a render of the bottom copper and every
+/// exported file, alike on one thread and eight. Every ID is pinned.
+fn pours(golden: &mut Golden, at: &Path) {
+    type Got = (Value, Value, String, BTreeMap<String, String>);
+    let id = breakout_board::BOARD;
+    let mut first: Option<Got> = None;
+    for threads in [1, 8] {
+        let board = at.join(format!("t{threads}")).join("board");
+        std::fs::create_dir_all(&board).unwrap();
+        ryueda(&board, 1, &["init"]);
+        breakout_at(&board);
+        for args in breakout_board::script() {
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            ryueda(&board, threads, &args);
+        }
+        let strip = |mut v: Value| {
+            if let Some(o) = v.as_object_mut() {
+                o.remove("revision");
+                o.remove("schema");
+            }
+            v
+        };
+        ryueda(
+            &board,
+            threads,
+            &[
+                "board", "pour", "add", id, "--net", "rail:gnd", "--layer", "bottom", "--whole",
+                "--id", "gnd",
+            ],
+        );
+        ryueda(
+            &board,
+            threads,
+            &[
+                "board",
+                "pour",
+                "add",
+                id,
+                "--net",
+                "rail:v3v3",
+                "--layer",
+                "top",
+                "--rect",
+                "10,5.5,14,9.5",
+                "--priority",
+                "1",
+                "--id",
+                "v33",
+            ],
+        );
+        let show = strip(ryueda(&board, threads, &["board", "show", id, "--pours"]));
+        let mut drc = ryueda_out(&board, threads, &["board", "drc", id], &[]);
+        if let Some(o) = drc["result"].as_object_mut() {
+            o.remove("revision");
+        }
+        if let Some(o) = drc["error"]["details"]["report"].as_object_mut() {
+            o.remove("revision");
+        }
+        ryueda(
+            &board,
+            threads,
+            &[
+                "board",
+                "render",
+                id,
+                "--out",
+                "bottom.svg",
+                "--layer",
+                "copper.bottom",
+                "--layer",
+                "outline",
+                "--side",
+                "bottom",
+            ],
+        );
+        let svg = blake3::hash(&std::fs::read(board.join("bottom.svg")).unwrap()).to_hex()[..32]
+            .to_owned();
+        ryueda(
+            &board,
+            threads,
+            &["board", "export", id, "--out", "fab", "--allow-errors"],
+        );
+        let mut exported = BTreeMap::new();
+        for e in std::fs::read_dir(board.join("fab")).unwrap().flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            exported.insert(
+                name.clone(),
+                export_hash(&name, &std::fs::read(e.path()).unwrap()),
+            );
+        }
+        let got = (show, drc, svg, exported);
+        match &first {
+            None => first = Some(got),
+            Some(one) => assert_eq!(&got, one, "one thread and eight"),
+        }
+    }
+    let (show, drc, svg, exported) = first.unwrap();
+    golden.json("board.pour.show", &show);
+    golden.json("board.pour.drc", &drc);
+    golden.got.insert("board.pour.bottom.svg".into(), svg);
+    for (name, hash) in exported {
+        golden.got.insert(format!("board.pour.export.{name}"), hash);
+    }
+}
+
 /// What makes the breakout's board four layers: the stackup, and a track
 /// on `in1` between two of its ground vias.
 const FOUR: &[&[&str]] = &[
@@ -1038,6 +1145,7 @@ fn netlists_and_erc_are_bit_exact() {
     four_layers(&mut golden, &dir.path().join("four"));
     rules(&mut golden, &dir.path().join("rules"));
     placed(&mut golden, &dir.path().join("place"));
+    pours(&mut golden, &dir.path().join("pours"));
     golden.finish();
 }
 

@@ -24,6 +24,8 @@ pub mod opening;
 pub mod outline;
 pub mod pad;
 pub mod place;
+pub mod pour;
+pub mod pourcmd;
 pub mod preset;
 pub mod presetcmd;
 pub mod render;

@@ -18,7 +18,7 @@ fn invalid(msg: impl Into<String>, param: &str) -> Error {
 }
 
 /// `[x0, y0, x1, y1]` (lengths) as a counterclockwise rectangle.
-fn rect(v: &Value, unit: Unit) -> Result<Contour> {
+pub(crate) fn rect(v: &Value, unit: Unit) -> Result<Contour> {
     let n: Vec<i64> = match v.as_array() {
         Some(l) if l.len() == 4 => l
             .iter()

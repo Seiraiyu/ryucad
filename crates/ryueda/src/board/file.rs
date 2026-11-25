@@ -31,6 +31,9 @@ pub const RULES_KIND: &str = "ryueda.board-rules";
 /// A board's keepouts and drawings (ryueda 7.C).
 pub const KEEPOUTS: &str = "keepouts";
 pub const KEEPOUT_KIND: &str = "ryueda.keepout";
+/// A board's pours (ryueda 7.D).
+pub const POURS: &str = "pours";
+pub const POUR_KIND: &str = "ryueda.pour";
 pub const DRAWINGS: &str = "drawings";
 pub const DRAWING_KIND: &str = "ryueda.board-drawing";
 
