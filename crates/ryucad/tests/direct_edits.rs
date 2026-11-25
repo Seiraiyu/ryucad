@@ -1813,6 +1813,43 @@ fn references_to_a_partial_deletes_kept_and_deleted_faces() {
     assert_eq!(e.details["removed_by"], "d", "{e}");
 }
 
+/// Plan 23.D: a partial delete builds the same bits on one thread and
+/// eight, and recomputed from nothing (`rebuild_part`, no session cache)
+/// as the session built it.
+#[test]
+fn a_partial_blend_delete_is_the_same_everywhere() {
+    let (_f, _d, mut s, imp) = bridged();
+    add(
+        &mut s,
+        json!({"type": "delete_blend", "id": "d", "below": "5 mm", "partial": true}),
+    );
+    let warm = built(&mut s, "d", &imp).body.dump();
+    let part = Id::parse("p", "part").unwrap();
+    let p = s.project().part(&part).unwrap().clone();
+    let on = |n: usize| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(n)
+            .build()
+            .unwrap()
+            .install(|| ryucad::rebuild::rebuild_part(&p))
+    };
+    let one = on(1);
+    assert_eq!(one.hash, on(8).hash);
+    let (_, o) = one
+        .features
+        .iter()
+        .find(|(i, _)| i.as_str() == "d")
+        .unwrap();
+    let cold: Vec<String> = o
+        .as_ref()
+        .unwrap()
+        .solids()
+        .into_iter()
+        .map(|(_, b)| b.body.dump())
+        .collect();
+    assert_eq!(cold, [warm]);
+}
+
 /// The committed NIST corpus (ryustep's `tests/corpus`), each file
 /// imported as solids, each solid's blends at most 2 mm deleted under the
 /// default edit budget: every outcome is a body that passes the kernel's
