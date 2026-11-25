@@ -144,3 +144,50 @@ fn tiled_fills_keep_the_whole_fills_promises() {
         assert_eq!(run(1), run(8), "seed {seed}");
     }
 }
+
+/// A refill after one obstacle grew by a micrometre (ryueda 7.E) fills
+/// only the tiles whose inputs changed, reuses the rest, and equals a
+/// tiled fill from nothing.
+#[test]
+fn a_refill_rebuilds_only_the_tiles_an_edit_reaches() {
+    let side = 3 * seeded_fill::MM;
+    let mut fewer = 0;
+    for seed in 0..16u64 {
+        let s = seeded(seed);
+        let (first, all) = fill::fill_tiled_counted(&s.ask, side, None);
+        assert_eq!(
+            all,
+            first.tiles.len(),
+            "seed {seed}: from nothing, every tile"
+        );
+        let (same, none) = fill::fill_tiled_counted(&s.ask, side, Some(&first));
+        assert_eq!((none, &same), (0, &first), "seed {seed}: nothing changed");
+        let mut ask = s.ask.clone();
+        if ask.obstacles.is_empty() {
+            continue;
+        }
+        ask.obstacles[0] = poly::grow(&ask.obstacles[0], 1_000, &fill::opts());
+        let (again, built) = fill::fill_tiled_counted(&ask, side, Some(&first));
+        assert_eq!(again, fill::fill_tiled(&ask, side, None), "seed {seed}");
+        let changed = again
+            .tiles
+            .iter()
+            .filter(|t| {
+                first
+                    .tiles
+                    .iter()
+                    .find(|u| u.at == t.at)
+                    .is_none_or(|u| u.key != t.key)
+            })
+            .count();
+        assert_eq!(
+            built, changed,
+            "seed {seed}: only the changed tiles are filled"
+        );
+        fewer += usize::from(built < first.tiles.len());
+    }
+    assert!(
+        fewer >= 8,
+        "{fewer} of 16 seeds refilled fewer than every tile"
+    );
+}

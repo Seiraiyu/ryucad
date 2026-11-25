@@ -407,6 +407,12 @@ fn thermal_hash(t: &ThermalPad) -> [u8; 16] {
 /// that tile's window; islands are found across seams by the pieces'
 /// contacts.
 pub fn fill_tiled(ask: &Ask, side: Nm, prev: Option<&Tiled>) -> Tiled {
+    fill_tiled_counted(ask, side, prev).0
+}
+
+/// [`fill_tiled`], and how many tiles it filled rather than reused.
+pub fn fill_tiled_counted(ask: &Ask, side: Nm, prev: Option<&Tiled>) -> (Tiled, usize) {
+    let filled = std::sync::atomic::AtomicUsize::new(0);
     let side = side.max(1);
     let prev = prev.filter(|p| p.side == side);
     let longest = ask
@@ -420,13 +426,16 @@ pub fn fill_tiled(ask: &Ask, side: Nm, prev: Option<&Tiled>) -> Tiled {
     // and the bounds of it.
     let reach = ask.min_width + 2 * longest + 4 * BOUND + 2;
     let Some(bounds) = ask.area.bounds() else {
-        return Tiled {
-            side,
-            tiles: Vec::new(),
-            islands_removed: 0,
-            uncertain: Vec::new(),
-            spokes: vec![0; ask.thermals.len()],
-        };
+        return (
+            Tiled {
+                side,
+                tiles: Vec::new(),
+                islands_removed: 0,
+                uncertain: Vec::new(),
+                spokes: vec![0; ask.thermals.len()],
+            },
+            0,
+        );
     };
     let lo = |v: Nm| v.div_euclid(side);
     let corners: Vec<Point> = (lo(bounds.min.y)..=lo(bounds.max.y))
@@ -591,6 +600,7 @@ pub fn fill_tiled(ask: &Ask, side: Nm, prev: Option<&Tiled>) -> Tiled {
                 }
             };
             TILES_FILLED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            filled.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let mut kept = opened.rings();
             for (s, _) in &mine {
                 let r = s.rings();
@@ -622,7 +632,7 @@ pub fn fill_tiled(ask: &Ask, side: Nm, prev: Option<&Tiled>) -> Tiled {
         spokes: counts,
     };
     islands_across(&mut out, ask);
-    out
+    (out, filled.into_inner())
 }
 
 /// Joins the tiles' pieces into regions by their contacts across seams,
