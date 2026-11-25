@@ -178,6 +178,9 @@ impl Connectivity {
 /// The nearest pair of pieces between two islands, and their distance.
 type Nearest = (Distance, (Key, u32), (Key, u32));
 
+/// A link between two islands, by their indices (the lesser first).
+type Link = ((usize, usize), Nearest);
+
 /// The connections that would close an open net: a spanning tree over
 /// its islands (Prim's, from the least island), each edge the nearest
 /// pair of pieces between an island in the tree and one not yet in it,
@@ -199,11 +202,11 @@ pub fn connections(c: &Connectivity, open: &Open<Key>) -> Vec<Connection> {
     // island just joined is measured against the rest (ryueda 7.E: the
     // whole table of pairs first was quadratic in islands).
     let mut inside = vec![false; n];
-    let mut best: Vec<Option<((usize, usize), Nearest)>> = vec![None; n];
+    let mut best: Vec<Option<Link>> = vec![None; n];
     let mut joined = 0usize;
     inside[0] = true;
     for _ in 1..n {
-        let updates: Vec<(usize, Option<((usize, usize), Nearest)>)> = (0..n)
+        let updates: Vec<(usize, Option<Link>)> = (0..n)
             .into_par_iter()
             .filter(|&j| !inside[j])
             .map(|j| {
