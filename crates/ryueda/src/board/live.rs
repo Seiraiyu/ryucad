@@ -77,13 +77,15 @@ impl Live {
         let old_shapes = self.check().shapes.clone();
         // The copper is edited in place only when nothing else holds it.
         let old = self.check.take().expect("a live board has its check");
-        let conn = Arc::try_unwrap(old)
-            .ok()
-            .and_then(|c| Arc::try_unwrap(c.conn).ok())
-            .and_then(|mut conn| conn.apply(&board, &s).map(|ch| (conn, ch)));
-        match conn {
-            Some((conn, changed)) => {
-                self.dirty = Some(dirty_of(
+        let taken = Arc::try_unwrap(old).ok().and_then(|c| {
+            let raw = c.raw;
+            Arc::try_unwrap(c.conn).ok().map(|conn| (conn, raw))
+        });
+        let applied =
+            taken.and_then(|(mut conn, raw)| conn.apply(&board, &s).map(|ch| (conn, raw, ch)));
+        match applied {
+            Some((conn, raw, changed)) => {
+                let dirty = dirty_of(
                     &board,
                     &conn.built,
                     &self.pieces,
@@ -91,9 +93,14 @@ impl Live {
                     &old_shapes,
                     &s,
                     changed,
-                ));
-                self.check = Some(Arc::new(drc::check_with(p, b, s, Arc::new(conn))?));
+                );
+                // An edit that dirties most of the board is judged whole:
+                // no slower, and the edit path stays for small edits.
+                let most = 2 * dirty.objs.len() > pieces.order.len().max(1);
+                let prev = (!most).then_some((raw.as_slice(), &dirty));
+                self.check = Some(Arc::new(drc::check_with(p, b, s, Arc::new(conn), prev)?));
                 self.pieces = pieces;
+                self.dirty = Some(dirty);
                 Ok(Update::Edited)
             }
             None => {
@@ -251,5 +258,37 @@ mod tests {
             said(live.check()),
             said(&crate::board::drc::check(&p, &p.boards[&id]).unwrap())
         );
+    }
+
+    #[test]
+    fn an_edit_judges_only_what_it_dirtied_and_says_what_a_rebuild_says() {
+        let (_d, p, id) = placed();
+        let mut live = Live::build(&p, &p.boards[&id]).unwrap();
+        let net = crate::board::shapes::tests::a_net(&p);
+        let track = format!(
+            r#"{{"format":1,"kind":"ryueda.track","layer":"top","net":"{net}","points":[[1000000,1000000],[1500000,1000000]],"width_nm":10}}"#
+        );
+        let (_d2, p2, _) = placed_with(&[("boards/b/tracks/t1.json".into(), track)]);
+        assert_eq!(live.update(&p2, &p2.boards[&id]).unwrap(), Update::Edited);
+        let judged = live
+            .dirty
+            .as_ref()
+            .unwrap()
+            .judged
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let s = &live.check().shapes;
+        let objects = s.pads.len() + s.tracks.len() + s.vias.len() + s.holes.len();
+        assert!(
+            judged > 0 && judged * 2 < objects,
+            "{judged} judged of {objects} objects"
+        );
+        let fresh = crate::board::drc::check(&p2, &p2.boards[&id]).unwrap();
+        assert!(
+            fresh
+                .findings
+                .iter()
+                .any(|f| f.code == crate::error::Code::DrcTrackWidth)
+        );
+        assert_eq!(said(live.check()), said(&fresh));
     }
 }

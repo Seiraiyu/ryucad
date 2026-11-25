@@ -497,7 +497,7 @@ pub fn clearance(c: &Connectivity, rules: &Rules, scope: Scope) -> Vec<Finding> 
             Scope::Dirty(d) => c.copper.clearance_of(layer, widest, &d.keys),
         };
         for g in gaps {
-            judging();
+            scope.judging();
             if one_net(&g.islands.0, &g.islands.1) {
                 continue;
             }
@@ -631,7 +631,7 @@ pub fn mask_clearance(
                     {
                         continue;
                     }
-                    judging();
+                    scope.judging();
                     let pk = Key::Pad {
                         occ: pd.occurrence.clone(),
                         pad: pd.pad.clone(),
@@ -680,7 +680,7 @@ pub fn widths(s: &BoardShapes, board: &str, rules: &Rules, scope: Scope) -> Vec<
         .iter()
         .filter(|t| scope.reference(&format!("{board}:track/{}", t.id)))
         .filter_map(|t| {
-            judging();
+            scope.judging();
             let rule = rules.track_width_min(Some(&t.net));
             if t.width_nm >= rule.value {
                 return None;
@@ -717,7 +717,7 @@ pub fn drills(s: &BoardShapes, board: &str, preset: &Preset, scope: Scope) -> Ve
         if matches!(h.of, super::shapes::HoleOf::Via(_)) || !scope.reference(&h.owner) {
             continue;
         }
-        judging();
+        scope.judging();
         let d = drill_of(&h.shape);
         // Plated holes (vias' and through pads') and unplated ones have
         // their own least drills.
@@ -743,7 +743,7 @@ pub fn drills(s: &BoardShapes, board: &str, preset: &Preset, scope: Scope) -> Ve
         .iter()
         .filter(|v| scope.reference(&format!("{board}:via/{}", v.id)))
     {
-        judging();
+        scope.judging();
         let (min, max) = (preset.drill_min_nm, preset.drill_max_nm);
         let mut wrong = Vec::new();
         if v.drill_nm < min || v.drill_nm > max {
@@ -854,7 +854,7 @@ pub fn rings(c: &Connectivity, s: &BoardShapes, preset: &Preset, scope: Scope) -
         .iter()
         .filter(|v| scope.reference(&format!("{board}:via/{}", v.id)))
     {
-        judging();
+        scope.judging();
         // (diameter - drill) / 2 < min, without halving.
         if v.diameter_nm - v.drill_nm < 2 * via_min {
             out.push(ring_finding(
@@ -884,7 +884,7 @@ pub fn rings(c: &Connectivity, s: &BoardShapes, preset: &Preset, scope: Scope) -
             if !scope.reference(&pd.reference) {
                 return None;
             }
-            judging();
+            scope.judging();
             let hole = h.shape.body();
             let copper = Body::of_shape(&pd.copper, &opts);
             let (outline, flat) = outline_of(&pd.copper);
@@ -939,7 +939,7 @@ pub fn hole_spacing(s: &BoardShapes, board: &str, preset: &Preset, scope: Scope)
             if !scope.reference(&a.owner) && !scope.reference(&b.owner) {
                 return None;
             }
-            judging();
+            scope.judging();
             let rule = if is_via(a) && is_via(b) {
                 preset.via_hole_spacing_nm
             } else {
@@ -999,7 +999,7 @@ pub fn edges(c: &Connectivity, s: &BoardShapes, rules: &Rules, scope: Scope) -> 
         .par_iter()
         .filter(|(r, _)| scope.reference(r))
         .filter_map(|(r, (b, rule))| {
-            judging();
+            scope.judging();
             let rule = *rule;
             let v = measure::closer(b, &edge, rule);
             let outside = v == Verdict::No
@@ -1071,7 +1071,7 @@ pub fn courtyards(s: &BoardShapes, board: &str, rules: &Rules, scope: Scope) -> 
             {
                 return None;
             }
-            judging();
+            scope.judging();
             let v = if gap == 0 {
                 measure::touches(&bodies[p.a], &bodies[p.b])
             } else {
@@ -1110,28 +1110,13 @@ pub fn courtyards(s: &BoardShapes, board: &str, rules: &Rules, scope: Scope) -> 
 /// whose item or hole changed or whose island did (its ID or its
 /// claims), board objects whose piece changed, and every reference
 /// either names, before and after.
-#[derive(Clone, Debug, Default)]
+#[derive(Debug, Default)]
 pub struct Dirty {
     pub keys: std::collections::BTreeSet<Key>,
     pub objs: std::collections::BTreeSet<super::shapes::Obj>,
     pub refs: std::collections::BTreeSet<String>,
-}
-
-/// How many objects the scoped rules judged, for tests (ryueda 7.E).
-#[cfg(test)]
-pub(crate) static JUDGED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-/// [`JUDGED`] now.
-#[cfg(test)]
-#[allow(dead_code)] // read by the live tests from Task 13
-pub(crate) fn judged() -> usize {
-    JUDGED.load(std::sync::atomic::Ordering::Relaxed)
-}
-
-/// Counts one object a scoped rule judged.
-fn judging() {
-    #[cfg(test)]
-    JUDGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    /// How many objects or pairs the scoped rules judged in it.
+    pub judged: std::sync::atomic::AtomicUsize,
 }
 
 /// Which objects a rule judges.
@@ -1163,6 +1148,13 @@ impl Scope<'_> {
     pub fn any(&self, refs: &[String]) -> bool {
         refs.iter().any(|r| self.reference(r))
     }
+
+    /// Counts one object or pair judged in a dirty scope.
+    pub fn judging(&self) {
+        if let Scope::Dirty(d) = self {
+            d.judged.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
 }
 
 /// A board checked: its shapes, its copper connected and compared, its
@@ -1175,7 +1167,28 @@ pub struct BoardCheck {
     pub rules: Rules,
     pub findings: Vec<Finding>,
     pub incomplete: bool,
+    /// The rules' findings before duplicates fold and waivers apply,
+    /// sorted: what an edit keeps of them (ryueda 7.E).
+    pub(crate) raw: Vec<Finding>,
 }
+
+/// The codes the scoped rules make (ryueda 7.E): an edit keeps a check's
+/// findings of these codes that name nothing dirty, and judges the rest
+/// again. Every other code is the whole-board rules', made again whole.
+const SCOPED: &[Code] = &[
+    Code::DrcTrackWidth,
+    Code::DrcDrill,
+    Code::DrcViaSpan,
+    Code::DrcAnnularRing,
+    Code::DrcEdgeClearance,
+    Code::DrcClearance,
+    Code::DrcMaskClearance,
+    Code::DrcHoleSpacing,
+    Code::DrcHoleClearance,
+    Code::DrcCourtyardOpen,
+    Code::DrcCourtyardOverlap,
+    Code::DrcKeepout,
+];
 
 impl BoardCheck {
     pub fn errors(&self) -> usize {
@@ -1273,7 +1286,7 @@ pub fn hole_clearance(
                 Scope::Dirty(d) => c.copper.hole_clearance_of(layer, r, &d.keys),
             };
             for g in gaps {
-                judging();
+                scope.judging();
                 if own(&g.hole, &g.piece.0) {
                     continue;
                 }
@@ -1378,7 +1391,7 @@ pub fn via_spans(s: &BoardShapes, board: &str, preset: &Preset, scope: Scope) ->
         .iter()
         .filter(|v| scope.reference(&format!("{board}:via/{}", v.id)))
         .filter(|v| {
-            judging();
+            scope.judging();
             (v.from, v.to) != (0, n - 1)
         })
         .map(|v| {
@@ -1439,7 +1452,7 @@ const RULES: [Rule; 15] = [
 pub fn check_shapes(p: &Project, b: &BoardFiles, shapes: Arc<BoardShapes>) -> Result<BoardCheck> {
     let board = b.id.to_string();
     let conn = Arc::new(connect::connect(&board, &shapes));
-    check_with(p, b, shapes, conn)
+    check_with(p, b, shapes, conn, None)
 }
 
 /// A board checked from its shapes and its connectivity, both built
@@ -1450,6 +1463,7 @@ pub fn check_with(
     b: &BoardFiles,
     shapes: Arc<BoardShapes>,
     conn: Arc<Connectivity>,
+    prev: Option<(&[Finding], &Dirty)>,
 ) -> Result<BoardCheck> {
     let file = b.board.item.as_ref().map_err(Clone::clone)?;
     let preset =
@@ -1474,11 +1488,20 @@ pub fn check_with(
         preset: &preset,
         rules: &rules,
         incomplete,
-        scope: Scope::All,
+        scope: prev.map_or(Scope::All, |(_, d)| Scope::Dirty(d)),
     };
-    let mut findings: Vec<Finding> = RULES.par_iter().flat_map_iter(|r| r(&ctx)).collect();
-    sort(&mut findings);
-    let mut findings = unique(findings);
+    let mut raw: Vec<Finding> = RULES.par_iter().flat_map_iter(|r| r(&ctx)).collect();
+    if let Some((old, d)) = prev {
+        // The scoped rules' findings that name nothing dirty stand.
+        let scope = Scope::Dirty(d);
+        raw.extend(
+            old.iter()
+                .filter(|f| SCOPED.contains(&f.code) && !scope.any(&f.refs))
+                .cloned(),
+        );
+    }
+    sort(&mut raw);
+    let mut findings = unique(raw.clone());
     let unused = super::rules::apply_waivers(&mut findings, &rules.file.waivers, &board);
     findings.extend(unused);
     sort(&mut findings);
@@ -1489,6 +1512,7 @@ pub fn check_with(
         rules,
         findings,
         incomplete,
+        raw,
     })
 }
 
