@@ -77,6 +77,10 @@ pub struct Spec {
     pub drawings: Vec<Value>,
     /// Pour files' bodies, written as `pours/p<i>.json` (ryueda 7.D).
     pub pours: Vec<Value>,
+    /// Planes and pours on nets the chain's vias join to them (ryueda
+    /// 7.E): `in2` and `in1` planes (needing four layers), a `bottom`
+    /// plane and a `top` pour round the first row.
+    pub planes: bool,
 }
 
 impl Spec {
@@ -97,8 +101,25 @@ impl Spec {
             rules: None,
             keepouts: Vec::new(),
             pours: Vec::new(),
+            planes: false,
             constraints: Vec::new(),
             drawings: Vec::new(),
+        }
+    }
+
+    /// Design 924's bars' board (ryueda 7.E): 5,000 parts (10,000 pads;
+    /// the generated parts have two), 20,000 track segments, 4 layers,
+    /// planes on `in1` and `in2`, a `bottom` plane and a `top` pour.
+    pub fn scale() -> Spec {
+        Spec {
+            channels: 50,
+            parts: 100,
+            cols: 50,
+            pieces: 4,
+            layers: 4,
+            via_every: 4,
+            planes: true,
+            ..Spec::bar()
         }
     }
 
@@ -384,6 +405,34 @@ pub fn write(dir: &Path, s: &Spec) {
             }
         }
     }
+    if s.planes {
+        // Connection 0 goes by through vias, 4 by `in1` and 8 by the
+        // bottom (via_every 4); 1 is on the top.
+        let net = |n: usize| nets[&occ(n)]["2"].clone();
+        let (w, _) = s.size();
+        let y = s.place(0).0.1;
+        let (y0, y1) = (y - s.pitch.1 / 2, y + s.pitch.1 / 2);
+        let row = json!({"start": [0, y0], "edges": [
+            {"type": "line", "to": [w, y0]}, {"type": "line", "to": [w, y1]},
+            {"type": "line", "to": [0, y1]}, {"type": "line", "to": [0, y0]}]});
+        let mut pours = vec![
+            json!({"net": net(0), "layer": "in2", "whole": true}),
+            json!({"net": net(4), "layer": "in1", "whole": true}),
+            json!({"net": net(8), "layer": "bottom", "whole": true}),
+            json!({"net": net(1), "layer": "top", "contour": row, "priority": 1}),
+        ];
+        if s.layers <= 2 {
+            pours.drain(..2);
+        }
+        for (i, p) in pours.into_iter().enumerate() {
+            put(
+                dir,
+                &format!("boards/main/pours/plane{i}.json"),
+                "ryueda.pour",
+                p,
+            );
+        }
+    }
 }
 
 /// splitmix64.
@@ -422,6 +471,7 @@ pub fn seeded(seed: u64) -> Spec {
         rules: None,
         keepouts: Vec::new(),
         pours: Vec::new(),
+        planes: false,
         constraints: Vec::new(),
         drawings: Vec::new(),
     }

@@ -951,3 +951,35 @@ fn live_equals_a_rebuild_after_every_edit() {
     println!("updates: {how:?}");
     assert!(edited * 2 > 16 * 12, "{how:?}");
 }
+
+/// Design 924's scale board (ryueda 7.E) at a tenth of its parts: its
+/// planes and pours fill, and nothing is found but starved thermals and
+/// empty fills.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "release only: a 500-part board with planes"
+)]
+fn scale_boards_are_clean_at_a_tenth() {
+    let spec = Spec {
+        channels: 5,
+        ..Spec::scale()
+    };
+    let c = check_all(&spec);
+    assert!(
+        c.findings
+            .iter()
+            .all(|f| matches!(f.code, Code::PourThermalStarved | Code::PourEmpty)),
+        "{:?}",
+        &c.findings[..c.findings.len().min(5)]
+    );
+    assert_eq!(c.shapes.pours.len(), 4);
+    for f in &c.shapes.pours {
+        assert!(
+            !f.regions.is_empty(),
+            "pour {} on layer {} fills nothing",
+            f.id,
+            f.layer
+        );
+    }
+}
