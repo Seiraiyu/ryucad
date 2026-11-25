@@ -1844,7 +1844,7 @@ fn a_partial_blend_delete_is_the_same_everywhere() {
         .as_ref()
         .unwrap()
         .solids()
-        .into_iter()
+        .iter()
         .map(|(_, b)| b.body.dump())
         .collect();
     assert_eq!(cold, [warm]);
