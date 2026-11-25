@@ -1590,7 +1590,8 @@ mod tests {
         .via("v2", "b", (14 * MM, 5 * MM), 250 * UM, 300 * UM);
         let rules = Rules::plain(&preset::JLC_2L);
         let c = connect::connect("b", &s);
-        let judged: Vec<(&str, Box<dyn Fn(Scope) -> Vec<Finding>>)> = vec![
+        type Judge<'a> = Box<dyn Fn(Scope) -> Vec<Finding> + 'a>;
+        let judged: Vec<(&str, Judge)> = vec![
             ("widths", Box::new(|sc| widths(&s, "b", &rules, sc))),
             (
                 "drills",
