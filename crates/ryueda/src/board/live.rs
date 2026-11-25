@@ -85,6 +85,7 @@ impl Live {
             Some((conn, changed)) => {
                 self.dirty = Some(dirty_of(
                     &board,
+                    &conn.built,
                     &self.pieces,
                     &pieces,
                     &old_shapes,
@@ -108,6 +109,7 @@ impl Live {
 /// of those objects in the old shapes and the new.
 fn dirty_of(
     board: &str,
+    built: &super::layout::Built,
     was: &Pieces,
     now: &Pieces,
     old: &super::shapes::BoardShapes,
@@ -176,6 +178,19 @@ fn dirty_of(
             Obj::Placement(_) => false,
         };
     }
+    // Every layout key a dirty reference names: a pair rule asks the
+    // copper about all of a reference's keys (a pad on each layer, a via
+    // on each of its span).
+    let scope = drc::Scope::Dirty(&d);
+    let widen: Vec<super::layout::Key> = built
+        .layout
+        .items
+        .keys()
+        .chain(built.layout.holes.keys())
+        .filter(|k| !d.keys.contains(*k) && scope.reference(&built.reference(k)))
+        .cloned()
+        .collect();
+    d.keys.extend(widen);
     d
 }
 

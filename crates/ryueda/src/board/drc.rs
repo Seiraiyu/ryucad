@@ -474,7 +474,7 @@ type Closest = (
 
 /// Copper of two islands closer than the rule on a layer, once per pair
 /// of items (their closest pieces); not two islands of one net alone.
-pub fn clearance(c: &Connectivity, rules: &Rules) -> Vec<Finding> {
+pub fn clearance(c: &Connectivity, rules: &Rules, scope: Scope) -> Vec<Finding> {
     let board = c.built.board.as_str();
     let nets = island_nets(c);
     let one_net = |a: &IslandId<Key>, b: &IslandId<Key>| match (nets.get(a), nets.get(b)) {
@@ -492,7 +492,12 @@ pub fn clearance(c: &Connectivity, rules: &Rules) -> Vec<Finding> {
             .unwrap_or_default()
     };
     for layer in 0..c.built.layout.layers.len() {
-        for g in c.copper.clearance(layer, widest) {
+        let gaps = match scope {
+            Scope::All => c.copper.clearance(layer, widest),
+            Scope::Dirty(d) => c.copper.clearance_of(layer, widest, &d.keys),
+        };
+        for g in gaps {
+            judging();
             if one_net(&g.islands.0, &g.islands.1) {
                 continue;
             }
@@ -585,7 +590,12 @@ fn same_island(c: &Connectivity, a: &Key, b: &Key) -> bool {
 
 /// Tracks closer than the preset's mask rule to a mask opening on their
 /// side whose pad is on another island.
-pub fn mask_clearance(c: &Connectivity, s: &BoardShapes, preset: &Preset) -> Vec<Finding> {
+pub fn mask_clearance(
+    c: &Connectivity,
+    s: &BoardShapes,
+    preset: &Preset,
+    scope: Scope,
+) -> Vec<Finding> {
     let board = c.built.board.as_str();
     let rule = preset.mask_trace_clearance_nm;
     let opts = BodyOptions::default();
@@ -617,6 +627,11 @@ pub fn mask_clearance(c: &Connectivity, s: &BoardShapes, preset: &Preset) -> Vec
                 let mut f = Vec::new();
                 for n in index.near_body(0, &body, rule) {
                     let pd = &s.pads[n.key];
+                    if !scope.reference(&c.built.reference(&tk)) && !scope.reference(&pd.reference)
+                    {
+                        continue;
+                    }
+                    judging();
                     let pk = Key::Pad {
                         occ: pd.occurrence.clone(),
                         pad: pd.pad.clone(),
@@ -903,7 +918,7 @@ pub fn rings(c: &Connectivity, s: &BoardShapes, preset: &Preset, scope: Scope) -
 
 /// Two holes' walls closer than the rule: the via rule when both are
 /// vias', the general one otherwise.
-pub fn hole_spacing(s: &BoardShapes, board: &str, preset: &Preset) -> Vec<Finding> {
+pub fn hole_spacing(s: &BoardShapes, board: &str, preset: &Preset, scope: Scope) -> Vec<Finding> {
     let wide = preset.hole_spacing_nm.max(preset.via_hole_spacing_nm);
     let is_via = |h: &super::shapes::HoleInfo| matches!(h.of, super::shapes::HoleOf::Via(_));
     let opts = BodyOptions::default();
@@ -921,6 +936,10 @@ pub fn hole_spacing(s: &BoardShapes, board: &str, preset: &Preset) -> Vec<Findin
         .into_par_iter()
         .filter_map(|p| {
             let (a, b) = (&s.holes[p.a], &s.holes[p.b]);
+            if !scope.reference(&a.owner) && !scope.reference(&b.owner) {
+                return None;
+            }
+            judging();
             let rule = if is_via(a) && is_via(b) {
                 preset.via_hole_spacing_nm
             } else {
@@ -1007,13 +1026,13 @@ pub fn edges(c: &Connectivity, s: &BoardShapes, rules: &Rules, scope: Scope) -> 
 }
 
 /// Courtyards touching, and courtyards judged by their box.
-pub fn courtyards(s: &BoardShapes, board: &str, rules: &Rules) -> Vec<Finding> {
+pub fn courtyards(s: &BoardShapes, board: &str, rules: &Rules, scope: Scope) -> Vec<Finding> {
     let gap = rules.courtyard_clearance().value;
     let opts = BodyOptions::default();
     let mut out: Vec<Finding> = s
         .courtyards
         .iter()
-        .filter(|c| c.open)
+        .filter(|c| c.open && scope.reference(&c.owner))
         .map(|c| {
             finding(
                 Code::DrcCourtyardOpen,
@@ -1047,6 +1066,12 @@ pub fn courtyards(s: &BoardShapes, board: &str, rules: &Rules) -> Vec<Finding> {
             if s.courtyards[p.a].bottom != s.courtyards[p.b].bottom {
                 return None;
             }
+            if !scope.reference(&s.courtyards[p.a].owner)
+                && !scope.reference(&s.courtyards[p.b].owner)
+            {
+                return None;
+            }
+            judging();
             let v = if gap == 0 {
                 measure::touches(&bodies[p.a], &bodies[p.b])
             } else {
@@ -1176,7 +1201,12 @@ impl BoardCheck {
 /// named and every layer listed. A hole's own pad or via is never a
 /// finding; nor, for a plated hole, is copper of the hole's own single
 /// net (two islands of one net: its `net_open`).
-pub fn hole_clearance(c: &Connectivity, s: &BoardShapes, rules: &Rules) -> Vec<Finding> {
+pub fn hole_clearance(
+    c: &Connectivity,
+    s: &BoardShapes,
+    rules: &Rules,
+    scope: Scope,
+) -> Vec<Finding> {
     let board = c.built.board.as_str();
     let preset: &Preset = &rules.preset;
     let plated_pad = |occ: &str, pad: &str| {
@@ -1238,7 +1268,12 @@ pub fn hole_clearance(c: &Connectivity, s: &BoardShapes, rules: &Rules) -> Vec<F
                 .max_by_key(|r| r.value)
         };
         for &r in &widest {
-            for g in c.copper.hole_clearance(layer, r) {
+            let gaps = match scope {
+                Scope::All => c.copper.hole_clearance(layer, r),
+                Scope::Dirty(d) => c.copper.hole_clearance_of(layer, r, &d.keys),
+            };
+            for g in gaps {
+                judging();
                 if own(&g.hole, &g.piece.0) {
                     continue;
                 }
@@ -1384,18 +1419,18 @@ type Rule = fn(&Ctx) -> Vec<Finding>;
 const RULES: [Rule; 15] = [
     |c| placements(c.board, c.files, c.occs, c.shapes),
     |c| copper(c.conn, c.incomplete),
-    |c| clearance(c.conn, c.rules),
-    |c| mask_clearance(c.conn, c.shapes, c.preset),
+    |c| clearance(c.conn, c.rules, c.scope),
+    |c| mask_clearance(c.conn, c.shapes, c.preset, c.scope),
     |c| widths(c.shapes, c.board, c.rules, c.scope),
     |c| drills(c.shapes, c.board, c.preset, c.scope),
     |c| via_spans(c.shapes, c.board, c.preset, c.scope),
     |c| rings(c.conn, c.shapes, c.preset, c.scope),
-    |c| hole_spacing(c.shapes, c.board, c.preset),
-    |c| hole_clearance(c.conn, c.shapes, c.rules),
+    |c| hole_spacing(c.shapes, c.board, c.preset, c.scope),
+    |c| hole_clearance(c.conn, c.shapes, c.rules, c.scope),
     |c| edges(c.conn, c.shapes, c.rules, c.scope),
-    |c| courtyards(c.shapes, c.board, c.rules),
+    |c| courtyards(c.shapes, c.board, c.rules, c.scope),
     |c| super::place::constraints(c.board, c.files, c.occs, c.shapes),
-    |c| super::keepout::check(c.shapes, c.board),
+    |c| super::keepout::check(c.shapes, c.board, c.scope),
     |c| super::pour::findings(c.shapes, c.board),
 ];
 
@@ -1612,6 +1647,81 @@ mod tests {
         }
     }
 
+    /// Pairwise rules (ryueda 7.E) scoped to nothing find nothing, and
+    /// scoped to every reference of their whole findings find them all.
+    #[test]
+    fn pairwise_rules_scoped_see_only_pairs_with_a_dirty_end() {
+        let mut s = board(30 * MM, 10 * MM);
+        s.smd("r1", "1", (5 * MM, 5 * MM), (600 * UM, 600 * UM), Some("a"))
+            .smd(
+                "r2",
+                "1",
+                (5 * MM + 650 * UM, 5 * MM),
+                (600 * UM, 600 * UM),
+                Some("b"),
+            )
+            .track(
+                "t1",
+                "c",
+                super::super::file::CopperLayer::Top,
+                150 * UM,
+                &[(4 * MM, 5 * MM + 400 * UM), (7 * MM, 5 * MM + 400 * UM)],
+            )
+            .via("v1", "a", (15 * MM, 5 * MM), 300 * UM, 600 * UM)
+            .via("v2", "b", (15 * MM + 450 * UM, 5 * MM), 300 * UM, 600 * UM)
+            .hole("h1", (25 * MM, 5 * MM), 1_000 * UM)
+            .track(
+                "t2",
+                "c",
+                super::super::file::CopperLayer::Top,
+                150 * UM,
+                &[(24 * MM, 5 * MM + 600 * UM), (26 * MM, 5 * MM + 600 * UM)],
+            )
+            .courtyard("r1", (5 * MM, 5 * MM), (2 * MM, 2 * MM), false)
+            .courtyard("r2", (6 * MM, 5 * MM), (2 * MM, 2 * MM), false);
+        let rules = Rules::plain(&preset::JLC_2L);
+        let c = connect::connect("b", &s);
+        type Judge<'a> = Box<dyn Fn(Scope) -> Vec<Finding> + 'a>;
+        let judged: Vec<(&str, Judge)> = vec![
+            ("clearance", Box::new(|sc| clearance(&c, &rules, sc))),
+            (
+                "mask_clearance",
+                Box::new(|sc| mask_clearance(&c, &s, &preset::JLC_2L, sc)),
+            ),
+            (
+                "hole_spacing",
+                Box::new(|sc| hole_spacing(&s, "b", &preset::JLC_2L, sc)),
+            ),
+            (
+                "hole_clearance",
+                Box::new(|sc| hole_clearance(&c, &s, &rules, sc)),
+            ),
+            ("courtyards", Box::new(|sc| courtyards(&s, "b", &rules, sc))),
+        ];
+        for (name, rule) in &judged {
+            let all = rule(Scope::All);
+            assert!(!all.is_empty(), "{name} finds something here");
+            assert!(rule(Scope::Dirty(&Dirty::default())).is_empty(), "{name}");
+            let mut d = Dirty::default();
+            for f in &all {
+                d.refs.extend(f.refs.iter().cloned());
+            }
+            // The keys those references name, as an update widens them.
+            for k in c
+                .built
+                .layout
+                .items
+                .keys()
+                .chain(c.built.layout.holes.keys())
+            {
+                if Scope::Dirty(&d).reference(&c.built.reference(k)) {
+                    d.keys.insert(k.clone());
+                }
+            }
+            assert_eq!(rule(Scope::Dirty(&d)), all, "{name}");
+        }
+    }
+
     fn codes(f: &[Finding]) -> Vec<Code> {
         f.iter().map(|x| x.code).collect()
     }
@@ -1675,7 +1785,7 @@ mod tests {
             &[(2 * MM, MM), (18 * MM, MM)],
         );
         let conn = connect::connect("b", &s);
-        let f = mask_clearance(&conn, &s, &preset::JLC_2L);
+        let f = mask_clearance(&conn, &s, &preset::JLC_2L, crate::board::drc::Scope::All);
         assert_eq!(f.len(), 1, "{f:?}");
         assert_eq!(f[0].details["layer"], "copper.bottom");
     }
@@ -1685,17 +1795,30 @@ mod tests {
         let mut s = board(20 * MM, 10 * MM);
         s.courtyard("u1", (5 * MM, 5 * MM), (4 * MM, 4 * MM), false)
             .courtyard("u2", (6 * MM, 5 * MM), (4 * MM, 4 * MM), false);
-        assert_eq!(courtyards(&s, "b", &Rules::plain(P)).len(), 1);
+        assert_eq!(
+            courtyards(&s, "b", &Rules::plain(P), crate::board::drc::Scope::All).len(),
+            1
+        );
         s.courtyards[1].bottom = true;
-        assert!(courtyards(&s, "b", &Rules::plain(P)).is_empty());
+        assert!(courtyards(&s, "b", &Rules::plain(P), crate::board::drc::Scope::All).is_empty());
         s.courtyards[0].bottom = true;
-        assert_eq!(courtyards(&s, "b", &Rules::plain(P)).len(), 1);
+        assert_eq!(
+            courtyards(&s, "b", &Rules::plain(P), crate::board::drc::Scope::All).len(),
+            1
+        );
     }
 
     #[test]
     fn copper_near_a_hole_it_isnt_joined_to() {
         let p = preset::JLC_2L;
-        let run = |s: &BoardShapes| hole_clearance(&connect::connect("b", s), s, &Rules::plain(&p));
+        let run = |s: &BoardShapes| {
+            hole_clearance(
+                &connect::connect("b", s),
+                s,
+                &Rules::plain(&p),
+                crate::board::drc::Scope::All,
+            )
+        };
         // A track of another net passing a via's barrel on an inner layer,
         // a nanometre inside the rule and exactly at it.
         for (gap, found) in [
@@ -1786,11 +1909,24 @@ mod tests {
             &[(2 * MM, y), (18 * MM, y)],
         );
         let conn = connect::connect("b", &s);
-        let f = hole_clearance(&conn, &s, &Rules::plain(&preset::JLC_4L));
+        let f = hole_clearance(
+            &conn,
+            &s,
+            &Rules::plain(&preset::JLC_4L),
+            crate::board::drc::Scope::All,
+        );
         assert_eq!(f.len(), 1, "{f:?}");
         assert_eq!(f[0].refs, ["b:j1/1#hole", "b:track/ti"]);
         assert_eq!(f[0].details["rule_nm"], 300 * UM);
-        assert!(hole_clearance(&conn, &s, &Rules::plain(&preset::JLC_2L)).is_empty());
+        assert!(
+            hole_clearance(
+                &conn,
+                &s,
+                &Rules::plain(&preset::JLC_2L),
+                crate::board::drc::Scope::All
+            )
+            .is_empty()
+        );
     }
 
     fn rules_with(f: super::super::rules::RulesFile, class_of: &[(&str, &str)]) -> Rules {
@@ -1848,14 +1984,14 @@ mod tests {
             },
         );
         let r = rules_with(f, &[("b", "power")]);
-        let got = clearance(&conn, &r);
+        let got = clearance(&conn, &r, crate::board::drc::Scope::All);
         assert_eq!(got.len(), 1, "{got:?}");
         assert_eq!(got[0].refs, ["b:track/ta", "b:track/tb"]);
         assert_eq!(got[0].details["rule_nm"], 200 * UM);
         assert_eq!(got[0].details["rule"], "class:power");
         // Without rules: nothing (150 µm clears 100 µm), as stage 5.
         let plain = rules_with(super::super::rules::RulesFile::default(), &[]);
-        assert!(clearance(&conn, &plain).is_empty());
+        assert!(clearance(&conn, &plain, crate::board::drc::Scope::All).is_empty());
     }
 
     #[test]
@@ -1877,7 +2013,7 @@ mod tests {
         let w = widths(&s, "b", &r, super::Scope::All);
         assert_eq!(w.len(), 1);
         assert_eq!(w[0].details["rule_nm"], 200 * UM);
-        let c = courtyards(&s, "b", &r);
+        let c = courtyards(&s, "b", &r, crate::board::drc::Scope::All);
         assert_eq!(
             c.iter()
                 .filter(|x| x.code == Code::DrcCourtyardOverlap)
@@ -1890,7 +2026,8 @@ mod tests {
             courtyards(
                 &s,
                 "b",
-                &rules_with(super::super::rules::RulesFile::default(), &[])
+                &rules_with(super::super::rules::RulesFile::default(), &[]),
+                Scope::All
             )
             .is_empty()
         );
@@ -1913,11 +2050,24 @@ mod tests {
         let conn = connect::connect("b", &s);
         let mut f = super::super::rules::RulesFile::default();
         f.defaults.hole_clearance_nm = Some(300 * UM);
-        let got = hole_clearance(&conn, &s, &rules_with(f, &[]));
+        let got = hole_clearance(
+            &conn,
+            &s,
+            &rules_with(f, &[]),
+            crate::board::drc::Scope::All,
+        );
         assert_eq!(got.len(), 1, "{got:?}");
         assert_eq!(got[0].details["rule_nm"], 300 * UM);
         assert_eq!(got[0].details["rule"], "board");
-        assert!(hole_clearance(&conn, &s, &Rules::plain(&preset::JLC_2L)).is_empty());
+        assert!(
+            hole_clearance(
+                &conn,
+                &s,
+                &Rules::plain(&preset::JLC_2L),
+                crate::board::drc::Scope::All
+            )
+            .is_empty()
+        );
     }
 
     #[test]
@@ -2037,8 +2187,13 @@ mod tests {
 
     #[test]
     fn clearance_fires_a_nanometre_under_the_rule() {
-        let at =
-            |gap, net: &str| clearance(&connect::connect("b", &apart(gap, net)), &Rules::plain(P));
+        let at = |gap, net: &str| {
+            clearance(
+                &connect::connect("b", &apart(gap, net)),
+                &Rules::plain(P),
+                crate::board::drc::Scope::All,
+            )
+        };
         assert!(at(P.clearance_nm, "b").is_empty());
         let f = at(P.clearance_nm - 1, "b");
         assert_eq!(codes(&f), [Code::DrcClearance]);
@@ -2068,7 +2223,12 @@ mod tests {
                 600 * UM + 2 * margin,
                 600 * UM + 2 * margin,
             ));
-            mask_clearance(&connect::connect("b", &s), &s, P)
+            mask_clearance(
+                &connect::connect("b", &s),
+                &s,
+                P,
+                crate::board::drc::Scope::All,
+            )
         };
         assert!(with_mask(g - P.mask_trace_clearance_nm).is_empty());
         let f = with_mask(g - P.mask_trace_clearance_nm + 1);
@@ -2084,7 +2244,15 @@ mod tests {
                 250 * UM,
                 &[(5 * MM, 5 * MM), (8 * MM, 5 * MM)],
             );
-        assert!(mask_clearance(&connect::connect("b", &s), &s, P).is_empty());
+        assert!(
+            mask_clearance(
+                &connect::connect("b", &s),
+                &s,
+                P,
+                crate::board::drc::Scope::All
+            )
+            .is_empty()
+        );
     }
 
     #[test]
@@ -2163,7 +2331,7 @@ mod tests {
             let mut s = board(20 * MM, 10 * MM);
             s.hole("h1", (5 * MM, 5 * MM), 1000 * UM)
                 .hole("h2", (5 * MM + sep, 5 * MM), 1000 * UM);
-            hole_spacing(&s, "b", P)
+            hole_spacing(&s, "b", P, crate::board::drc::Scope::All)
         };
         assert!(holes(1000 * UM + P.hole_spacing_nm).is_empty());
         let f = holes(1000 * UM + P.hole_spacing_nm - 1);
@@ -2179,7 +2347,7 @@ mod tests {
                 300 * UM,
                 600 * UM,
             );
-            hole_spacing(&s, "b", P)
+            hole_spacing(&s, "b", P, crate::board::drc::Scope::All)
         };
         assert!(vias(300 * UM + P.via_hole_spacing_nm).is_empty());
         let f = vias(300 * UM + P.via_hole_spacing_nm - 1);
@@ -2228,7 +2396,7 @@ mod tests {
             let mut s = board(20 * MM, 10 * MM);
             s.courtyard("r1", (5 * MM, 5 * MM), (2 * MM, MM), false)
                 .courtyard("r2", (7 * MM + gap, 5 * MM), (2 * MM, MM), false);
-            courtyards(&s, "b", &Rules::plain(P))
+            courtyards(&s, "b", &Rules::plain(P), crate::board::drc::Scope::All)
         };
         assert!(two(1).is_empty());
         let f = two(0);
@@ -2236,7 +2404,7 @@ mod tests {
         assert_eq!(f[0].refs, ["b:r1", "b:r2"]);
         let mut s = board(20 * MM, 10 * MM);
         s.courtyard("r1", (5 * MM, 5 * MM), (2 * MM, MM), true);
-        let f = courtyards(&s, "b", &Rules::plain(P));
+        let f = courtyards(&s, "b", &Rules::plain(P), crate::board::drc::Scope::All);
         assert_eq!(codes(&f), [Code::DrcCourtyardOpen]);
         assert_eq!(f[0].severity, Severity::Warning);
     }
@@ -2347,7 +2515,11 @@ mod tests {
         let x = 5 * MM + 850 * UM + 300 * UM + P.clearance_nm - UM;
         s.through("j1", "1", (5 * MM, 5 * MM), 1700 * UM, 1000 * UM, Some("a"))
             .via("v1", "b", (x, 5 * MM), 300 * UM, 600 * UM);
-        let f = clearance(&connect::connect("b", &s), &Rules::plain(P));
+        let f = clearance(
+            &connect::connect("b", &s),
+            &Rules::plain(P),
+            crate::board::drc::Scope::All,
+        );
         assert_eq!(codes(&f), [Code::DrcClearance], "{f:?}");
         assert_eq!(
             f[0].details["layers"],

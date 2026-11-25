@@ -149,7 +149,7 @@ fn keeps(k: &super::shapes::KeepoutInfo, what: Keep) -> bool {
 }
 
 /// `drc_keepout`: each item of a kept kind meeting a keepout on one of its layers.
-pub fn check(s: &BoardShapes, board: &str) -> Vec<Finding> {
+pub fn check(s: &BoardShapes, board: &str, scope: super::drc::Scope) -> Vec<Finding> {
     let n = s.n();
     let opts = BodyOptions::default();
     let mut out = Vec::new();
@@ -157,7 +157,11 @@ pub fn check(s: &BoardShapes, board: &str) -> Vec<Finding> {
         let area = Body::of_shape(&k.shape, &opts);
         let on = |l: usize| k.layers.contains(&l);
         let own = |occ: &str| k.part.as_deref() == Some(occ);
+        let dirty_keepout = scope.reference(&k.reference);
         let mut meet = |reference: String, shape: &Shape| {
+            if !dirty_keepout && !scope.reference(&reference) {
+                return;
+            }
             let v = measure::touches(&area, &Body::of_shape(shape, &opts));
             if v != Verdict::No {
                 out.push(finding(
@@ -245,22 +249,25 @@ mod tests {
             .smd("r1", "1", (12 * MM, 5 * MM), (MM, MM), Some("b"))
             .courtyard("r1", (12 * MM, 5 * MM), (2 * MM, 2 * MM), false);
         s.keepouts.push(ko(vec![Keep::Vias], vec![0], None));
-        let f = check(&s, "b");
+        let f = check(&s, "b", crate::board::drc::Scope::All);
         assert_eq!(f.len(), 1, "{f:?}");
         assert_eq!(f[0].code, Code::DrcKeepout);
         assert_eq!(f[0].refs, ["b:keepout/k1", "b:via/v1"]);
         // The pad's edge (11.5 mm) is clear of the keepout (to 11 mm):
         // pads aren't kept, and the courtyard (from 11 mm) touches it.
         s.keepouts[0] = ko(vec![Keep::Pads], vec![0], None);
-        assert!(check(&s, "b").is_empty());
+        assert!(check(&s, "b", crate::board::drc::Scope::All).is_empty());
         s.keepouts[0] = ko(vec![Keep::Placements], vec![0], None);
-        assert_eq!(check(&s, "b")[0].refs, ["b:keepout/k1", "b:r1"]);
+        assert_eq!(
+            check(&s, "b", crate::board::drc::Scope::All)[0].refs,
+            ["b:keepout/k1", "b:r1"]
+        );
         // On the bottom only: a top part and a top-only via are clear.
         s.keepouts[0] = ko(vec![Keep::Placements, Keep::Tracks], vec![1], None);
-        assert!(check(&s, "b").is_empty());
+        assert!(check(&s, "b", crate::board::drc::Scope::All).is_empty());
         // A part's own keepout leaves its own pads alone.
         s.keepouts[0] = ko(vec![Keep::Copper], vec![0], Some("r1"));
-        let f = check(&s, "b");
+        let f = check(&s, "b", crate::board::drc::Scope::All);
         assert_eq!(
             f.iter().map(|x| x.refs[1].as_str()).collect::<Vec<_>>(),
             ["b:via/v1"]
@@ -339,11 +346,11 @@ mod tests {
             thermals: vec![],
         });
         s.keepouts.push(ko(vec![Keep::Pours], vec![0], None));
-        let f = check(&s, "b");
+        let f = check(&s, "b", crate::board::drc::Scope::All);
         assert_eq!(f.len(), 1, "{f:?}");
         assert!(f[0].refs.contains(&"b:pour/p1".to_owned()));
         s.keepouts[0].keeps = vec![Keep::Vias];
-        assert!(check(&s, "b").is_empty());
+        assert!(check(&s, "b", crate::board::drc::Scope::All).is_empty());
     }
 
     #[test]
