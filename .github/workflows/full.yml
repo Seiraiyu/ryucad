@@ -177,7 +177,10 @@ jobs:
       - run: cargo test -p ryucad --release --test assembly_bar -- --nocapture
       - run: cargo test -p ryucad --release --test motion_bar -- --nocapture
       - run: cargo test -p ryupdm --release --test api -- --nocapture
-      - run: cargo test -p ryucad --release --test step_bar -- --nocapture
+      # One test at a time: the census and styles bars time a fraction of a
+      # second against the race's import and export running beside them,
+      # which on a 3-core macOS runner made the census +313% (#1111).
+      - run: cargo test -p ryucad --release --test step_bar -- --nocapture --test-threads 1
       - name: reference bar
         run: cargo test -p ryucad --release --test reference_bar -- --nocapture
       - run: cargo test -p ryucad --release --test step

@@ -309,7 +309,10 @@ fn the_census_adds_at_most_five_percent_to_reading() {
     // runner, allocating the census costs a noisy amount, up to the
     // plain read's own time again (+78% to +100% on GitHub's runners,
     // #985): without RYUCAD_BARS the census may add one more read's
-    // worth on top of the ten-times-looser bar.
+    // worth on top of the ten-times-looser bar. full.yml runs this file
+    // one test at a time: beside the race's import and export it measured
+    // them (+313% on a 3-core macOS runner, +11% on an Apple M4 against
+    // +3% alone; #1111).
     let allowance = if std::env::var_os("RYUCAD_BARS").is_some() {
         0.0
     } else {
