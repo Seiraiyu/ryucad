@@ -41,9 +41,9 @@ pub struct Ask {
     /// Where the fill may go.
     pub area: Polygons,
     /// What it must avoid, each already grown by its rule.
-    pub obstacles: Vec<Polygons>,
+    pub obstacles: Vec<std::sync::Arc<Polygons>>,
     /// Other nets' copper grown by its clearance: spokes must miss it.
-    pub spoke_obstacles: Vec<Polygons>,
+    pub spoke_obstacles: Vec<std::sync::Arc<Polygons>>,
     pub thermals: Vec<ThermalPad>,
     /// No neck or sliver narrower than this is left (0: none removed).
     pub min_width: Nm,
@@ -191,13 +191,13 @@ fn spoke_kept(s: &Polygons, opened: &Rings, blocked: &[(&Polygons, Option<Rect>)
 
 /// The fill.
 pub fn fill(ask: &Ask) -> Fill {
-    let obstacles: Vec<&Polygons> = ask.obstacles.iter().collect();
+    let obstacles: Vec<&Polygons> = ask.obstacles.iter().map(|o| &**o).collect();
     let opened = opened_of(&ask.area, &obstacles, ask.min_width);
     let opened_rings = opened.rings();
     let blocked: Vec<(&Polygons, Option<Rect>)> = ask
         .spoke_obstacles
         .iter()
-        .map(|o| (o, o.bounds()))
+        .map(|o| (&**o, o.bounds()))
         .collect();
     let mut kept = opened_rings.clone();
     let mut counts = Vec::with_capacity(ask.thermals.len());
@@ -470,11 +470,11 @@ pub fn fill_tiled_counted(ask: &Ask, side: Nm, prev: Option<&Tiled>) -> (Tiled, 
         min: at,
         max: at.offset(side, side),
     };
-    let obstacle_boxes: Vec<Option<Rect>> = ask.obstacles.iter().map(Polygons::bounds).collect();
+    let obstacle_boxes: Vec<Option<Rect>> = ask.obstacles.iter().map(|o| o.bounds()).collect();
     let blocked: Vec<(&Polygons, Option<Rect>)> = ask
         .spoke_obstacles
         .iter()
-        .map(|o| (o, o.bounds()))
+        .map(|o| (&**o, o.bounds()))
         .collect();
     let tile_of = |p: Point| Point::new(lo(p.x) * side, lo(p.y) * side);
     // Each tile's obstacles and spoke obstacles, by index in the ask's
@@ -526,7 +526,7 @@ pub fn fill_tiled_counted(ask: &Ask, side: Nm, prev: Option<&Tiled>) -> (Tiled, 
                 .collect();
             opened_grown(window_area, &g, ask.min_width)
         } else {
-            let o: Vec<&Polygons> = idx.iter().map(|&k| &ask.obstacles[k]).collect();
+            let o: Vec<&Polygons> = idx.iter().map(|&k| &*ask.obstacles[k]).collect();
             opened_of_plain(window_area, &o)
         }
     };
@@ -550,7 +550,7 @@ pub fn fill_tiled_counted(ask: &Ask, side: Nm, prev: Option<&Tiled>) -> (Tiled, 
         }
         let window_area = poly::intersection(&ask.area, &rect_polys(&w));
         let idx = near(&obstacle_tiles, &obstacle_boxes, at, &w);
-        let obstacles: Vec<&Polygons> = idx.iter().map(|&k| &ask.obstacles[k]).collect();
+        let obstacles: Vec<&Polygons> = idx.iter().map(|&k| &*ask.obstacles[k]).collect();
         let mine: Vec<&ThermalPad> = ask
             .thermals
             .iter()
@@ -702,17 +702,25 @@ pub fn fill_tiled_counted(ask: &Ask, side: Nm, prev: Option<&Tiled>) -> (Tiled, 
 /// and drops the regions no copper of the pour's net touches (unless the
 /// ask keeps islands).
 fn islands_across(t: &mut Tiled, ask: &Ask) {
-    let mut pieces: Vec<(usize, usize, Body, Rect)> = Vec::new();
-    for (ti, tile) in t.tiles.iter().enumerate() {
-        for (i, p) in tile.fill.polygons.iter().enumerate() {
+    // Each piece, its body (built in parallel) and its box.
+    let spots: Vec<(usize, usize)> = t
+        .tiles
+        .iter()
+        .enumerate()
+        .flat_map(|(ti, tile)| (0..tile.fill.polygons.len()).map(move |i| (ti, i)))
+        .collect();
+    let pieces: Vec<(usize, usize, Body, Rect)> = spots
+        .par_iter()
+        .map(|&(ti, i)| {
+            let tile = &t.tiles[ti];
+            let p = &tile.fill.polygons[i];
             let one = Polygons {
                 polygons: vec![p.clone()],
                 bound: tile.fill.bound,
             };
-            let b = p.bounds();
-            pieces.push((ti, i, one.body(), b));
-        }
-    }
+            (ti, i, one.body(), p.bounds())
+        })
+        .collect();
     let n = pieces.len();
     let mut root: Vec<usize> = (0..n).collect();
     fn find(root: &mut [usize], mut i: usize) -> usize {
@@ -722,24 +730,46 @@ fn islands_across(t: &mut Tiled, ask: &Ask) {
         }
         i
     }
-    // Pieces of neighbouring tiles whose boxes meet, touching.
-    let ats: Vec<Point> = t.tiles.iter().map(|x| x.at).collect();
+    // Pieces of neighbouring tiles (the eight round each, and only those)
+    // whose boxes meet, touching. The regions come out the same whatever
+    // order the joins are made in: each takes its least piece as root.
     let side = t.side;
-    let (ps, ats) = (&pieces, &ats);
+    let mut by_tile: std::collections::HashMap<(i64, i64), Vec<usize>> =
+        std::collections::HashMap::new();
+    for (k, p) in pieces.iter().enumerate() {
+        let at = t.tiles[p.0].at;
+        by_tile
+            .entry((at.x.div_euclid(side), at.y.div_euclid(side)))
+            .or_default()
+            .push(k);
+    }
+    let ps = &pieces;
+    let tiles = &t.tiles;
+    let by = &by_tile;
     let joins: Vec<(usize, usize)> = (0..n)
         .into_par_iter()
         .flat_map_iter(|a| {
-            (a + 1..n)
-                .filter(move |&b| {
-                    let (pa, pb) = (&ps[a], &ps[b]);
-                    let (ta, tb) = (ats[pa.0], ats[pb.0]);
-                    pa.0 != pb.0
-                        && (ta.x - tb.x).abs() <= side
-                        && (ta.y - tb.y).abs() <= side
-                        && tree::meets(&tree::grown(&pa.3, 1), &pb.3)
-                        && measure::touches(&pa.2, &pb.2) != Verdict::No
-                })
-                .map(move |b| (a, b))
+            let pa = &ps[a];
+            let at = tiles[pa.0].at;
+            let (ix, iy) = (at.x.div_euclid(side), at.y.div_euclid(side));
+            let mut out = Vec::new();
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    if (dx, dy) == (0, 0) {
+                        continue;
+                    }
+                    for &b in by.get(&(ix + dx, iy + dy)).into_iter().flatten() {
+                        let pb = &ps[b];
+                        if b > a
+                            && tree::meets(&tree::grown(&pa.3, 1), &pb.3)
+                            && measure::touches(&pa.2, &pb.2) != Verdict::No
+                        {
+                            out.push((a, b));
+                        }
+                    }
+                }
+            }
+            out
         })
         .collect();
     for (a, b) in joins {
@@ -748,9 +778,29 @@ fn islands_across(t: &mut Tiled, ask: &Ask) {
             root[ra.max(rb)] = ra.min(rb);
         }
     }
+    // The pour's own copper by an index: each piece meets only what is
+    // near it.
+    let own = crate::index::Index::from_bodies(
+        1,
+        ask.own
+            .iter()
+            .enumerate()
+            .map(|(k, b)| (k, 0, b.clone()))
+            .collect(),
+        crate::measure::BodyOptions::default(),
+    );
     let contact: Vec<Verdict> = pieces
         .par_iter()
-        .map(|p| own_contact(&ask.own, &p.2))
+        .map(|p| {
+            own.near_body(0, &p.2, 0)
+                .into_iter()
+                .map(|x| x.verdict)
+                .fold(Verdict::No, |acc, v| match (acc, v) {
+                    (Verdict::Yes, _) | (_, Verdict::Yes) => Verdict::Yes,
+                    (Verdict::Uncertain, _) | (_, Verdict::Uncertain) => Verdict::Uncertain,
+                    _ => Verdict::No,
+                })
+        })
         .collect();
     let mut region: std::collections::BTreeMap<usize, Verdict> = std::collections::BTreeMap::new();
     for (k, c) in contact.iter().enumerate() {
@@ -811,8 +861,10 @@ pub(crate) mod tests {
     #[test]
     fn the_area_less_its_obstacles() {
         let mut a = ask(rect(0, 0, 10 * MM, 10 * MM));
-        a.obstacles.push(rect(4 * MM, 4 * MM, 6 * MM, 6 * MM));
-        a.obstacles.push(rect(5 * MM, 5 * MM, 7 * MM, 7 * MM));
+        a.obstacles
+            .push(rect(4 * MM, 4 * MM, 6 * MM, 6 * MM).into());
+        a.obstacles
+            .push(rect(5 * MM, 5 * MM, 7 * MM, 7 * MM).into());
         let f = fill(&a);
         assert_eq!(f.polygons.polygons.len(), 1);
         assert_eq!(
@@ -860,7 +912,7 @@ pub(crate) mod tests {
         let pad = rect(9 * MM / 2, 9 * MM / 2, 11 * MM / 2, 11 * MM / 2);
         let mut a = ask(rect(0, 0, 10 * MM, 10 * MM));
         // The pad's own gap: the pad grown by 0.5 mm.
-        a.obstacles.push(poly::grow(&pad, MM / 2, &opts()));
+        a.obstacles.push(poly::grow(&pad, MM / 2, &opts()).into());
         a.thermals.push(thermal(Point::new(5 * MM, 5 * MM)));
         a.min_width = MM / 5;
         let f = fill(&a);
@@ -874,8 +926,8 @@ pub(crate) mod tests {
         );
         // Another net's copper to the right, in the spoke's way.
         let other = rect(6 * MM + MM / 10, 4 * MM, 7 * MM, 6 * MM);
-        a.obstacles.push(other.clone());
-        a.spoke_obstacles.push(other);
+        a.obstacles.push(other.clone().into());
+        a.spoke_obstacles.push(other.into());
         assert_eq!(fill(&a).spokes, [3]);
     }
     #[test]
@@ -885,7 +937,7 @@ pub(crate) mod tests {
         let at = Point::new(6 * MM / 5, 5 * MM);
         let pad = rect(at.x - MM / 2, at.y - MM / 2, at.x + MM / 2, at.y + MM / 2);
         let mut a = ask(rect(0, 0, 10 * MM, 10 * MM));
-        a.obstacles.push(poly::grow(&pad, MM / 2, &opts()));
+        a.obstacles.push(poly::grow(&pad, MM / 2, &opts()).into());
         a.thermals.push(thermal(at));
         let f = fill(&a);
         assert_eq!(f.spokes, [4]);

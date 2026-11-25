@@ -167,8 +167,8 @@ fuzz_target!(|data: &[u8]| {
     let obstacle = poly::grow(&poly::simplify(&b, FillRule::EvenOdd), grown, &fill::opts());
     let ask = Ask {
         area: area.clone(),
-        obstacles: vec![obstacle.clone()],
-        spoke_obstacles: vec![obstacle],
+        obstacles: vec![obstacle.clone().into()],
+        spoke_obstacles: vec![obstacle.into()],
         thermals: vec![ThermalPad {
             at: Point::new((byte(2) % 64) * scale, (byte(3) % 64) * scale),
             rotation_mdeg: byte(4) * 1_411,

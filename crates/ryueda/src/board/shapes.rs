@@ -915,6 +915,7 @@ pub fn assemble(
         ..BoardShapes::default()
     };
     let mut notices = Vec::new();
+    let concat = crate::profile::stage("assemble.concat");
     for k in &ps.order {
         let piece = &ps.by[k].1;
         for (layer, owner, s) in &piece.layers {
@@ -931,6 +932,7 @@ pub fn assemble(
         out.keepouts.extend(piece.keepouts.iter().cloned());
         notices.extend(piece.notices.iter().cloned());
     }
+    drop(concat);
     if !b.pours.is_empty() {
         let pours: Vec<(crate::id::Id, super::pour::Pour)> = b
             .pours

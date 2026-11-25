@@ -239,10 +239,50 @@ enum Grow {
     Hole(ryu_copper::layout::HoleShape, i64),
 }
 
+/// [`Grow`] borrowed: looked up without cloning the shape.
+#[derive(Clone, Copy, Debug, Hash)]
+enum GrowRef<'a> {
+    Shape(&'a Shape, i64),
+    Hole(ryu_copper::layout::HoleShape, i64),
+}
+
+impl GrowRef<'_> {
+    fn print(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        // SipHash with fixed keys: the same on every run (only ever a
+        // key into this process's cache; equal entries are compared).
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.hash(&mut h);
+        h.finish()
+    }
+
+    fn is(&self, g: &Grow) -> bool {
+        match (self, g) {
+            (GrowRef::Shape(a, d), Grow::Shape(b, e)) => d == e && *a == b,
+            (GrowRef::Hole(a, d), Grow::Hole(b, e)) => d == e && a == b,
+            _ => false,
+        }
+    }
+
+    fn owned(&self) -> Grow {
+        match self {
+            GrowRef::Shape(s, d) => Grow::Shape((*s).clone(), *d),
+            GrowRef::Hole(h, d) => Grow::Hole(*h, *d),
+        }
+    }
+}
+
 /// Obstacles grown, by what and how far (ryueda 7.E): a refill grows
-/// only the copper that changed.
+/// only the copper that changed. Keyed by a fingerprint; entries with one
+/// are told apart by what they grew.
 #[derive(Clone, Debug, Default)]
-pub struct Grown(std::collections::HashMap<Grow, std::sync::Arc<Polygons>>);
+pub struct Grown(std::collections::HashMap<u64, Vec<(Grow, std::sync::Arc<Polygons>)>>);
+
+impl Grown {
+    fn get(&self, k: &GrowRef) -> Option<&(Grow, std::sync::Arc<Polygons>)> {
+        self.0.get(&k.print())?.iter().find(|(g, _)| k.is(g))
+    }
+}
 
 impl PartialEq for Grown {
     fn eq(&self, _: &Grown) -> bool {
@@ -298,26 +338,32 @@ fn fill_one(
     done: &[PourInfo],
     prev: Option<&PourInfo>,
 ) -> PourInfo {
-    let made: std::sync::Mutex<std::collections::HashMap<Grow, std::sync::Arc<Polygons>>> =
-        Default::default();
-    let grow = |k: Grow| -> Polygons {
-        let kept = prev.and_then(|x| x.grown.0.get(&k).cloned());
-        let g = kept.unwrap_or_else(|| {
-            std::sync::Arc::new(match &k {
-                Grow::Shape(shape, d) => poly::grow(&flat(shape), *d, &fill::opts()),
-                Grow::Hole(h, d) => poly::grow(
-                    &poly::simplify(
-                        &poly::flatten_hole(h, &fill::opts()),
-                        poly::FillRule::NonZero,
+    let made: std::sync::Mutex<Grown> = Default::default();
+    let grow = |k: GrowRef| -> std::sync::Arc<Polygons> {
+        let (key, g) = match prev.and_then(|x| x.grown.get(&k)) {
+            Some((key, g)) => (key.clone(), g.clone()),
+            None => {
+                let g = std::sync::Arc::new(match k {
+                    GrowRef::Shape(shape, d) => poly::grow(&flat(shape), d, &fill::opts()),
+                    GrowRef::Hole(h, d) => poly::grow(
+                        &poly::simplify(
+                            &poly::flatten_hole(&h, &fill::opts()),
+                            poly::FillRule::NonZero,
+                        ),
+                        d,
+                        &fill::opts(),
                     ),
-                    *d,
-                    &fill::opts(),
-                ),
-            })
-        });
-        let out = (*g).clone();
-        made.lock().unwrap().insert(k, g);
-        out
+                });
+                (k.owned(), g)
+            }
+        };
+        made.lock()
+            .unwrap()
+            .0
+            .entry(k.print())
+            .or_default()
+            .push((key, g.clone()));
+        g
     };
     let n = s.n();
     let opts = fill::opts();
@@ -374,12 +420,12 @@ fn fill_one(
     let body_opts = BodyOptions::default();
     // Another net's copper grown by the pair's clearance: an obstacle,
     // and in the spokes' way.
-    let other = |shape: &Shape, their: Option<&str>| -> Polygons {
+    let other = |shape: &Shape, their: Option<&str>| -> std::sync::Arc<Polygons> {
         let need = rules
             .pair_clearance(&[net], &their.into_iter().collect::<Vec<_>>())
             .value
             .max(r.clearance.value);
-        grow(Grow::Shape(shape.clone(), reach(need)))
+        grow(GrowRef::Shape(shape, reach(need)))
     };
     // Other nets' copper, grown in parallel below, in this order.
     let mut others: Vec<(&Shape, Option<&str>)> = Vec::new();
@@ -395,7 +441,7 @@ fn fill_one(
             Some(ZoneConnect::ThermalThrough) if !through => Connect::Solid,
             Some(ZoneConnect::None) => {
                 let gap = pd.thermal.map_or(r.gap.value, |t| t.0);
-                obstacles.push(grow(Grow::Shape(pd.copper.clone(), reach(gap))));
+                obstacles.push(grow(GrowRef::Shape(&pd.copper, reach(gap))));
                 continue;
             }
             Some(_) => Connect::Thermal,
@@ -403,11 +449,11 @@ fn fill_one(
         };
         if connect == Connect::Thermal {
             let (gap, spoke) = pd.thermal.unwrap_or((r.gap.value, r.spoke.value));
-            obstacles.push(grow(Grow::Shape(pd.copper.clone(), reach(gap))));
+            obstacles.push(grow(GrowRef::Shape(&pd.copper, reach(gap))));
             // Only a pad the area reaches within its spokes' length has
             // thermals: another's are no starved connection.
-            let spokes_reach = grow(Grow::Shape(
-                pd.copper.clone(),
+            let spokes_reach = grow(GrowRef::Shape(
+                &pd.copper,
                 reach(gap) + spoke.max(r.min_width.value),
             ));
             if poly::intersection(&spokes_reach, &area).is_empty() {
@@ -437,7 +483,7 @@ fn fill_one(
             others.push((&v.shape, Some(&v.net)));
         }
     }
-    let grown: Vec<Polygons> = others
+    let grown: Vec<std::sync::Arc<Polygons>> = others
         .par_iter()
         .map(|(shape, their)| other(shape, *their))
         .collect();
@@ -464,7 +510,7 @@ fn fill_one(
             .hole_clearance(Some(net))
             .map_or(0, |x| x.value)
             .max(preset.hole_clearance(kind, inner));
-        obstacles.push(grow(Grow::Hole(h.shape, reach(rule))));
+        obstacles.push(grow(GrowRef::Hole(h.shape, reach(rule))));
     }
     let ask = Ask {
         area,
@@ -506,7 +552,7 @@ fn fill_one(
         thermals: names.into_iter().zip(t.spokes.iter().copied()).collect(),
         polygons: t.polygons(),
         tiled: t,
-        grown: std::sync::Arc::new(Grown(made.into_inner().unwrap())),
+        grown: std::sync::Arc::new(made.into_inner().unwrap()),
     }
 }
 

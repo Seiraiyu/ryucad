@@ -52,9 +52,9 @@ pub fn seeded(seed: u64) -> Seeded {
         }
     }
     let grow = clearance + BOUND + 1;
-    let grown: Vec<Polygons> = others
+    let grown: Vec<std::sync::Arc<Polygons>> = others
         .iter()
-        .map(|o| poly::grow(o, grow, &fill::opts()))
+        .map(|o| poly::grow(o, grow, &fill::opts()).into())
         .collect();
     let mut ask = Ask {
         area: rect(0, 0, side, side),
@@ -84,7 +84,8 @@ pub fn seeded(seed: u64) -> Seeded {
             gap: clearance.max(MM / 2),
             spoke: min_width.max(MM / 2),
         };
-        ask.obstacles.push(poly::grow(&pad, t.gap, &fill::opts()));
+        ask.obstacles
+            .push(poly::grow(&pad, t.gap, &fill::opts()).into());
         ask.own.push(pad.body());
         ask.thermals.push(t);
     }

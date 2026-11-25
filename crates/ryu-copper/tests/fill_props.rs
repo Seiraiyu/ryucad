@@ -166,7 +166,7 @@ fn a_refill_rebuilds_only_the_tiles_an_edit_reaches() {
         if ask.obstacles.is_empty() {
             continue;
         }
-        ask.obstacles[0] = poly::grow(&ask.obstacles[0], 1_000, &fill::opts());
+        ask.obstacles[0] = poly::grow(&ask.obstacles[0], 1_000, &fill::opts()).into();
         let (again, built) = fill::fill_tiled_counted(&ask, side, Some(&first));
         assert_eq!(again, fill::fill_tiled(&ask, side, None), "seed {seed}");
         let changed = again
