@@ -567,11 +567,11 @@ pub fn edit(files: &mut BTreeMap<String, Vec<u8>>, s: &Spec, kind: u64, r: &mut 
         }
         5 => {
             let vias = under(files, "vias");
-            if next(r) % 2 == 0 {
-                if let Some(v) = pick(&vias, r) {
-                    files.remove(&v);
-                    return;
-                }
+            if next(r).is_multiple_of(2)
+                && let Some(v) = pick(&vias, r)
+            {
+                files.remove(&v);
+                return;
             }
             let Some(t) = pick(&tracks, r) else { return };
             let tv = json_of(files, &t);
