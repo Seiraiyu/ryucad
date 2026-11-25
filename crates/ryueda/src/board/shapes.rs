@@ -942,7 +942,9 @@ pub fn assemble(
         out.outline = region;
         out.edges = edges;
         let rules = super::rules::of(p, b)?;
+        let stage = crate::profile::stage("assemble.pours");
         out.pours = super::pour::fill_all(&pours, &out, &rules, &preset, prev_pours);
+        drop(stage);
         for f in &out.pours {
             let name = &super::stackup::names(n)[f.layer];
             for r in &f.regions {

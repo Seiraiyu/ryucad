@@ -117,15 +117,38 @@ fn opened_of(area: &Polygons, obstacles: &[&Polygons], min_width: Nm) -> Polygon
             .par_iter()
             .map(|o| poly::grow(o, d, &opts()))
             .collect();
+        let grown: Vec<&Polygons> = grown.iter().collect();
+        opened_grown(area, &grown, min_width)
+    } else {
+        opened_of_plain(area, obstacles)
+    }
+}
+
+/// [`opened_of`] with the obstacles already grown by half the least
+/// width (a tiled fill grows each once, for every window it is in).
+fn opened_grown(area: &Polygons, grown: &[&Polygons], min_width: Nm) -> Polygons {
+    let d = min_width / 2;
+    {
+        let mut rings = Rings::default();
+        for o in grown {
+            let r = o.rings();
+            rings.bound = rings.bound.max(r.bound);
+            rings.rings.extend(r.rings);
+        }
         let shrunk = poly::boolean(
             &poly::shrink(area, d, &opts()).rings(),
             FillRule::NonZero,
-            &all_rings(&grown),
+            &rings,
             FillRule::NonZero,
             Op::Difference,
         );
         poly::grow(&shrunk, d, &opts())
-    } else {
+    }
+}
+
+/// The area less the obstacles, not opened (a least width of 1 nm or none).
+fn opened_of_plain(area: &Polygons, obstacles: &[&Polygons]) -> Polygons {
+    {
         let mut rings = Rings::default();
         for o in obstacles {
             let r = o.rings();
@@ -454,6 +477,59 @@ pub fn fill_tiled_counted(ask: &Ask, side: Nm, prev: Option<&Tiled>) -> (Tiled, 
         .map(|o| (o, o.bounds()))
         .collect();
     let tile_of = |p: Point| Point::new(lo(p.x) * side, lo(p.y) * side);
+    // Each tile's obstacles and spoke obstacles, by index in the ask's
+    // order: those whose boxes meet its window (a superset, by tile index,
+    // then judged exactly by box), so no tile looks at them all.
+    let bucket = |boxes: &[Option<Rect>]| {
+        let mut out: std::collections::HashMap<(i64, i64), Vec<usize>> =
+            std::collections::HashMap::new();
+        for (k, b) in boxes.iter().enumerate() {
+            let Some(b) = b else { continue };
+            let g = tree::grown(b, reach);
+            for j in lo(g.min.y) - 1..=lo(g.max.y) {
+                for i in lo(g.min.x) - 1..=lo(g.max.x) {
+                    out.entry((i, j)).or_default().push(k);
+                }
+            }
+        }
+        out
+    };
+    let obstacle_tiles = bucket(&obstacle_boxes);
+    let blocked_boxes: Vec<Option<Rect>> = blocked.iter().map(|(_, b)| *b).collect();
+    let blocked_tiles = bucket(&blocked_boxes);
+    let near = |tiles: &std::collections::HashMap<(i64, i64), Vec<usize>>,
+                boxes: &[Option<Rect>],
+                at: Point,
+                w: &Rect|
+     -> Vec<usize> {
+        tiles
+            .get(&(lo(at.x), lo(at.y)))
+            .map(|v| {
+                v.iter()
+                    .copied()
+                    .filter(|&k| boxes[k].is_some_and(|b| tree::meets(&b, w)))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    // Each obstacle grown by half the least width once, when a window
+    // first needs it.
+    let grown: Vec<std::sync::OnceLock<Polygons>> = (0..ask.obstacles.len())
+        .map(|_| std::sync::OnceLock::new())
+        .collect();
+    let open_window = |window_area: &Polygons, idx: &[usize]| -> Polygons {
+        if ask.min_width > 1 {
+            let d = ask.min_width / 2;
+            let g: Vec<&Polygons> = idx
+                .iter()
+                .map(|&k| grown[k].get_or_init(|| poly::grow(&ask.obstacles[k], d, &opts())))
+                .collect();
+            opened_grown(window_area, &g, ask.min_width)
+        } else {
+            let o: Vec<&Polygons> = idx.iter().map(|&k| &ask.obstacles[k]).collect();
+            opened_of_plain(window_area, &o)
+        }
+    };
     let prev_at: std::collections::BTreeMap<(i64, i64), &TileFill> = prev
         .map(|p| p.tiles.iter().map(|t| ((t.at.x, t.at.y), t)).collect())
         .unwrap_or_default();
@@ -473,13 +549,8 @@ pub fn fill_tiled_counted(ask: &Ask, side: Nm, prev: Option<&Tiled>) -> (Tiled, 
             return None;
         }
         let window_area = poly::intersection(&ask.area, &rect_polys(&w));
-        let obstacles: Vec<&Polygons> = ask
-            .obstacles
-            .iter()
-            .zip(&obstacle_boxes)
-            .filter(|(_, b)| b.is_some_and(|b| tree::meets(&b, &w)))
-            .map(|(o, _)| o)
-            .collect();
+        let idx = near(&obstacle_tiles, &obstacle_boxes, at, &w);
+        let obstacles: Vec<&Polygons> = idx.iter().map(|&k| &ask.obstacles[k]).collect();
         let mine: Vec<&ThermalPad> = ask
             .thermals
             .iter()
@@ -494,10 +565,8 @@ pub fn fill_tiled_counted(ask: &Ask, side: Nm, prev: Option<&Tiled>) -> (Tiled, 
             hash_rings(&mut h, o);
         }
         h.int(-2);
-        for (o, b) in &blocked {
-            if b.is_some_and(|b| tree::meets(&b, &w)) {
-                hash_rings(&mut h, o);
-            }
+        for k in near(&blocked_tiles, &blocked_boxes, at, &w) {
+            hash_rings(&mut h, blocked[k].0);
         }
         h.int(-3);
         for th in &mine {
@@ -515,7 +584,7 @@ pub fn fill_tiled_counted(ask: &Ask, side: Nm, prev: Option<&Tiled>) -> (Tiled, 
                 choices: old.choices.clone(),
             });
         }
-        let opened = opened_of(&window_area, &obstacles, ask.min_width);
+        let opened = open_window(&window_area, &idx);
         let rings = opened.rings();
         let choices = mine
             .iter()
@@ -589,14 +658,8 @@ pub fn fill_tiled_counted(ask: &Ask, side: Nm, prev: Option<&Tiled>) -> (Tiled, 
                     // it changed: its window is filled again.
                     let w = tree::grown(&t, reach);
                     let window_area = poly::intersection(&ask.area, &rect_polys(&w));
-                    let obstacles: Vec<&Polygons> = ask
-                        .obstacles
-                        .iter()
-                        .zip(&obstacle_boxes)
-                        .filter(|(_, b)| b.is_some_and(|b| tree::meets(&b, &w)))
-                        .map(|(o, _)| o)
-                        .collect();
-                    opened_of(&window_area, &obstacles, ask.min_width)
+                    let idx = near(&obstacle_tiles, &obstacle_boxes, x.at, &w);
+                    open_window(&window_area, &idx)
                 }
             };
             TILES_FILLED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

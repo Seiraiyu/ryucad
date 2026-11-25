@@ -800,6 +800,9 @@ pub fn place(
         }
         placed.push(entry);
     }
+    // The legaliser's check is let go before the write: the board's kept
+    // state edits its copper in place only when nothing else holds it.
+    drop(check);
     let before = super::drc::now(session, &id);
     commit(session, &format!("board {id} place"), w)?;
     let b = &session.project().boards[&id];

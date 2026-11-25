@@ -216,6 +216,8 @@ pub struct PourInfo {
     pub polygons: Polygons,
     /// Each kept polygon as a shape, in the polygons' order.
     pub regions: Vec<Shape>,
+    /// Each region's tile corner and index in its tile (ryueda 7.E).
+    pub places: Vec<(i64, i64, u32)>,
     pub islands_removed: usize,
     /// Regions (by index) whose contact with the net's copper was uncertain.
     pub uncertain: Vec<usize>,
@@ -224,7 +226,31 @@ pub struct PourInfo {
     /// The fill by tile (ryueda 7.E): the next fill reuses the tiles
     /// whose inputs held.
     pub tiled: fill::Tiled,
+    /// What the fill grew: the next fill reuses each obstacle whose shape
+    /// and growth held. Derived; never compared.
+    pub grown: std::sync::Arc<Grown>,
 }
+
+/// What a fill grows into an obstacle: a shape, or a hole's wall, by how
+/// far.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum Grow {
+    Shape(Shape, i64),
+    Hole(ryu_copper::layout::HoleShape, i64),
+}
+
+/// Obstacles grown, by what and how far (ryueda 7.E): a refill grows
+/// only the copper that changed.
+#[derive(Clone, Debug, Default)]
+pub struct Grown(std::collections::HashMap<Grow, std::sync::Arc<Polygons>>);
+
+impl PartialEq for Grown {
+    fn eq(&self, _: &Grown) -> bool {
+        true
+    }
+}
+
+impl Eq for Grown {}
 
 /// A shape flattened at the fill's bound.
 fn flat(shape: &Shape) -> Polygons {
@@ -270,11 +296,33 @@ fn fill_one(
     preset: &Preset,
     outline: &Polygons,
     done: &[PourInfo],
-    prev: Option<&fill::Tiled>,
+    prev: Option<&PourInfo>,
 ) -> PourInfo {
+    let made: std::sync::Mutex<std::collections::HashMap<Grow, std::sync::Arc<Polygons>>> =
+        Default::default();
+    let grow = |k: Grow| -> Polygons {
+        let kept = prev.and_then(|x| x.grown.0.get(&k).cloned());
+        let g = kept.unwrap_or_else(|| {
+            std::sync::Arc::new(match &k {
+                Grow::Shape(shape, d) => poly::grow(&flat(shape), *d, &fill::opts()),
+                Grow::Hole(h, d) => poly::grow(
+                    &poly::simplify(
+                        &poly::flatten_hole(h, &fill::opts()),
+                        poly::FillRule::NonZero,
+                    ),
+                    *d,
+                    &fill::opts(),
+                ),
+            })
+        });
+        let out = (*g).clone();
+        made.lock().unwrap().insert(k, g);
+        out
+    };
     let n = s.n();
     let opts = fill::opts();
     let net = p.net.as_str();
+    let prep = crate::profile::stage("pour.prep");
     let r = rules.pour(p);
     let inner = l != 0 && l + 1 != n;
     // The area.
@@ -331,7 +379,7 @@ fn fill_one(
             .pair_clearance(&[net], &their.into_iter().collect::<Vec<_>>())
             .value
             .max(r.clearance.value);
-        poly::grow(&flat(shape), reach(need), &opts)
+        grow(Grow::Shape(shape.clone(), reach(need)))
     };
     // Other nets' copper, grown in parallel below, in this order.
     let mut others: Vec<(&Shape, Option<&str>)> = Vec::new();
@@ -347,7 +395,7 @@ fn fill_one(
             Some(ZoneConnect::ThermalThrough) if !through => Connect::Solid,
             Some(ZoneConnect::None) => {
                 let gap = pd.thermal.map_or(r.gap.value, |t| t.0);
-                obstacles.push(poly::grow(&flat(&pd.copper), reach(gap), &opts));
+                obstacles.push(grow(Grow::Shape(pd.copper.clone(), reach(gap))));
                 continue;
             }
             Some(_) => Connect::Thermal,
@@ -355,12 +403,13 @@ fn fill_one(
         };
         if connect == Connect::Thermal {
             let (gap, spoke) = pd.thermal.unwrap_or((r.gap.value, r.spoke.value));
-            let copper = flat(&pd.copper);
-            obstacles.push(poly::grow(&copper, reach(gap), &opts));
+            obstacles.push(grow(Grow::Shape(pd.copper.clone(), reach(gap))));
             // Only a pad the area reaches within its spokes' length has
             // thermals: another's are no starved connection.
-            let spokes_reach =
-                poly::grow(&copper, reach(gap) + spoke.max(r.min_width.value), &opts);
+            let spokes_reach = grow(Grow::Shape(
+                pd.copper.clone(),
+                reach(gap) + spoke.max(r.min_width.value),
+            ));
             if poly::intersection(&spokes_reach, &area).is_empty() {
                 continue;
             }
@@ -415,13 +464,7 @@ fn fill_one(
             .hole_clearance(Some(net))
             .map_or(0, |x| x.value)
             .max(preset.hole_clearance(kind, inner));
-        let rings = poly::flatten_hole(&h.shape, &opts);
-        let g = poly::grow(
-            &poly::simplify(&rings, poly::FillRule::NonZero),
-            reach(rule),
-            &opts,
-        );
-        obstacles.push(g);
+        obstacles.push(grow(Grow::Hole(h.shape, reach(rule))));
     }
     let ask = Ask {
         area,
@@ -432,11 +475,20 @@ fn fill_one(
         own,
         keep_islands: p.islands == Islands::Keep,
     };
-    let t = fill::fill_tiled(&ask, fill::TILE, prev);
+    drop(prep);
+    let stage = crate::profile::stage("pour.tiled");
+    let t = fill::fill_tiled(&ask, fill::TILE, prev.map(|x| &x.tiled));
+    drop(stage);
     // Each kept piece is a region, tile by tile; an uncertain piece's
     // region index is its place among them.
     let pieces: Vec<(usize, usize)> = t.pieces().map(|(ti, i, _)| (ti, i)).collect();
-    let regions = t.pieces().filter_map(|(_, _, p)| region(p)).collect();
+    let (regions, places): (Vec<Shape>, Vec<(i64, i64, u32)>) = t
+        .pieces()
+        .filter_map(|(ti, i, p)| {
+            let at = t.tiles[ti].at;
+            region(p).map(|r| (r, (at.x, at.y, i as u32)))
+        })
+        .unzip();
     let uncertain = t
         .uncertain
         .iter()
@@ -448,11 +500,13 @@ fn fill_one(
         layer: l,
         rules: r,
         regions,
+        places,
         islands_removed: t.islands_removed,
         uncertain,
         thermals: names.into_iter().zip(t.spokes.iter().copied()).collect(),
         polygons: t.polygons(),
         tiled: t,
+        grown: std::sync::Arc::new(Grown(made.into_inner().unwrap())),
     }
 }
 
@@ -483,10 +537,7 @@ pub fn fill_all(
             list.sort_by(|a, b| b.1.priority.cmp(&a.1.priority).then_with(|| a.0.cmp(&b.0)));
             let mut done: Vec<PourInfo> = Vec::new();
             for (id, p) in list {
-                let old = prev
-                    .iter()
-                    .find(|x| &x.id == id && x.layer == *l)
-                    .map(|x| &x.tiled);
+                let old = prev.iter().find(|x| &x.id == id && x.layer == *l);
                 let f = fill_one(id, p, *l, s, rules, preset, &outline, &done, old);
                 done.push(f);
             }

@@ -52,16 +52,23 @@ impl Live {
 
     /// Carries the state to `b` as `p` has it now.
     pub fn update(&mut self, p: &Project, b: &BoardFiles) -> Result<Update> {
-        if rules_key(p, b) != self.rules_key {
+        let stage = crate::profile::stage("live.rules_key");
+        let key = rules_key(p, b);
+        drop(stage);
+        if key != self.rules_key {
             *self = Live::build(p, b)?;
             return Ok(Update::Rebuilt);
         }
+        let stage = crate::profile::stage("live.pieces");
         let pieces = shapes::pieces(p, b, Some(&self.pieces))?;
+        drop(stage);
         if pieces.base != self.pieces.base {
             *self = Live::build(p, b)?;
             return Ok(Update::Rebuilt);
         }
+        let stage = crate::profile::stage("live.assemble");
         let s = Arc::new(shapes::assemble(p, b, &pieces, &self.check().shapes.pours)?);
+        drop(stage);
         let same = pieces.order == self.pieces.order
             && pieces
                 .by
@@ -81,10 +88,13 @@ impl Live {
             let raw = c.raw;
             Arc::try_unwrap(c.conn).ok().map(|conn| (conn, raw))
         });
+        let stage = crate::profile::stage("live.apply");
         let applied =
             taken.and_then(|(mut conn, raw)| conn.apply(&board, &s).map(|ch| (conn, raw, ch)));
         match applied {
             Some((conn, raw, changed)) => {
+                drop(stage);
+                let stage = crate::profile::stage("live.dirty");
                 let dirty = dirty_of(
                     &board,
                     &conn.built,
@@ -98,6 +108,8 @@ impl Live {
                 // no slower, and the edit path stays for small edits.
                 let most = 2 * dirty.objs.len() > pieces.order.len().max(1);
                 let prev = (!most).then_some((raw.as_slice(), &dirty));
+                drop(stage);
+                let _stage = crate::profile::stage("live.check");
                 self.check = Some(Arc::new(drc::check_with(p, b, s, Arc::new(conn), prev)?));
                 self.pieces = pieces;
                 self.dirty = Some(dirty);

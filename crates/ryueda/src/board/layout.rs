@@ -27,9 +27,11 @@ pub enum Key {
     },
     ViaDrill(String),
     Hole(String),
-    /// A pour's `n`th filled region.
+    /// A pour's filled piece: the `n`th in its tile, by the tile's corner
+    /// (ryueda 7.E: stable while other tiles change).
     Pour {
         id: String,
+        tile: (i64, i64),
         n: u32,
     },
 }
@@ -149,11 +151,12 @@ pub fn build(board: &str, s: &BoardShapes) -> Built {
         }
     }
     for f in &s.pours {
-        for (k, r) in f.regions.iter().enumerate() {
+        for (r, (x, y, n)) in f.regions.iter().zip(&f.places) {
             layout.items.insert(
                 Key::Pour {
                     id: f.id.to_string(),
-                    n: k as u32,
+                    tile: (*x, *y),
+                    n: *n,
                 },
                 Item {
                     layer: f.layer,

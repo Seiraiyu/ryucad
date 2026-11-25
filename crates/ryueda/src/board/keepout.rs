@@ -345,6 +345,8 @@ mod tests {
             uncertain: vec![],
             thermals: vec![],
             tiled: Default::default(),
+            places: vec![(0, 0, 0)],
+            grown: Default::default(),
         });
         s.keepouts.push(ko(vec![Keep::Pours], vec![0], None));
         let f = check(&s, "b", crate::board::drc::Scope::All);
