@@ -140,6 +140,53 @@ pub struct Ask<'a> {
     pub window: Option<Rect>,
     pub size: u32,
     pub svg: bool,
+    /// Unrouted connections, end to end, drawn over the layers (ryueda 7.E).
+    pub ratsnest: &'a [(ryu_board::geom::Point, ryu_board::geom::Point)],
+    /// Each finding's place, marked over the layers.
+    pub findings: &'a [ryu_board::geom::Point],
+}
+
+/// The ratsnest's lines: thin, light yellow.
+const RATSNEST: Ink = Ink::Paint {
+    colour: [240, 230, 140],
+    alpha: 230,
+};
+
+/// Findings' marks: red rings.
+const FINDING: Ink = Ink::Paint {
+    colour: [230, 40, 40],
+    alpha: 255,
+};
+
+/// A stroke along `path`, `w` wide.
+fn stroke(path: Vec<ryu_board::geom::Edge>, w: i64) -> Shape {
+    Shape {
+        parts: vec![ryu_board::shape::Part {
+            polarity: ryu_board::model::Polarity::Positive,
+            piece: ryu_board::shape::Piece::Stroke(ryu_board::geom::Stroke {
+                path,
+                pen: ryu_board::geom::Pen::Round(w),
+            }),
+        }],
+        ..Shape::default()
+    }
+}
+
+/// The ratsnest's lines and the findings' rings, as shapes.
+fn overlays(ask: &Ask) -> (Vec<Shape>, Vec<Shape>) {
+    let lines = ask
+        .ratsnest
+        .iter()
+        .filter(|(a, b)| a != b)
+        .map(|(a, b)| stroke(vec![ryu_board::geom::Edge::line(*a, *b)], 100_000))
+        .collect();
+    let rings = ask
+        .findings
+        .iter()
+        .filter_map(|c| ryu_board::shape::circle(*c, 300_000).ok())
+        .map(|k| stroke(k.edges().to_vec(), 100_000))
+        .collect();
+    (lines, rings)
 }
 
 /// The picture's bytes and the answer's fields.
@@ -196,6 +243,7 @@ pub fn render(board: &str, s: &BoardShapes, ask: &Ask) -> Result<(Value, &'stati
             )
             .collect()
     };
+    let (lines, rings) = overlays(ask);
     let mut scene_layers = Vec::new();
     for l in &layers {
         let shapes: Vec<&Shape> = match l.as_str() {
@@ -226,6 +274,20 @@ pub fn render(board: &str, s: &BoardShapes, ask: &Ask) -> Result<(Value, &'stati
                 shapes: net_copper(names.iter().position(|x| x == l)),
             });
         }
+    }
+    if !lines.is_empty() {
+        scene_layers.push(Layer {
+            name: "ratsnest".into(),
+            ink: RATSNEST,
+            shapes: lines.iter().collect(),
+        });
+    }
+    if !rings.is_empty() {
+        scene_layers.push(Layer {
+            name: "findings".into(),
+            ink: FINDING,
+            shapes: rings.iter().collect(),
+        });
     }
     let window = ask.window.unwrap_or_else(|| {
         let b = s
@@ -295,6 +357,8 @@ mod tests {
                     window: None,
                     size: 200,
                     svg: true,
+                    ratsnest: &[],
+                    findings: &[],
                 },
             )
         };
@@ -337,6 +401,8 @@ mod tests {
                     window: None,
                     size: 200,
                     svg: true,
+                    ratsnest: &[],
+                    findings: &[],
                 },
             )
             .unwrap();
@@ -383,6 +449,8 @@ mod tests {
                     window: None,
                     size: 200,
                     svg: true,
+                    ratsnest: &[],
+                    findings: &[],
                 },
             )
         };
@@ -426,6 +494,8 @@ mod tests {
             window: None,
             size: 200,
             svg: false,
+            ratsnest: &[],
+            findings: &[],
         };
         let run = |n| {
             rayon::ThreadPoolBuilder::new()
@@ -437,5 +507,47 @@ mod tests {
         assert_eq!(run(1), run(8));
         let ask = Ask { size: 0, ..ask };
         assert_eq!(render("b", &s, &ask).unwrap_err().code, Code::InvalidParam);
+    }
+
+    #[test]
+    fn the_ratsnest_and_findings_draw_over_the_layers() {
+        use crate::board::testing::{MM, board};
+        use ryu_board::geom::Point;
+        let mut s = board(10 * MM, 5 * MM);
+        s.smd("r1", "1", (2 * MM, 2 * MM), (MM, MM), Some("a")).smd(
+            "r2",
+            "1",
+            (8 * MM, 2 * MM),
+            (MM, MM),
+            Some("a"),
+        );
+        let layers = vec!["copper.top".to_owned()];
+        let draw = |lines: &[(Point, Point)], marks: &[Point]| {
+            let (_, _, svg) = render(
+                "b",
+                &s,
+                &Ask {
+                    layers: &layers,
+                    bottom: false,
+                    net: None,
+                    window: None,
+                    size: 200,
+                    svg: true,
+                    ratsnest: lines,
+                    findings: marks,
+                },
+            )
+            .unwrap();
+            String::from_utf8(svg).unwrap()
+        };
+        let bare = draw(&[], &[]);
+        let both = draw(
+            &[(Point::new(2 * MM, 2 * MM), Point::new(8 * MM, 2 * MM))],
+            &[Point::new(5 * MM, 2 * MM)],
+        );
+        assert!(
+            both.matches("<path").count() >= bare.matches("<path").count() + 2,
+            "{both}"
+        );
     }
 }

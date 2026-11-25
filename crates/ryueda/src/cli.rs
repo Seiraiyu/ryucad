@@ -1761,6 +1761,12 @@ enum BoardCmd {
         /// svg or png.
         #[arg(long)]
         format: Option<String>,
+        /// Draw the open nets' unrouted connections over the layers.
+        #[arg(long)]
+        ratsnest: bool,
+        /// Mark each finding's place.
+        #[arg(long)]
+        findings: bool,
     },
     /// Remove a part's placement.
     Unplace {
@@ -4354,7 +4360,11 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             window,
             size,
             format,
+            ratsnest,
+            findings,
         }) => Request::BoardRender {
+            ratsnest: *ratsnest,
+            findings: *findings,
             board: board.clone(),
             layers: layers.clone(),
             side: side.clone(),

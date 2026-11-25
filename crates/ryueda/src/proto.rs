@@ -746,6 +746,12 @@ pub enum Request {
         size: Option<u32>,
         /// `png` or `svg`.
         format: String,
+        /// The open nets' unrouted connections drawn over the layers.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        ratsnest: bool,
+        /// Each finding's place marked.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        findings: bool,
     },
     #[serde(rename = "board.list")]
     BoardList {

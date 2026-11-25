@@ -6642,6 +6642,19 @@ fn ratsnest_from_the_cli() {
     assert_eq!(scl["connections"].as_array().unwrap().len(), 0, "{scl}");
     let u1 = p.ok(&["board", "ratsnest", id, "--ref", "U1"]);
     assert!(!u1["connections"].as_array().unwrap().is_empty(), "{u1}");
+    // Drawn over the layers, with the open net's findings marked.
+    let r = p.ok(&[
+        "board",
+        "render",
+        id,
+        "--out",
+        "nest.svg",
+        "--ratsnest",
+        "--findings",
+    ]);
+    assert!(r.get("layers").is_some(), "{r}");
+    let svg = fs::read_to_string(p.daemon.join("board/nest.svg")).unwrap();
+    assert!(svg.contains("<path"), "the ratsnest and marks are drawn");
     p.fails(&["board", "ratsnest", id, "--ref", "Z9"], "not_found", 1);
     p.fails(
         &["board", "ratsnest", id, "--net", "nope"],

@@ -360,6 +360,8 @@ fn working(
             window,
             size,
             format,
+            ratsnest,
+            findings,
         } => crate::board::cmd::render(
             session,
             &board,
@@ -369,6 +371,7 @@ fn working(
             window.as_ref(),
             size,
             &format,
+            crate::board::cmd::Marks { ratsnest, findings },
         ),
         Request::Render {
             design,
