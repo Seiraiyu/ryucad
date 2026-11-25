@@ -23,6 +23,15 @@ pub fn opts() -> FlattenOptions {
     FlattenOptions::new(BOUND)
 }
 
+/// What of a fill lies outside its area by more than the grid rounds:
+/// empty for every fill. The fill is clipped to its area, but a second
+/// boolean (this difference) rounds their shared edges through other hot
+/// pixels, so the bare difference may keep slivers under 2 nm wide where
+/// an edge of the area isn't on the grid (fuzzed: `copper`).
+pub fn outside(fill: &Polygons, area: &Polygons) -> Polygons {
+    poly::shrink(&poly::difference(fill, area), 1, &FlattenOptions::new(1))
+}
+
 /// A pad the fill reaches by thermal spokes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ThermalPad {
@@ -941,7 +950,37 @@ pub(crate) mod tests {
         a.thermals.push(thermal(at));
         let f = fill(&a);
         assert_eq!(f.spokes, [4]);
-        assert!(poly::difference(&f.polygons, &a.area).is_empty());
+        assert!(outside(&f.polygons, &a.area).is_empty());
+    }
+
+    /// The fuzzer's `copper` find: a spoke to a pad outside a triangle
+    /// crosses its sloped edge off the grid, and the difference with the
+    /// area keeps a sliver a nanometre wide, nothing wider.
+    #[test]
+    fn a_spoke_across_a_sloped_edge_stays_within_a_nanometre() {
+        let s = 100_000;
+        let a = Rings::new(
+            vec![vec![
+                Point::new(39 * s, s),
+                Point::new(61 * s, 63 * s),
+                Point::new(2 * s, 63 * s),
+            ]],
+            0,
+        );
+        let area = poly::simplify(&a, FillRule::NonZero);
+        let mut x = ask(area.clone());
+        x.thermals = vec![ThermalPad {
+            at: Point::new(s, 61 * s),
+            rotation_mdeg: 255 * 1_411,
+            half: [s, 2 * s],
+            gap: s,
+            spoke: s,
+        }];
+        x.min_width = s;
+        x.own = vec![area.body()];
+        let f = fill(&x);
+        assert!(!poly::difference(&f.polygons, &area).is_empty());
+        assert!(outside(&f.polygons, &area).is_empty());
     }
     #[test]
     fn islands_without_own_copper_go_unless_kept() {

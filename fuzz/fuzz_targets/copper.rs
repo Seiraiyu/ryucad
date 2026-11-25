@@ -190,7 +190,7 @@ fuzz_target!(|data: &[u8]| {
     let f = fill_on(1);
     let faults = poly::faults(&f.polygons);
     assert!(faults.is_empty(), "fill: {faults:?}");
-    assert!(poly::difference(&f.polygons, &area).is_empty(), "fill outside its area");
+    assert!(fill::outside(&f.polygons, &area).is_empty(), "fill outside its area");
     assert_eq!(f, fill_on(8));
     // Connectivity of the same rings.
     let l = layout_of(&a, &b, scale);

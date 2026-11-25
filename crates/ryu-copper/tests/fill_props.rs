@@ -44,7 +44,7 @@ fn fills_keep_their_clearance_exactly() {
             );
         }
         assert!(
-            poly::difference(&f.polygons, &s.ask.area).is_empty(),
+            fill::outside(&f.polygons, &s.ask.area).is_empty(),
             "seed {seed}: the fill leaves its area"
         );
     }
