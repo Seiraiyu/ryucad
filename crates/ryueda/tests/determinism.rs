@@ -744,7 +744,7 @@ fn placed(golden: &mut Golden, at: &Path) {
 /// `board show --pours`, DRC, a render of the bottom copper and every
 /// exported file, alike on one thread and eight. Every ID is pinned.
 fn pours(golden: &mut Golden, at: &Path) {
-    type Got = (Value, Value, String, BTreeMap<String, String>);
+    type Got = (Value, Value, String, BTreeMap<String, String>, Value);
     let id = breakout_board::BOARD;
     let mut first: Option<Got> = None;
     for threads in [1, 8] {
@@ -831,13 +831,17 @@ fn pours(golden: &mut Golden, at: &Path) {
                 export_hash(&name, &std::fs::read(e.path()).unwrap()),
             );
         }
-        let got = (show, drc, svg, exported);
+        // The ground net opened (ryueda 7.E): its next connections.
+        ryueda(&board, threads, &["board", "track", "delete", id, "gnd_c1"]);
+        let ratsnest = strip(ryueda(&board, threads, &["board", "ratsnest", id]));
+        let got = (show, drc, svg, exported, ratsnest);
         match &first {
             None => first = Some(got),
             Some(one) => assert_eq!(&got, one, "one thread and eight"),
         }
     }
-    let (show, drc, svg, exported) = first.unwrap();
+    let (show, drc, svg, exported, ratsnest) = first.unwrap();
+    golden.json("board.pour.ratsnest", &ratsnest);
     golden.json("board.pour.show", &show);
     golden.json("board.pour.drc", &drc);
     golden.got.insert("board.pour.bottom.svg".into(), svg);
