@@ -391,7 +391,7 @@ pub fn sync(repo: &gix::Repository, releases: &Releases, product: &str) -> Resul
 pub fn guard_for<P: Product>(
     here: &std::path::Path,
 ) -> Result<Vec<(std::path::PathBuf, Vec<crate::check::Finding>)>> {
-    let Ok(repo) = gix::discover(here) else {
+    let Some(repo) = ryu_git::discover_upwards(here, false) else {
         return Ok(Vec::new());
     };
     let Some(workdir) = repo.workdir().map(std::path::Path::to_path_buf) else {

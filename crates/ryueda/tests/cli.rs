@@ -34,6 +34,8 @@ fn replace_root(v: &mut Value, forms: &[&str]) {
 /// its own.
 fn ryueda(run: &Path) -> Command {
     let mut cmd = Command::cargo_bin("ryueda").unwrap();
+    // No repository above the test's folder is found (#1004).
+    cmd.env("GIT_CEILING_DIRECTORIES", std::env::temp_dir());
     cmd.env("RYUEDA_RUNTIME_DIR", run)
         .env("RYUEDA_IDLE_TIMEOUT", "60")
         .env("RYUEDA_CONFIG_DIR", run.with_file_name("config"))
@@ -228,6 +230,7 @@ fn open_starts_the_app_named_by_ryueda_app() {
 fn version_names_ryueda() {
     let out = Command::cargo_bin("ryueda")
         .unwrap()
+        .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
         .arg("version")
         .output()
         .unwrap();
@@ -243,6 +246,7 @@ fn version_names_ryueda() {
     assert!(r.get("ryucad").is_none());
     let flag = Command::cargo_bin("ryueda")
         .unwrap()
+        .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
         .arg("--version")
         .output()
         .unwrap();
@@ -253,6 +257,7 @@ fn version_names_ryueda() {
 fn bad_arguments_are_a_usage_error_in_json() {
     let out = Command::cargo_bin("ryueda")
         .unwrap()
+        .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
         .arg("no-such-command")
         .output()
         .unwrap();
@@ -965,6 +970,7 @@ fn every_protocol_method_has_a_command() {
         };
         let out = Command::cargo_bin("ryueda")
             .unwrap()
+            .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
             .args(*args)
             .arg("--help")
             .output()
@@ -3734,6 +3740,8 @@ fn a_sync_is_cancelled_by_its_token_and_keeps_the_old_catalogue() {
     // Started without waiting: assert_cmd's commands only run to the end.
     #[allow(deprecated)]
     let mut running = std::process::Command::new(assert_cmd::cargo::cargo_bin("ryueda"));
+    // No repository above the test's folder is found (#1004).
+    running.env("GIT_CEILING_DIRECTORIES", std::env::temp_dir());
     running
         .current_dir(p.daemon.join("board"))
         .args(["parts", "sync", "jlc", "--token", "sync1", "--progress"])
@@ -5614,6 +5622,35 @@ fn a_track_edit_takes_negative_points_through_ops() {
         "invalid_param",
         1,
     );
+}
+
+#[test]
+fn errors_lists_every_code_and_its_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = |no_daemon: bool, args: &[&str]| {
+        let mut cmd = ryueda(&dir.path().join("run"));
+        cmd.current_dir(dir.path()).args(args);
+        if no_daemon {
+            cmd.env("RYUEDA_NO_DAEMON", "1");
+        }
+        parse(cmd.output().unwrap(), dir.path())
+    };
+    let (code, v) = run(false, &["errors"]);
+    assert_eq!(run(true, &["errors"]), (code, v.clone()));
+    assert_eq!(code, 0, "{v}");
+    let codes = v["result"]["codes"].as_array().unwrap();
+    let drc = codes.iter().find(|c| c["code"] == "drc_failed").unwrap();
+    assert_eq!(
+        (&drc["declared"], &drc["keys"][0]["name"]),
+        (&json!(true), &json!("report"))
+    );
+    let (code, one) = run(false, &["errors", "not_found"]);
+    assert_eq!(
+        (code, one["result"]["codes"].as_array().unwrap().len()),
+        (0, 1)
+    );
+    let (code, bad) = run(false, &["errors", "nope"]);
+    assert_eq!((code, &bad["error"]["code"]), (1, &json!("invalid_param")));
 }
 
 /// The round's board made four layers (ryueda 7.A): a track on `in1`

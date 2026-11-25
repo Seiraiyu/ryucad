@@ -4930,6 +4930,7 @@ dependencies = [
 name = "ryu-review"
 version = "0.0.0"
 dependencies = [
+ "blake3",
  "ryu-doc",
  "ryu-git",
  "serde_json",

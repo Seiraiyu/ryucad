@@ -122,9 +122,8 @@ pub fn same_text(a: &[u8], b: &[u8]) -> bool {
 impl<L: Layout> Repo<L> {
     /// The repository holding `root`, or `None` when there is none.
     pub fn open(root: &Path) -> Result<Option<Repo<L>>> {
-        let repo = match gix::discover(root) {
-            Ok(r) => r,
-            Err(_) => return Ok(None),
+        let Some(repo) = crate::discover_upwards(root, false) else {
+            return Ok(None);
         };
         let Some(workdir) = repo.workdir() else {
             return Ok(None);
@@ -1018,7 +1017,7 @@ fn manifests<L: Layout>(
 /// the commit being merged that the work tree still has, sorted. Empty,
 /// at once, when Git is in no merge (as for every ordinary commit).
 pub fn merging_projects<L: Layout>(here: &Path) -> Result<Vec<std::path::PathBuf>> {
-    let Ok(repo) = gix::discover(here) else {
+    let Some(repo) = crate::discover_upwards(here, false) else {
         return Ok(Vec::new());
     };
     let Some(workdir) = repo.workdir().map(Path::to_path_buf) else {

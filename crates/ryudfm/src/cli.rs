@@ -67,6 +67,13 @@ enum FormatArg {
 enum Command {
     /// This build's version.
     Version,
+    /// Every error code with its exit code, title and the detail keys it
+    /// declares, or one code's: answered by this build, with no project or
+    /// daemon.
+    Errors {
+        /// One code, such as not_found.
+        code: Option<String>,
+    },
     /// Create a project in this folder: ryudfm.json and .gitattributes.
     Init {
         /// The unit of lengths typed as bare numbers (mm by default).
@@ -589,7 +596,11 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
         Command::Participants => (root()?, Request::ParticipantList {}),
         Command::Undo { entry } => (root()?, Request::Undo { entry: *entry }),
         Command::Redo { entry } => (root()?, Request::Redo { entry: *entry }),
-        Command::Version | Command::Init { .. } | Command::Watch { .. } | Command::Daemon(_) => {
+        Command::Version
+        | Command::Errors { .. }
+        | Command::Init { .. }
+        | Command::Watch { .. }
+        | Command::Daemon(_) => {
             return Ok(None);
         }
     }))
@@ -714,6 +725,7 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
     };
     match &cli.command {
         Command::Version => Ok(json!(VersionInfo::current())),
+        Command::Errors { code } => ryudfm::error::details::listing(code.as_deref()),
         Command::Init { unit } => {
             let root =
                 ryudfm::source::plain(here.canonicalize().map_err(|e| Error::io(&here, &e))?);
@@ -809,6 +821,7 @@ fn finish(outcome: Result<Value>, warnings: Vec<String>, pretty: bool) -> ExitCo
             0,
         ),
         Err(e) => {
+            ryudfm::error::details::check(&e);
             let code = e.code.exit_code();
             (json!({"ok": false, "error": e, "warnings": warnings}), code)
         }

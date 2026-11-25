@@ -150,8 +150,10 @@ pub enum Request {
     },
     #[serde(rename = "document.add")]
     DocumentAdd {
-        /// The file to add: an absolute path the session reads.
-        file: String,
+        /// The file to add: an absolute path the session reads. Exactly one
+        /// of `file` and `drive`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        file: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         number: Option<String>,
         /// The document scheme whose next number to take ("" for the one
@@ -160,6 +162,12 @@ pub enum Request {
         next: Option<String>,
         #[serde(default, flatten)]
         fields: crate::documents::New,
+        /// `git` or `service`; the catalogue's default when absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        storage: Option<String>,
+        /// A Drive revision the CLI pinned.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        drive: Option<crate::docstore::DrivePin>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
@@ -205,6 +213,24 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
+    #[serde(rename = "document.move")]
+    DocumentMove {
+        document: String,
+        /// `git` or `service`.
+        storage: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "document.sync")]
+    DocumentSync {
+        document: String,
+        /// The Drive revision the CLI pinned.
+        pin: crate::docstore::DrivePin,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        dry_run: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
     #[serde(rename = "document.remove")]
     DocumentRemove {
         document: String,
@@ -247,6 +273,22 @@ pub enum Request {
         no_dependents: bool,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         working: bool,
+    },
+    /// Where documents' bytes are (read only): the CLI asks before it
+    /// fetches or uploads.
+    #[serde(rename = "document.locate")]
+    DocumentLocate {
+        /// IDs or numbers; every document when empty.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        documents: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rev: Option<String>,
+        /// Only documents of this storage (`git`, `service`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        storage: Option<String>,
+        /// Only documents with a Drive pin.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        pinned: bool,
     },
     #[serde(rename = "bom.add")]
     BomAdd {
@@ -607,6 +649,8 @@ impl Request {
                 | Request::DocumentEdit { .. }
                 | Request::DocumentRenumber { .. }
                 | Request::DocumentReplace { .. }
+                | Request::DocumentMove { .. }
+                | Request::DocumentSync { .. }
                 | Request::DocumentRemove { .. }
                 | Request::DocumentAttach { .. }
                 | Request::DocumentDetach { .. }
@@ -669,7 +713,7 @@ mod tests {
         let reqs = [
             Request::ProjectInfo {},
             Request::DocumentAdd {
-                file: "/tmp/spec.pdf".into(),
+                file: Some("/tmp/spec.pdf".into()),
                 number: None,
                 next: Some(String::new()),
                 fields: crate::documents::New {
@@ -677,7 +721,28 @@ mod tests {
                     doc_type: Some("specification".into()),
                     ..Default::default()
                 },
+                storage: None,
+                drive: None,
                 expected_revision: None,
+            },
+            Request::DocumentSync {
+                document: "DOC-1".into(),
+                pin: crate::docstore::DrivePin {
+                    drive_id: "f1".into(),
+                    revision: "r2".into(),
+                    name: "Spec.pdf".into(),
+                    media_type: "application/pdf".into(),
+                    size: 3,
+                    blake3: "a".repeat(64),
+                },
+                dry_run: true,
+                expected_revision: None,
+            },
+            Request::DocumentLocate {
+                documents: vec!["DOC-1".into()],
+                rev: Some("HEAD".into()),
+                storage: Some("service".into()),
+                pinned: true,
             },
             Request::DocumentGet {
                 document: "DOC-1".into(),

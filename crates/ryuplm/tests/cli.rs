@@ -307,6 +307,10 @@ fn every_protocol_method_has_a_command() {
         ("import.list", &["import", "list"]),
         // Read by the CLI before it asks the ledger (ryuplm 2.B).
         ("number.local", &["number", "next"]),
+        // Sent by the commands that fetch or upload bytes (ryuplm 3.B).
+        ("document.locate", &["document", "upload"]),
+        ("document.move", &["document", "move"]),
+        ("document.sync", &["document", "sync"]),
         ("settings.show", &["settings", "show"]),
         ("settings.edit", &["settings", "edit"]),
         ("check", &["check"]),
@@ -378,6 +382,35 @@ fn git_install_registers_the_driver_locally() {
             .ends_with("git textconv"),
         "{cfg}"
     );
+}
+
+/// `errors` lists every code with its exit code, title and declared keys,
+/// from the build itself: no catalogue, the same both ways (design 698).
+#[test]
+fn errors_lists_every_code_and_its_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = |no_daemon: bool, args: &[&str]| {
+        let mut cmd = ryuplm(&dir.path().join("run"));
+        cmd.current_dir(dir.path()).args(args);
+        if no_daemon {
+            cmd.env("RYUPLM_NO_DAEMON", "1");
+        }
+        parse(cmd.output().unwrap(), dir.path())
+    };
+    let (code, v) = run(false, &["errors"]);
+    assert_eq!(run(true, &["errors"]), (code, v.clone()));
+    assert_eq!(code, 0, "{v}");
+    let codes = v["result"]["codes"].as_array().unwrap();
+    let item = codes
+        .iter()
+        .find(|c| c["code"] == "item_not_found")
+        .unwrap();
+    assert_eq!(
+        (&item["declared"], &item["keys"][0]["name"]),
+        (&json!(true), &json!("item"))
+    );
+    let (code, bad) = run(false, &["errors", "nope"]);
+    assert_eq!((code, &bad["error"]["code"]), (1, &json!("invalid_param")));
 }
 
 /// A ryucad project at `p/mech` in both catalogues of the pair: an

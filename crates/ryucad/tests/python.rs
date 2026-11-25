@@ -113,6 +113,8 @@ fn the_package_passes_its_tests_against_this_build() {
         .env("TMPDIR", scratch.path())
         .env("TEMP", scratch.path())
         .env("TMP", scratch.path())
+        // No repository above the scratch folder is found (#1004).
+        .env("GIT_CEILING_DIRECTORIES", scratch.path())
         .env_remove("RYUCAD_NO_DAEMON")
         .env_remove("RYUCAD_PARTICIPANT")
         .output()

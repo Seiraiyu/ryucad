@@ -542,13 +542,15 @@ fn documents_release_and_items_wait_for_theirs() {
     let made = ask(
         &root,
         Request::DocumentAdd {
-            file: spec.display().to_string(),
+            file: Some(spec.display().to_string()),
             number: None,
             next: Some(String::new()),
             fields: ryuplm::documents::New {
                 title: Some("Spec".into()),
                 ..Default::default()
             },
+            storage: None,
+            drive: None,
             expected_revision: None,
         },
     )
@@ -674,13 +676,15 @@ fn diff_lists_documents() {
     let spec = outside.path().join("spec.pdf");
     std::fs::write(&spec, b"%PDF one").unwrap();
     let add = |n: &str| Request::DocumentAdd {
-        file: spec.display().to_string(),
+        file: Some(spec.display().to_string()),
         number: Some(n.into()),
         next: None,
         fields: ryuplm::documents::New {
             title: Some("Spec".into()),
             ..Default::default()
         },
+        storage: None,
+        drive: None,
         expected_revision: None,
     };
     ask(&root, add("DOC-1")).unwrap();
