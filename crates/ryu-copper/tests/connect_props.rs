@@ -590,3 +590,32 @@ fn quiet_edits_match_a_rebuild() {
         );
     }
 }
+
+/// A layout edited into another by `apply_layout` is that layout built afresh,
+/// for seeded pairs of layouts sharing most keys (ryueda 7.E).
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release only: seeded layouts built twice")]
+fn apply_matches_a_rebuild() {
+    for seed in 0..32u64 {
+        let mut a = seeded(seed, 60, seed % 2 == 0);
+        add_holes(&mut a, seed, 6);
+        let mut b = a.clone();
+        let mut g = Lcg::new(seed ^ 0xa991);
+        let keys: Vec<u32> = b.items.keys().copied().collect();
+        for k in keys.iter().step_by(5) {
+            b.items.remove(k);
+        }
+        let donor = seeded(seed + 1000, 12, true);
+        for (i, (_, it)) in donor.items.into_iter().enumerate() {
+            b.items
+                .insert(10_000 + i as u32 + g.range(0, 3) as u32 * 100, it);
+        }
+        if let Some(k) = b.holes.keys().next().copied() {
+            b.holes.remove(&k);
+        }
+        let mut c = Copper::new(&a, BodyOptions::default());
+        let edits = c.apply_layout(&a, &b);
+        assert!(edits.items + edits.holes > 0);
+        same(&c, &b, &format!("seed {seed}"));
+    }
+}

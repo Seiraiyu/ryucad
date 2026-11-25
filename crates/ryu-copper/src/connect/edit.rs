@@ -445,6 +445,56 @@ impl<K: Ord + Hash + Clone + Send + Sync> Copper<K> {
     }
 }
 
+/// How many items and holes a [`Copper::apply_layout`] changed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Applied {
+    pub items: usize,
+    pub holes: usize,
+}
+
+impl<K: Ord + Hash + Clone + Send + Sync> Copper<K> {
+    /// Edits the copper built from `from` into the copper of `to`: holes
+    /// and items gone or changed removed, then holes and items new or
+    /// changed inserted, by key. Afterwards it equals `Copper::new(to)`.
+    /// The layers must be the same; when they aren't, build anew.
+    pub fn apply_layout(
+        &mut self,
+        from: &crate::layout::Layout<K>,
+        to: &crate::layout::Layout<K>,
+    ) -> Applied {
+        assert_eq!(
+            from.layers, to.layers,
+            "apply across different layers: build anew"
+        );
+        let mut n = Applied::default();
+        for (k, it) in &from.items {
+            if to.items.get(k) != Some(it) {
+                self.remove_item(k);
+                n.items += 1;
+            }
+        }
+        for (k, h) in &from.holes {
+            if to.holes.get(k) != Some(h) {
+                self.remove_hole(k);
+                n.holes += 1;
+            }
+        }
+        for (k, h) in &to.holes {
+            if from.holes.get(k) != Some(h) {
+                self.insert_hole(k.clone(), h.clone());
+                n.holes += usize::from(!from.holes.contains_key(k));
+            }
+        }
+        for (k, it) in &to.items {
+            if from.items.get(k) != Some(it) {
+                self.insert_item(k.clone(), it.clone());
+                n.items += usize::from(!from.items.contains_key(k));
+            }
+        }
+        n
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -64,6 +64,7 @@ use crate::measure::{self, Body, BodyOptions, Verdict};
 use crate::poly::{self, FlattenOptions, Polygons};
 use crate::tree::grown;
 pub use contact::PointContact;
+pub use edit::Applied;
 pub use gap::Gap;
 use graph::Graph;
 pub use holegap::HoleGap;
