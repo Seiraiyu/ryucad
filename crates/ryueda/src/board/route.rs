@@ -135,7 +135,10 @@ pub(crate) fn start(
     let b = find(session.project(), board)?;
     check_revision(&format!("board {}", b.id), &b.revision, expected)?;
     let id = b.id.clone();
-    let before = super::drc::now(session, &id);
+    let before = {
+        let _s = crate::profile::stage("before");
+        super::drc::now(session, &id)
+    };
     Ok((id, before))
 }
 
@@ -145,7 +148,10 @@ pub(crate) fn answer(session: &mut Session, id: &Id, made: Value, before: Before
     let mut v = made;
     v["board"] = json!(format!("board/{id}"));
     v["revision"] = json!(session.project().boards.get(id).map(|b| b.revision.clone()));
-    v["drc"] = super::drc::delta(session, id, before);
+    v["drc"] = {
+        let _s = crate::profile::stage("delta");
+        super::drc::delta(session, id, before)
+    };
     v
 }
 

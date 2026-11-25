@@ -203,6 +203,7 @@ impl Session {
             return Ok(c);
         }
         let shapes = self.board_shapes(board)?;
+        let _s = crate::profile::stage("check");
         let p = &self.project;
         let built = std::sync::Arc::new(crate::board::drc::check_shapes(
             p,
@@ -229,6 +230,7 @@ impl Session {
             self.boards.insert(0, hit);
             return Ok(shapes);
         }
+        let _s = crate::profile::stage("shapes");
         let built = std::sync::Arc::new(crate::board::shapes::build(p, b)?);
         self.boards.insert(0, (key, built.clone()));
         self.boards.truncate(BOARDS);

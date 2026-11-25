@@ -56,6 +56,7 @@ pub mod parts;
 pub mod pdf;
 pub mod pdm;
 pub mod pin;
+pub mod profile;
 pub mod project;
 pub mod props;
 pub mod proto;

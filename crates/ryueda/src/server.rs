@@ -218,7 +218,10 @@ pub fn answer(
     job: &ryu_session::job::Job,
 ) -> Result<Answer> {
     let refreshing = std::time::Instant::now();
-    let external = session.refresh_changes()?;
+    let external = {
+        let _s = crate::profile::stage("refresh");
+        session.refresh_changes()?
+    };
     // The freshness scan apart from the request's own work, in the
     // daemon's timings (#981: `daemon status --timings`).
     if let Some(l) = live.as_deref_mut() {
@@ -247,7 +250,10 @@ pub fn answer(
     let writes = req.mutates();
     let logs_itself = matches!(req, Request::Undo { .. } | Request::Redo { .. });
     let files_before = match (&live, req.mutates() && !logs_itself) {
-        (Some(_), true) => Some(session.files()),
+        (Some(_), true) => {
+            let _s = crate::profile::stage("files_before");
+            Some(session.files())
+        }
         _ => None,
     };
     // An import into a library project writes that project's library:
@@ -268,10 +274,14 @@ pub fn answer(
                 .map_err(|e| e.with("commit", &commit)),
             Err(e) => Err(e),
         },
-        None => working(session, live.as_deref_mut(), me, req, job),
+        None => {
+            let _s = crate::profile::stage("dispatch");
+            working(session, live.as_deref_mut(), me, req, job)
+        }
     };
     if let (Some(l), Some(files_before), true) = (live.as_deref_mut(), files_before, result.is_ok())
     {
+        let _s = crate::profile::stage("record");
         // Only this project's own files: an alias's library project comes
         // into view when it is named, and undoing that must never delete
         // it. Only an import into a library project writes another
@@ -293,6 +303,7 @@ pub fn answer(
         if writes {
             l.prune(|r| crate::refs::resolve(session.project(), r).is_ok());
         }
+        let _s = crate::profile::stage("publish");
         l.announce(&before);
         publish(l, session);
         publish_merge(l, session);
