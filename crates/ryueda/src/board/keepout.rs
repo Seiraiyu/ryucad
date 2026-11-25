@@ -189,6 +189,13 @@ pub fn check(s: &BoardShapes, board: &str) -> Vec<Finding> {
                 meet(p.reference.clone(), &p.copper);
             }
         }
+        if keeps(k, Keep::Pours) {
+            for f in s.pours.iter().filter(|f| on(f.layer)) {
+                for r in &f.regions {
+                    meet(format!("{board}:pour/{}", f.id), r);
+                }
+            }
+        }
         if keeps(k, Keep::Holes) {
             for h in s.holes.iter().filter(|h| (h.span.0..=h.span.1).any(on)) {
                 if let super::shapes::HoleOf::Pad { occ, .. } = &h.of
@@ -305,6 +312,38 @@ mod tests {
                 Op::Line { to: [0, 0] },
             ],
         }
+    }
+
+    #[test]
+    fn a_fill_inside_a_keepout_keeping_pours_is_a_finding() {
+        use crate::board::pour::PourInfo;
+        let mut s = board(20 * MM, 10 * MM);
+        let pr = crate::board::rules::Rules::from_parts(
+            std::sync::Arc::new(crate::board::preset::JLC_2L),
+            None,
+            Default::default(),
+        )
+        .pour(&crate::board::pour::Pour::whole(
+            "gnd",
+            crate::board::file::CopperLayer::Top,
+        ));
+        s.pours.push(PourInfo {
+            id: crate::id::Id::parse("p1", "pour").unwrap(),
+            net: "gnd".into(),
+            layer: 0,
+            rules: pr,
+            polygons: Default::default(),
+            regions: vec![rect(ryu_board::geom::Point::new(10 * MM, 5 * MM), MM, MM)],
+            islands_removed: 0,
+            uncertain: vec![],
+            thermals: vec![],
+        });
+        s.keepouts.push(ko(vec![Keep::Pours], vec![0], None));
+        let f = check(&s, "b");
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(f[0].refs.contains(&"b:pour/p1".to_owned()));
+        s.keepouts[0].keeps = vec![Keep::Vias];
+        assert!(check(&s, "b").is_empty());
     }
 
     #[test]

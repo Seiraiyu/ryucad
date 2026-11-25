@@ -171,6 +171,7 @@ pub fn render(board: &str, s: &BoardShapes, ask: &Ask) -> Result<(Value, &'stati
     }
     if let Some(n) = ask.net
         && !s.pads.iter().any(|p| p.net.as_deref() == Some(n))
+        && !s.pours.iter().any(|f| f.net == n && !f.regions.is_empty())
     {
         return Err(
             Error::new(Code::NotFound, format!("no placed pad is on net {n}")).with("net", n),
@@ -187,6 +188,12 @@ pub fn render(board: &str, s: &BoardShapes, ask: &Ask) -> Result<(Value, &'stati
             .filter(|p| ask.net.is_some() && p.net.as_deref() == ask.net)
             .filter(|p| index.is_some_and(|i| p.on(i, n)))
             .map(|p| &p.copper)
+            .chain(
+                s.pours
+                    .iter()
+                    .filter(|f| ask.net == Some(f.net.as_str()) && index == Some(f.layer))
+                    .flat_map(|f| f.regions.iter()),
+            )
             .collect()
     };
     let mut scene_layers = Vec::new();
@@ -301,6 +308,51 @@ mod tests {
         assert_eq!(e.code, Code::InvalidParam);
         assert!(e.message.contains("copper.in2"), "{}", e.message);
         assert_eq!(layers(2), LAYERS.map(str::to_owned).to_vec());
+    }
+
+    #[test]
+    fn a_nets_highlight_holds_its_fill() {
+        use crate::board::testing::{MM, board};
+        let mut s = board(20 * MM, 10 * MM);
+        s.smd("r1", "1", (5 * MM, 5 * MM), (MM, MM), Some("gnd"))
+            .smd("r1", "2", (15 * MM, 5 * MM), (MM, MM), Some("sig"));
+        let pours = vec![(
+            crate::id::Id::parse("p1", "pour").unwrap(),
+            crate::board::pour::Pour::whole("gnd", crate::board::file::CopperLayer::Top),
+        )];
+        let rules = crate::board::rules::Rules::from_parts(
+            std::sync::Arc::new(crate::board::preset::JLC_2L),
+            None,
+            Default::default(),
+        );
+        let layers = vec!["copper.top".to_owned()];
+        let draw = |s: &BoardShapes, net: &str| {
+            let (_, _, svg) = render(
+                "b",
+                s,
+                &Ask {
+                    layers: &layers,
+                    bottom: false,
+                    net: Some(net),
+                    window: None,
+                    size: 200,
+                    svg: true,
+                },
+            )
+            .unwrap();
+            String::from_utf8(svg).unwrap()
+        };
+        let bare = draw(&s, "gnd");
+        s.pours = crate::board::pour::fill_all(&pours, &s, &rules, &crate::board::preset::JLC_2L);
+        let filled = draw(&s, "gnd");
+        assert!(
+            filled.matches("<path").count() > bare.matches("<path").count(),
+            "the fill is highlighted"
+        );
+        // A net only a fill carries is still a net to highlight.
+        s.pads.retain(|p| p.net.as_deref() != Some("gnd"));
+        s.pours[0].net = "gnd".into();
+        assert!(draw(&s, "gnd").contains("<path"));
     }
 
     #[test]

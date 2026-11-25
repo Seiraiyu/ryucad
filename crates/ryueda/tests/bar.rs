@@ -862,6 +862,55 @@ fn a_generated_board_checks_and_answers_a_write_within_its_bars() {
     ryueda(&["daemon", "stop"]);
 }
 
+/// Design 924's plane bar: the bars' generated board with a whole `top`
+/// plane of its first chain's net round every other net's pads and
+/// tracks, filled from shapes already built (the fill step alone timed)
+/// in 500 ms. It misses it (ryueda 7.D: 11.6 s on cox-worker-2, a
+/// shared Ryzen 7 9700X at load 9, four threads; the plane-sized
+/// booleans, a difference, the opening's grow and the join, take about
+/// 3.7, 3.7 and 2.2 s; #1067), so it is ignored until the booleans are
+/// faster: run it with `--ignored`. The plan said `bottom`, but the board
+/// has no copper there and no vias, so a bottom plane is one island its
+/// net never reaches.
+#[test]
+#[ignore = "misses design 924's 500 ms (about 12 s, #1067): run with --ignored"]
+fn a_plane_fills_within_its_bar() {
+    let dir = tempfile::tempdir().unwrap();
+    let board = dir.path().join("board");
+    std::fs::create_dir_all(&board).unwrap();
+    board_gen::write(&board, &board_gen::Spec::bar());
+    let id = ryueda::id::Id::parse("main", "board").unwrap();
+    let p = ryueda::project::Project::load(&board).unwrap();
+    let b = &p.boards[&id];
+    let s = ryueda::board::shapes::build(&p, b).unwrap();
+    let net = s
+        .tracks
+        .iter()
+        .min_by(|x, y| x.id.cmp(&y.id))
+        .unwrap()
+        .net
+        .clone();
+    let rules = ryueda::board::rules::of(&p, b).unwrap();
+    let file = b.board.item.as_ref().unwrap();
+    let preset = ryueda::board::preset::resolve(&p, &file.preset).unwrap();
+    let pours = vec![(
+        ryueda::id::Id::parse("gnd", "pour").unwrap(),
+        ryueda::board::pour::Pour::whole(&net, ryueda::board::file::CopperLayer::Top),
+    )];
+    let t = Instant::now();
+    let f = ryueda::board::pour::fill_all(&pours, &s, &rules, &preset);
+    let took = t.elapsed();
+    println!(
+        "a top plane among {} pads and {} tracks: {} regions, {} thermals, filled in {took:?}",
+        s.pads.len(),
+        s.tracks.len(),
+        f[0].regions.len(),
+        f[0].thermals.len()
+    );
+    assert!(!f[0].regions.is_empty());
+    assert!(took < bar(Duration::from_millis(500)), "{took:?}");
+}
+
 /// Design 732's bar: a track write on the breakout as agent round 5.D
 /// routed it, through a warm daemon, with its DRC delta, in 50 ms.
 #[test]

@@ -2,12 +2,15 @@
 //! `tests/golden/copper.txt` holds the hashes of seeded pieces' exact
 //! comparisons and distances, seeded shapes' distances and containment,
 //! an index's pairs and nearest items, booleans, offsets, flattening and
-//! merged layers, and a seeded layout's islands, uncertain contacts,
-//! netlist compare, gaps under 0.4 mm and point contacts, the index,
+//! merged layers, eight seeded fills, and a seeded layout's islands,
+//! uncertain contacts, netlist compare, gaps under 0.4 mm and point
+//! contacts, the index,
 //! layers and connectivity built on one thread and on eight. After a
 //! deliberate change, regenerate with `UPDATE_GOLDEN=1 cargo test -p
 //! ryu-copper --test determinism` and review the diff like any other
 //! change.
+
+mod seeded_fill;
 
 use std::cmp::Ordering;
 
@@ -470,6 +473,24 @@ fn connect_sections(golden: &mut Golden, threads: usize) {
     }
 }
 
+/// Eight seeded fill asks (spokes included): the polygons, islands
+/// removed, uncertain contacts and spokes kept.
+fn fill_sections(golden: &mut Golden) {
+    for seed in 0..8 {
+        let f = ryu_copper::fill::fill(&seeded_fill::seeded(seed).ask);
+        let mut s = golden.section(&format!("fill.{seed}"));
+        polygons(&mut s, &f.polygons);
+        s.i64(f.islands_removed as i64);
+        for k in &f.uncertain {
+            s.i64(*k as i64);
+        }
+        s.str("|");
+        for n in &f.spokes {
+            s.i64(i64::from(*n));
+        }
+    }
+}
+
 #[test]
 fn measurement_is_bit_exact() {
     let mut golden = Golden::new(concat!(
@@ -522,6 +543,7 @@ fn measurement_is_bit_exact() {
     layer_sections(&mut golden, 8);
     connect_sections(&mut golden, 1);
     connect_sections(&mut golden, 8);
+    fill_sections(&mut golden);
     let sections = golden.sections_for_test();
     assert_eq!(
         sections["poly.layers.1"], sections["poly.layers.8"],

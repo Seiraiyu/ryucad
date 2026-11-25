@@ -57,7 +57,7 @@ fn layer_of(v: Option<&Value>, n: usize) -> Result<CopperLayer> {
 }
 
 /// A copper layer the board has, by name.
-fn named_layer(text: &str, n: usize, param: &str) -> Result<CopperLayer> {
+pub(crate) fn named_layer(text: &str, n: usize, param: &str) -> Result<CopperLayer> {
     let list = super::load::layer_list(n);
     let layer = CopperLayer::parse(text)
         .ok_or_else(|| invalid(format!("--{param} is one of {list}, not {text}"), param))?;
@@ -72,7 +72,7 @@ fn named_layer(text: &str, n: usize, param: &str) -> Result<CopperLayer> {
 }
 
 /// A length that must be positive.
-fn positive(v: &Value, unit: Unit, param: &str) -> Result<i64> {
+pub(crate) fn positive(v: &Value, unit: Unit, param: &str) -> Result<i64> {
     let n = coord::nm(v, unit)?;
     if n <= 0 {
         return Err(invalid(format!("--{param} is a positive length"), param));
@@ -288,6 +288,7 @@ pub(crate) fn delete(
             VIAS => b.vias.contains_key(&rid),
             KEEPOUTS => b.keepouts.contains_key(&rid),
             DRAWINGS => b.drawings.contains_key(&rid),
+            super::file::POURS => b.pours.contains_key(&rid),
             _ => b.holes.contains_key(&rid),
         };
         if !held {

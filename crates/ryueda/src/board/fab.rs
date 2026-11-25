@@ -92,6 +92,16 @@ fn copper(board: &str, s: &BoardShapes, l: usize) -> Vec<Item> {
             ..Item::default()
         });
     }
+    for f in s.pours.iter().filter(|f| f.layer == l) {
+        for r in &f.regions {
+            out.push(Item {
+                shape: r.clone(),
+                function: Some("Conductor".into()),
+                net: Some(f.net.clone()),
+                ..Item::default()
+            });
+        }
+    }
     out
 }
 
@@ -409,6 +419,50 @@ mod tests {
             ryu_gerber::gerber::write(&f.layer, &sw)
                 .unwrap_or_else(|e| panic!("{}: {e}", f.function));
         }
+    }
+
+    #[test]
+    fn a_pours_fill_is_conductor_regions_of_its_net_without_holes() {
+        let (_d, p0, id) = placed_with(&[]);
+        let net = crate::board::shapes::tests::a_net(&p0);
+        let pour = crate::board::pour::Pour::whole(&net, CopperLayer::Top);
+        let text = crate::doc::to_string(&pour, crate::board::file::POUR_KIND, 1);
+        let (_d, p, _) = placed_with(&[("boards/b/pours/p1.json".into(), text)]);
+        let s = build(&p, &p.boards[&id]).unwrap();
+        assert!(
+            s.pours[0].regions.iter().any(|r| r
+                .parts
+                .iter()
+                .any(|x| matches!(&x.piece, Piece::Region(r) if !r.holes.is_empty()))),
+            "the plane has holes round other nets' pads"
+        );
+        let files = layers("b", &s).unwrap();
+        let top = &files[0].layer;
+        let fills: Vec<&Item> = top
+            .items
+            .iter()
+            .filter(|i| {
+                i.function.as_deref() == Some("Conductor") && i.net.as_deref() == Some(net.as_str())
+            })
+            .collect();
+        assert!(!fills.is_empty());
+        for i in &top.items {
+            assert!(
+                i.shape
+                    .parts
+                    .iter()
+                    .all(|x| !matches!(&x.piece, Piece::Region(r) if !r.holes.is_empty()))
+            );
+        }
+        let sw = ryu_gerber::Software {
+            vendor: "v".into(),
+            application: "a".into(),
+            version: "0".into(),
+        };
+        let g = ryu_gerber::gerber::write(top, &sw).unwrap();
+        assert!(g.contains("G36*"));
+        assert!(g.contains(&format!("%TO.N,{net}*%")));
+        assert!(g.contains("%TA.AperFunction,Conductor*%"));
     }
 
     #[test]

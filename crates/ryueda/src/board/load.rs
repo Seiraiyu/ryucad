@@ -31,6 +31,8 @@ pub struct BoardFiles {
     pub keepouts: BTreeMap<Id, Loaded<super::keepout::Keepout>>,
     /// By ID (ryueda 7.C).
     pub drawings: BTreeMap<Id, Loaded<super::drawing::Graphic>>,
+    /// By ID (ryueda 7.D).
+    pub pours: BTreeMap<Id, Loaded<super::pour::Pour>>,
 }
 
 fn unknown(path: &str) -> Fault {
@@ -92,6 +94,7 @@ fn load_one(
     let mut rules = None;
     let mut keepouts = BTreeMap::new();
     let mut drawings = BTreeMap::new();
+    let mut pours = BTreeMap::new();
     let mut any = false;
     for (name, kind) in src.list(dir)? {
         let path = join(dir, &name);
@@ -199,6 +202,19 @@ fn load_one(
                     |_| Vec::new(),
                 )?;
             }
+            (POURS, Kind::Dir) => {
+                any |= routes(
+                    src,
+                    &path,
+                    POURS,
+                    POUR_KIND,
+                    "pour",
+                    &mut h,
+                    faults,
+                    &mut pours,
+                    |_| Vec::new(),
+                )?;
+            }
             (RULES_FILE, Kind::File) => {
                 any = true;
                 let bytes = read(src, &path)?;
@@ -236,6 +252,16 @@ fn load_one(
                 let path = route_path(&id, KEEPOUTS, kid);
                 k.faults.extend(
                     super::keepout::judge(ko, n)
+                        .into_iter()
+                        .map(|f| f.with("path", &path)),
+                );
+            }
+        }
+        for (pid, p) in pours.iter_mut() {
+            if let Ok(pour) = &p.item {
+                let path = route_path(&id, POURS, pid);
+                p.faults.extend(
+                    super::pour::judge(pour, n)
                         .into_iter()
                         .map(|f| f.with("path", &path)),
                 );
@@ -290,6 +316,7 @@ fn load_one(
         rules,
         keepouts,
         drawings,
+        pours,
     }))
 }
 
@@ -322,7 +349,7 @@ fn routes<T: serde::de::DeserializeOwned>(
         piece(h, join(folder, &file).as_bytes());
         piece(h, &bytes);
         // Holes have no format 2.
-        let newest = if [HOLE_KIND, KEEPOUT_KIND, DRAWING_KIND].contains(&kind) {
+        let newest = if [HOLE_KIND, KEEPOUT_KIND, DRAWING_KIND, POUR_KIND].contains(&kind) {
             FORMAT
         } else {
             NEWEST
@@ -506,6 +533,9 @@ impl BoardFiles {
         }
         for d in self.drawings.values() {
             one(d.item.as_ref().err(), &d.faults);
+        }
+        for p in self.pours.values() {
+            one(p.item.as_ref().err(), &p.faults);
         }
         out
     }

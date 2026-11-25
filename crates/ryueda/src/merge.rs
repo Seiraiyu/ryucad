@@ -91,6 +91,11 @@ fn keepout_atom(at: &str) -> bool {
     matches!(segs(at).as_slice(), ["contour"])
 }
 
+/// A pour's contour, cutouts and thermal are each one value.
+fn pour_atom(at: &str) -> bool {
+    matches!(segs(at).as_slice(), ["contour"] | ["cutouts"] | ["thermal"])
+}
+
 fn libcomp_atom(at: &str) -> bool {
     matches!(
         segs(at).as_slice(),
@@ -117,6 +122,7 @@ fn atoms(kind: &str) -> fn(&str) -> bool {
         crate::board::RULES_KIND => rules_atom,
         crate::board::PLACEMENT_KIND => placement_atom,
         crate::board::file::KEEPOUT_KIND => keepout_atom,
+        crate::board::file::POUR_KIND => pour_atom,
         crate::project::LOCK_KIND => ryupdm::git::lock_atom,
         _ => no_atom,
     }
@@ -384,7 +390,8 @@ pub fn newest(kind: &str) -> Option<u64> {
         | crate::board::VIA_KIND => crate::board::file::NEWEST,
         crate::board::HOLE_KIND
         | crate::board::file::KEEPOUT_KIND
-        | crate::board::file::DRAWING_KIND => crate::board::FORMAT,
+        | crate::board::file::DRAWING_KIND
+        | crate::board::file::POUR_KIND => crate::board::FORMAT,
         crate::board::preset::KIND => crate::board::preset::FORMAT,
         crate::board::RULES_KIND => crate::board::rules::FORMAT,
         _ => return None,

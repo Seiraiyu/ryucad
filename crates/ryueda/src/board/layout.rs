@@ -14,12 +14,24 @@ use std::collections::BTreeMap;
 /// collide.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Key {
-    Pad { occ: String, pad: String, layer: u8 },
+    Pad {
+        occ: String,
+        pad: String,
+        layer: u8,
+    },
     Track(String),
     Via(String, u8),
-    PadDrill { occ: String, pad: String },
+    PadDrill {
+        occ: String,
+        pad: String,
+    },
     ViaDrill(String),
     Hole(String),
+    /// A pour's `n`th filled region.
+    Pour {
+        id: String,
+        n: u32,
+    },
 }
 
 /// A board's layout and the names its keys print by.
@@ -49,6 +61,7 @@ impl Built {
             Key::Track(id) => format!("{b}:track/{id}"),
             Key::Via(id, _) | Key::ViaDrill(id) => format!("{b}:via/{id}"),
             Key::Hole(id) => format!("{b}:hole/{id}"),
+            Key::Pour { id, .. } => format!("{b}:pour/{id}"),
         }
     }
 
@@ -131,6 +144,21 @@ pub fn build(board: &str, s: &BoardShapes) -> Built {
                     layer: usize::from(layer),
                     shape: v.shape.clone(),
                     net: Some(v.net.clone()),
+                },
+            );
+        }
+    }
+    for f in &s.pours {
+        for (k, r) in f.regions.iter().enumerate() {
+            layout.items.insert(
+                Key::Pour {
+                    id: f.id.to_string(),
+                    n: k as u32,
+                },
+                Item {
+                    layer: f.layer,
+                    shape: r.clone(),
+                    net: Some(f.net.clone()),
                 },
             );
         }
