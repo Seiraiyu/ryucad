@@ -895,3 +895,59 @@ fn pours_round_trip() {
         }
     }
 }
+
+/// Seeded sequences of edits (tracks added, moved and removed; parts
+/// moved and turned; vias added and removed; a pour added and edited;
+/// undone by putting files back) carry one `Live` that, after every step,
+/// says what a check built from the files says (design 924's invariant).
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release only: seeded edit sequences")]
+fn live_equals_a_rebuild_after_every_edit() {
+    use ryueda::board::live::{Live, Update, said};
+    let mut how = std::collections::BTreeMap::new();
+    let id = ryueda::id::Id::parse("main", "board").unwrap();
+    for seed in 0..16u64 {
+        let spec = board_gen::seeded_multilayer(seed);
+        let d = tempfile::tempdir().unwrap();
+        board_gen::write(d.path(), &spec);
+        let mut files = board_gen::files(d.path());
+        let load = |f: &std::collections::BTreeMap<String, Vec<u8>>| {
+            ryueda::project::Project::load_from(
+                d.path(),
+                f,
+                &Default::default(),
+                &ryueda::pin::NoPins,
+            )
+            .unwrap()
+        };
+        let p = load(&files);
+        let mut live = Live::build(&p, &p.boards[&id]).unwrap();
+        let mut history = vec![files.clone()];
+        let mut r = seed;
+        for step in 0..12 {
+            match board_gen::next(&mut r) % 8 {
+                7 if history.len() > 1 => {
+                    history.pop();
+                    files = history.last().unwrap().clone();
+                }
+                k => {
+                    board_gen::edit(&mut files, &spec, k.min(6), &mut r);
+                    history.push(files.clone());
+                }
+            }
+            let p = load(&files);
+            let b = &p.boards[&id];
+            *how.entry(format!("{:?}", live.update(&p, b).unwrap()))
+                .or_insert(0) += 1;
+            let fresh = ryueda::board::drc::check(&p, b).unwrap();
+            assert_eq!(said(live.check()), said(&fresh), "seed {seed} step {step}");
+        }
+    }
+    // The property is of the edit path: most steps must take it.
+    let edited = how
+        .get(&format!("{:?}", Update::Edited))
+        .copied()
+        .unwrap_or(0);
+    println!("updates: {how:?}");
+    assert!(edited * 2 > 16 * 12, "{how:?}");
+}

@@ -455,3 +455,154 @@ pub fn age(dir: &Path) {
         }
     }
 }
+
+/// Every file under `dir`, relative with `/` (ryueda 7.E's edit
+/// sequences work on these, in memory).
+pub fn files(dir: &Path) -> BTreeMap<String, Vec<u8>> {
+    let mut out = BTreeMap::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap().flatten() {
+            let path = e.path();
+            if path.is_dir() {
+                if e.file_name() != ".git" {
+                    stack.push(path);
+                }
+            } else {
+                let rel = path
+                    .strip_prefix(dir)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                out.insert(rel, std::fs::read(&path).unwrap());
+            }
+        }
+    }
+    out
+}
+
+fn put_in(files: &mut BTreeMap<String, Vec<u8>>, rel: &str, kind: &str, mut v: Value) {
+    v["format"] = json!(ryueda::conn::format_of(kind, &v));
+    v["kind"] = json!(kind);
+    files.insert(
+        rel.to_owned(),
+        ryueda::canonical::to_string(&v).into_bytes(),
+    );
+}
+
+fn json_of(files: &BTreeMap<String, Vec<u8>>, rel: &str) -> Value {
+    serde_json::from_slice(&files[rel]).unwrap()
+}
+
+/// The files of `folder` under `boards/main/`, by path.
+fn under(files: &BTreeMap<String, Vec<u8>>, folder: &str) -> Vec<String> {
+    let prefix = format!("boards/main/{folder}/");
+    files
+        .keys()
+        .filter(|k| k.starts_with(&prefix))
+        .cloned()
+        .collect()
+}
+
+/// One seeded edit of a generated board's files (ryueda 7.E): `kind`
+/// picks a track added (0), moved (1) or removed (2), a part moved (3) or
+/// turned (4), a via added or removed (5), or a pour added or its least
+/// width changed (6). Nothing to edit leaves the files as they are.
+pub fn edit(files: &mut BTreeMap<String, Vec<u8>>, s: &Spec, kind: u64, r: &mut u64) {
+    let pick = |v: &[String], r: &mut u64| -> Option<String> {
+        (!v.is_empty()).then(|| v[(next(r) % v.len() as u64) as usize].clone())
+    };
+    let shift = |r: &mut u64, by: i64| (next(r) as i64).rem_euclid(2 * by + 1) - by;
+    let tracks = under(files, "tracks");
+    match kind {
+        0 => {
+            let Some(t) = pick(&tracks, r) else { return };
+            let mut v = json_of(files, &t);
+            let (dx, dy) = (shift(r, MM), shift(r, MM));
+            for p in v["points"].as_array_mut().unwrap() {
+                p[0] = json!(p[0].as_i64().unwrap() + dx);
+                p[1] = json!(p[1].as_i64().unwrap() + dy);
+            }
+            v.as_object_mut().unwrap().remove("format");
+            v.as_object_mut().unwrap().remove("kind");
+            let id = format!("e{}", next(r) % 100_000);
+            put_in(
+                files,
+                &format!("boards/main/tracks/{id}.json"),
+                "ryueda.track",
+                v,
+            );
+        }
+        1 => {
+            let Some(t) = pick(&tracks, r) else { return };
+            let mut v = json_of(files, &t);
+            let k = (next(r) % 2) as usize;
+            let p = &mut v["points"][k];
+            p[0] = json!(p[0].as_i64().unwrap() + shift(r, MM));
+            p[1] = json!(p[1].as_i64().unwrap() + shift(r, MM));
+            v.as_object_mut().unwrap().remove("format");
+            v.as_object_mut().unwrap().remove("kind");
+            put_in(files, &t, "ryueda.track", v);
+        }
+        2 => {
+            if let Some(t) = pick(&tracks, r) {
+                files.remove(&t);
+            }
+        }
+        3 | 4 => {
+            let Some(pl) = pick(&under(files, "placements"), r) else {
+                return;
+            };
+            let mut v = json_of(files, &pl);
+            if kind == 3 {
+                v["at"][0] = json!(v["at"][0].as_i64().unwrap() + shift(r, 2 * MM));
+                v["at"][1] = json!(v["at"][1].as_i64().unwrap() + shift(r, 2 * MM));
+            } else {
+                v["rotation_mdeg"] =
+                    json!((v["rotation_mdeg"].as_i64().unwrap_or(0) + 90_000) % 360_000);
+            }
+            v.as_object_mut().unwrap().remove("format");
+            v.as_object_mut().unwrap().remove("kind");
+            put_in(files, &pl, "ryueda.placement", v);
+        }
+        5 => {
+            let vias = under(files, "vias");
+            if next(r) % 2 == 0 {
+                if let Some(v) = pick(&vias, r) {
+                    files.remove(&v);
+                    return;
+                }
+            }
+            let Some(t) = pick(&tracks, r) else { return };
+            let tv = json_of(files, &t);
+            let at = &tv["points"][0];
+            let id = format!("e{}", next(r) % 100_000);
+            put_in(
+                files,
+                &format!("boards/main/vias/{id}.json"),
+                "ryueda.via",
+                json!({"net": tv["net"], "at": [at[0], at[1]], "drill_nm": s.via.0, "diameter_nm": s.via.1}),
+            );
+        }
+        _ => {
+            let pours = under(files, "pours");
+            if let Some(p) = pours.first() {
+                let mut v = json_of(files, p);
+                v["min_width_nm"] = json!(100_000 + (next(r) % 5) as i64 * 50_000);
+                v.as_object_mut().unwrap().remove("format");
+                v.as_object_mut().unwrap().remove("kind");
+                put_in(files, p, "ryueda.pour", v);
+                return;
+            }
+            let Some(t) = pick(&tracks, r) else { return };
+            let tv = json_of(files, &t);
+            let layer = ["top", "bottom"][(next(r) % 2) as usize];
+            put_in(
+                files,
+                "boards/main/pours/p0.json",
+                "ryueda.pour",
+                json!({"net": tv["net"], "layer": layer, "whole": true}),
+            );
+        }
+    }
+}
