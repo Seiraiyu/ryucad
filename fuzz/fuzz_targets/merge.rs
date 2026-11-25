@@ -1344,8 +1344,8 @@ fn edit_annotation(v: &mut Value, op: u8, arg: u8) {
 }
 
 /// Edits a delete_blend or a resize_blend: its faces, its below, its
-/// tolerance; a resize's first group's size (a radius, or a chamfer's
-/// form), or its groups whole (one or two).
+/// tolerance, a delete's partial; a resize's first group's size (a radius,
+/// or a chamfer's form), or its groups whole (one or two).
 fn edit_blends(v: &mut Value, op: u8, arg: u8) {
     let face = |a: u8| json!({"feature": "b", "name": format!("{:032x}", a % 5)});
     let o = v.as_object_mut().unwrap();
@@ -1388,6 +1388,12 @@ fn edit_blends(v: &mut Value, op: u8, arg: u8) {
                 o.insert("tolerance".into(), json!("0.05 mm"));
             }
         },
+        // A delete's partial (plan 23.D), set or taken away.
+        3 if !resize => {
+            if o.remove("partial").is_none() {
+                o.insert("partial".into(), json!(true));
+            }
+        }
         3 if resize => {
             let g = if arg % 2 == 0 {
                 json!({"radius": format!("{} mm", 1 + arg % 5), "faces": [face(arg)]})
