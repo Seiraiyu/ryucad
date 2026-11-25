@@ -290,15 +290,44 @@ fn field_with(f: Option<&Field>, over: Option<&super::file::FieldPlace>) -> Opti
     Some(out)
 }
 
+/// A board object (ryueda 7.E): what one file, or one placed occurrence,
+/// adds to the board's shapes.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Obj {
+    /// By occurrence reference (`s1/u1`).
+    Placement(String),
+    Track(crate::id::Id),
+    Via(crate::id::Id),
+    Hole(crate::id::Id),
+    Keepout(crate::id::Id),
+    Drawing(crate::id::Id),
+}
+
+/// What one object adds, in the order [`build`] adds it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ObjShapes {
+    pub layers: Vec<(String, String, Shape)>,
+    pub holes: Vec<HoleInfo>,
+    pub pads: Vec<PadInfo>,
+    pub tracks: Vec<TrackInfo>,
+    pub vias: Vec<ViaInfo>,
+    pub courtyards: Vec<CourtyardInfo>,
+    pub keepouts: Vec<KeepoutInfo>,
+    pub notices: Vec<Fault>,
+}
+
 /// What one placement adds.
-#[derive(Default)]
-struct One {
-    layers: Vec<(String, String, Shape)>,
-    holes: Vec<HoleInfo>,
-    pads: Vec<PadInfo>,
-    courtyards: Vec<CourtyardInfo>,
-    keepouts: Vec<KeepoutInfo>,
-    notices: Vec<Fault>,
+type One = ObjShapes;
+
+/// A board's objects' shapes (ryueda 7.E): each with the hash of what it
+/// was built from, and the objects in [`build`]'s order.
+#[derive(Clone, Debug, Default)]
+pub struct Pieces {
+    /// What every piece depends on: the board file, its preset and its
+    /// copper count. A different `base` reuses nothing.
+    pub base: [u8; 32],
+    pub order: Vec<Obj>,
+    pub by: BTreeMap<Obj, ([u8; 32], std::sync::Arc<ObjShapes>)>,
 }
 
 fn unsupported(o: &Occ, why: &str) -> Fault {
@@ -540,6 +569,15 @@ fn note_missing(notices: &mut Vec<Fault>, o: &Occ, s: &Shape) {
 /// The board's shapes. A design that doesn't flatten refuses with its
 /// faults; a board file that doesn't read refuses with its error.
 pub fn build(p: &Project, b: &BoardFiles) -> Result<BoardShapes> {
+    assemble(p, b, &pieces(p, b, None)?, &[])
+}
+
+/// The board file, its preset and its copper count: what every piece is
+/// built against.
+fn base_of<'a>(
+    p: &Project,
+    b: &'a BoardFiles,
+) -> Result<(&'a Board, std::sync::Arc<preset::Preset>, usize)> {
     let file = b.board.item.as_ref().map_err(Clone::clone)?;
     let preset = preset::resolve(p, &file.preset).ok_or_else(|| {
         Error::new(
@@ -547,9 +585,23 @@ pub fn build(p: &Project, b: &BoardFiles) -> Result<BoardShapes> {
             format!("preset {} isn't known", file.preset),
         )
     })?;
+    let n = super::stackup::copper_count(file);
+    Ok((file, preset, n))
+}
+
+/// A file is left out of the shapes when it has an error fault (`check`
+/// reports them).
+fn fine(faults: &[Fault]) -> bool {
+    faults.iter().all(|f| !f.is_error())
+}
+
+/// Each object's shapes, in [`build`]'s order. Objects whose inputs hash
+/// as they did in `prev` keep `prev`'s pieces (Task 4 of ryueda 7.E).
+pub fn pieces(p: &Project, b: &BoardFiles, prev: Option<&Pieces>) -> Result<Pieces> {
+    let _ = prev;
+    let (file, preset, n) = base_of(p, b)?;
     let (_, occs) = occ::occurrences(p, &file.design)?;
     let board = b.id.to_string();
-    let n = super::stackup::copper_count(file);
     let placed: Vec<(&Occ, Place, &super::file::PartFields)> = occs
         .iter()
         .filter_map(|o| {
@@ -566,7 +618,11 @@ pub fn build(p: &Project, b: &BoardFiles) -> Result<BoardShapes> {
             ))
         })
         .collect();
-    let mut notices = Vec::new();
+    let mut out = Pieces::default();
+    let put = |out: &mut Pieces, k: Obj, piece: ObjShapes| {
+        out.order.push(k.clone());
+        out.by.insert(k, ([0; 32], std::sync::Arc::new(piece)));
+    };
     let parts: Vec<One> = placed
         .par_iter()
         .map(
@@ -587,23 +643,9 @@ pub fn build(p: &Project, b: &BoardFiles) -> Result<BoardShapes> {
             },
         )
         .collect();
-    let mut out = BoardShapes {
-        copper_layers: n,
-        ..BoardShapes::default()
-    };
-    for one in parts {
-        for (layer, owner, s) in one.layers {
-            out.layers.entry(layer).or_default().push((owner, s));
-        }
-        out.holes.extend(one.holes);
-        out.pads.extend(one.pads);
-        out.courtyards.extend(one.courtyards);
-        out.keepouts.extend(one.keepouts);
-        notices.extend(one.notices);
+    for ((o, _, _), one) in placed.iter().zip(parts) {
+        put(&mut out, Obj::Placement(o.reference.clone()), one);
     }
-    // The routes; files with an error fault are left out (`check`
-    // reports them).
-    let fine = |faults: &[Fault]| faults.iter().all(|f| !f.is_error());
     for (tid, t) in &b.tracks {
         let (Ok(track), true) = (&t.item, fine(&t.faults)) else {
             continue;
@@ -612,17 +654,22 @@ pub fn build(p: &Project, b: &BoardFiles) -> Result<BoardShapes> {
             continue;
         }
         let shape = track_shape(track);
-        out.layers
-            .entry(track.layer.name())
-            .or_default()
-            .push((format!("{board}:track/{tid}"), shape.clone()));
-        out.tracks.push(TrackInfo {
-            id: tid.clone(),
-            net: track.net.clone(),
-            layer: track.layer,
-            width_nm: track.width_nm,
-            shape,
-        });
+        let piece = ObjShapes {
+            layers: vec![(
+                track.layer.name(),
+                format!("{board}:track/{tid}"),
+                shape.clone(),
+            )],
+            tracks: vec![TrackInfo {
+                id: tid.clone(),
+                net: track.net.clone(),
+                layer: track.layer,
+                width_nm: track.width_nm,
+                shape,
+            }],
+            ..ObjShapes::default()
+        };
+        put(&mut out, Obj::Track(tid.clone()), piece);
     }
     for (vid, v) in &b.vias {
         let (Ok(via), true) = (&v.item, fine(&v.faults)) else {
@@ -633,13 +680,13 @@ pub fn build(p: &Project, b: &BoardFiles) -> Result<BoardShapes> {
         };
         let at = Point::new(via.at[0], via.at[1]);
         let shape = disc(at, via.diameter_nm);
+        let mut piece = ObjShapes::default();
         for layer in &super::stackup::names(n)[from..=to] {
-            out.layers
-                .entry(layer.clone())
-                .or_default()
-                .push((format!("{board}:via/{vid}"), shape.clone()));
+            piece
+                .layers
+                .push((layer.clone(), format!("{board}:via/{vid}"), shape.clone()));
         }
-        out.holes.push(HoleInfo {
+        piece.holes.push(HoleInfo {
             owner: format!("{board}:via/{vid}"),
             shape: HoleShape::Round {
                 at,
@@ -649,7 +696,7 @@ pub fn build(p: &Project, b: &BoardFiles) -> Result<BoardShapes> {
             of: HoleOf::Via(vid.clone()),
             span: (from, to),
         });
-        out.vias.push(ViaInfo {
+        piece.vias.push(ViaInfo {
             id: vid.clone(),
             from,
             to,
@@ -659,21 +706,26 @@ pub fn build(p: &Project, b: &BoardFiles) -> Result<BoardShapes> {
             diameter_nm: via.diameter_nm,
             shape,
         });
+        put(&mut out, Obj::Via(vid.clone()), piece);
     }
     for (hid, h) in &b.holes {
         let (Ok(hole), true) = (&h.item, fine(&h.faults)) else {
             continue;
         };
-        out.holes.push(HoleInfo {
-            owner: format!("{board}:hole/{hid}"),
-            shape: HoleShape::Round {
-                at: Point::new(hole.at[0], hole.at[1]),
-                d: hole.drill_nm,
-            },
-            plated: false,
-            of: HoleOf::Hole(hid.clone()),
-            span: (0, n - 1),
-        });
+        let piece = ObjShapes {
+            holes: vec![HoleInfo {
+                owner: format!("{board}:hole/{hid}"),
+                shape: HoleShape::Round {
+                    at: Point::new(hole.at[0], hole.at[1]),
+                    d: hole.drill_nm,
+                },
+                plated: false,
+                of: HoleOf::Hole(hid.clone()),
+                span: (0, n - 1),
+            }],
+            ..ObjShapes::default()
+        };
+        put(&mut out, Obj::Hole(hid.clone()), piece);
     }
     for (kid, k) in &b.keepouts {
         let (Ok(ko), true) = (&k.item, fine(&k.faults)) else {
@@ -682,13 +734,17 @@ pub fn build(p: &Project, b: &BoardFiles) -> Result<BoardShapes> {
         let Ok(c) = super::outline::contour(&ko.contour) else {
             continue;
         };
-        out.keepouts.push(KeepoutInfo {
-            reference: format!("{board}:keepout/{kid}"),
-            part: None,
-            layers: ko.indices(n),
-            keeps: ko.keeps.clone(),
-            shape: Shape::regions(Polarity::Positive, [Region::solid(super::outline::ccw(c))]),
-        });
+        let piece = ObjShapes {
+            keepouts: vec![KeepoutInfo {
+                reference: format!("{board}:keepout/{kid}"),
+                part: None,
+                layers: ko.indices(n),
+                keeps: ko.keeps.clone(),
+                shape: Shape::regions(Polarity::Positive, [Region::solid(super::outline::ccw(c))]),
+            }],
+            ..ObjShapes::default()
+        };
+        put(&mut out, Obj::Keepout(kid.clone()), piece);
     }
     for (did, d) in &b.drawings {
         let (Ok(g), true) = (&d.item, fine(&d.faults)) else {
@@ -697,8 +753,9 @@ pub fn build(p: &Project, b: &BoardFiles) -> Result<BoardShapes> {
         let Some((shape, missing)) = super::drawing::shape(g) else {
             continue;
         };
+        let mut piece = ObjShapes::default();
         if !missing.is_empty() {
-            notices.push(
+            piece.notices.push(
                 Fault::warning(
                     Code::BoardTextMissingGlyph,
                     format!(
@@ -709,10 +766,46 @@ pub fn build(p: &Project, b: &BoardFiles) -> Result<BoardShapes> {
                 .with("drawing", did.as_str()),
             );
         }
-        out.layers
-            .entry(g.layer.clone())
-            .or_default()
-            .push((format!("{board}:drawing/{did}"), shape));
+        piece
+            .layers
+            .push((g.layer.clone(), format!("{board}:drawing/{did}"), shape));
+        put(&mut out, Obj::Drawing(did.clone()), piece);
+    }
+    Ok(out)
+}
+
+/// The board's shapes from its pieces, in their order, then its pours
+/// filled over them (`prev_pours`, the last fills, for Task 17's reuse)
+/// and its outline.
+pub fn assemble(
+    p: &Project,
+    b: &BoardFiles,
+    ps: &Pieces,
+    prev_pours: &[super::pour::PourInfo],
+) -> Result<BoardShapes> {
+    let _ = prev_pours;
+    let (file, preset, n) = base_of(p, b)?;
+    let board = b.id.to_string();
+    let mut out = BoardShapes {
+        copper_layers: n,
+        ..BoardShapes::default()
+    };
+    let mut notices = Vec::new();
+    for k in &ps.order {
+        let piece = &ps.by[k].1;
+        for (layer, owner, s) in &piece.layers {
+            out.layers
+                .entry(layer.clone())
+                .or_default()
+                .push((owner.clone(), s.clone()));
+        }
+        out.holes.extend(piece.holes.iter().cloned());
+        out.pads.extend(piece.pads.iter().cloned());
+        out.tracks.extend(piece.tracks.iter().cloned());
+        out.vias.extend(piece.vias.iter().cloned());
+        out.courtyards.extend(piece.courtyards.iter().cloned());
+        out.keepouts.extend(piece.keepouts.iter().cloned());
+        notices.extend(piece.notices.iter().cloned());
     }
     if !b.pours.is_empty() {
         let pours: Vec<(crate::id::Id, super::pour::Pour)> = b
@@ -1060,6 +1153,20 @@ pub(crate) mod tests {
         let b = s.outline.bounds().unwrap();
         assert_eq!((b.max.x, b.max.y), (50_000_000, 50_000_000));
         assert!(s.pads.iter().any(|p| p.net.is_some()));
+    }
+
+    #[test]
+    fn a_board_is_its_pieces_assembled() {
+        for (_d, p, id) in [placed(), placed_on(4, &[])] {
+            let b = &p.boards[&id];
+            let ps = pieces(&p, b, None).unwrap();
+            assert!(ps.order.iter().any(|k| matches!(k, Obj::Placement(_))));
+            assert_eq!(ps.order.len(), ps.by.len());
+            assert_eq!(
+                format!("{:?}", assemble(&p, b, &ps, &[]).unwrap()),
+                format!("{:?}", build(&p, b).unwrap())
+            );
+        }
     }
 
     #[test]
