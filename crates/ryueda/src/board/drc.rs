@@ -1062,6 +1062,44 @@ pub fn courtyards(s: &BoardShapes, board: &str, rules: &Rules) -> Vec<Finding> {
     out
 }
 
+/// What changed since a board's last check (ryueda 7.E): layout keys
+/// whose item or hole changed or whose island did (its ID or its
+/// claims), board objects whose piece changed, and every reference
+/// either names, before and after.
+#[derive(Clone, Debug, Default)]
+pub struct Dirty {
+    pub keys: std::collections::BTreeSet<Key>,
+    pub objs: std::collections::BTreeSet<super::shapes::Obj>,
+    pub refs: std::collections::BTreeSet<String>,
+}
+
+/// Which objects a rule judges.
+#[derive(Clone, Copy, Debug)]
+pub enum Scope<'a> {
+    All,
+    Dirty(&'a Dirty),
+}
+
+impl Scope<'_> {
+    pub fn key(&self, k: &Key) -> bool {
+        match self {
+            Scope::All => true,
+            Scope::Dirty(d) => d.keys.contains(k),
+        }
+    }
+
+    pub fn reference(&self, r: &str) -> bool {
+        match self {
+            Scope::All => true,
+            Scope::Dirty(d) => d.refs.contains(r),
+        }
+    }
+
+    pub fn any(&self, refs: &[String]) -> bool {
+        refs.iter().any(|r| self.reference(r))
+    }
+}
+
 /// A board checked: its shapes, its copper connected and compared, its
 /// findings sorted, and whether a placement's pads were left out.
 pub struct BoardCheck {
@@ -1436,6 +1474,34 @@ pub fn section(p: &Project) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_track_added_dirties_it_its_island_and_nothing_else() {
+        let (_d, p, id) = crate::board::shapes::tests::placed();
+        let mut live = crate::board::live::Live::build(&p, &p.boards[&id]).unwrap();
+        let net = crate::board::shapes::tests::a_net(&p);
+        let track = format!(
+            r#"{{"format":1,"kind":"ryueda.track","layer":"top","net":"{net}","points":[[1000000,1000000],[2000000,1000000]],"width_nm":250000}}"#
+        );
+        let (_d2, p2, _) =
+            crate::board::shapes::tests::placed_with(&[("boards/b/tracks/t9.json".into(), track)]);
+        live.update(&p2, &p2.boards[&id]).unwrap();
+        let d = live.dirty.as_ref().unwrap();
+        assert!(d.keys.contains(&Key::Track("t9".into())), "{d:?}");
+        assert!(d.refs.contains("b:track/t9"), "{d:?}");
+        assert!(d.objs.contains(&crate::board::shapes::Obj::Track(
+            crate::id::Id::parse("t9", "track").unwrap()
+        )));
+        // A pad the new track doesn't reach isn't dirty.
+        let far = live
+            .check()
+            .shapes
+            .pads
+            .iter()
+            .max_by_key(|x| x.at.x)
+            .unwrap();
+        assert!(!d.refs.contains(&far.reference), "{d:?}");
+    }
     use crate::board::file::CopperLayer;
     use crate::board::preset;
     use crate::board::testing::{MM, UM, board};

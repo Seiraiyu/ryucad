@@ -28,6 +28,8 @@ pub struct Live {
     check: Option<Arc<BoardCheck>>,
     /// The hash of what, when it changes, rebuilds from nothing.
     rules_key: [u8; 32],
+    /// What the last update changed; `None` after a build.
+    pub dirty: Option<drc::Dirty>,
 }
 
 impl Live {
@@ -39,6 +41,7 @@ impl Live {
             pieces,
             check: Some(check),
             rules_key: rules_key(p, b),
+            dirty: None,
         })
     }
 
@@ -67,17 +70,27 @@ impl Live {
             && s.pours == self.check().shapes.pours;
         if same {
             self.pieces = pieces;
+            self.dirty = Some(drc::Dirty::default());
             return Ok(Update::Same);
         }
         let board = b.id.to_string();
+        let old_shapes = self.check().shapes.clone();
         // The copper is edited in place only when nothing else holds it.
         let old = self.check.take().expect("a live board has its check");
         let conn = Arc::try_unwrap(old)
             .ok()
             .and_then(|c| Arc::try_unwrap(c.conn).ok())
-            .and_then(|mut conn| conn.apply(&board, &s).map(|_| conn));
+            .and_then(|mut conn| conn.apply(&board, &s).map(|ch| (conn, ch)));
         match conn {
-            Some(conn) => {
+            Some((conn, changed)) => {
+                self.dirty = Some(dirty_of(
+                    &board,
+                    &self.pieces,
+                    &pieces,
+                    &old_shapes,
+                    &s,
+                    changed,
+                ));
                 self.check = Some(Arc::new(drc::check_with(p, b, s, Arc::new(conn))?));
                 self.pieces = pieces;
                 Ok(Update::Edited)
@@ -88,6 +101,82 @@ impl Live {
             }
         }
     }
+}
+
+/// The dirty set of an update: the copper's changes, every object whose
+/// piece changed (new, gone or hashed differently), and the references
+/// of those objects in the old shapes and the new.
+fn dirty_of(
+    board: &str,
+    was: &Pieces,
+    now: &Pieces,
+    old: &super::shapes::BoardShapes,
+    new: &super::shapes::BoardShapes,
+    changed: super::connect::Changed,
+) -> drc::Dirty {
+    use super::shapes::Obj;
+    let mut d = drc::Dirty {
+        keys: changed.keys,
+        refs: changed.refs,
+        ..drc::Dirty::default()
+    };
+    for (k, (h, _)) in &now.by {
+        if was.by.get(k).is_none_or(|(g, _)| g != h) {
+            d.objs.insert(k.clone());
+        }
+    }
+    for k in was.by.keys() {
+        if !now.by.contains_key(k) {
+            d.objs.insert(k.clone());
+        }
+    }
+    for s in [old, new] {
+        for o in &d.objs {
+            match o {
+                Obj::Placement(r) => {
+                    d.refs.extend(
+                        s.pads
+                            .iter()
+                            .filter(|x| &x.occurrence == r)
+                            .map(|x| x.reference.clone()),
+                    );
+                    d.refs.extend(
+                        s.courtyards
+                            .iter()
+                            .filter(|x| &x.occurrence == r)
+                            .map(|x| x.owner.clone()),
+                    );
+                    d.refs.extend(
+                        s.keepouts
+                            .iter()
+                            .filter(|x| x.part.as_deref() == Some(r.as_str()))
+                            .map(|x| x.reference.clone()),
+                    );
+                    d.refs.extend(s.holes.iter().filter(|x| matches!(&x.of, super::shapes::HoleOf::Pad { occ, .. } if occ == r)).map(|x| x.owner.clone()));
+                }
+                Obj::Track(_) | Obj::Via(_) | Obj::Hole(_) | Obj::Drawing(_) => {}
+                Obj::Keepout(id) => {
+                    d.refs.extend(
+                        s.keepouts
+                            .iter()
+                            .filter(|x| x.reference.ends_with(&format!(":keepout/{id}")))
+                            .map(|x| x.reference.clone()),
+                    );
+                }
+            }
+        }
+    }
+    for o in &d.objs {
+        match o {
+            Obj::Track(id) => d.refs.insert(format!("{board}:track/{id}")),
+            Obj::Via(id) => d.refs.insert(format!("{board}:via/{id}")),
+            Obj::Hole(id) => d.refs.insert(format!("{board}:hole/{id}")),
+            Obj::Drawing(id) => d.refs.insert(format!("{board}:drawing/{id}")),
+            Obj::Keepout(id) => d.refs.insert(format!("{board}:keepout/{id}")),
+            Obj::Placement(_) => false,
+        };
+    }
+    d
 }
 
 /// What, when it changes, makes the board's state build anew: its rules

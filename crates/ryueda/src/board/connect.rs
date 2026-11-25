@@ -7,7 +7,15 @@ use super::shapes::BoardShapes;
 use ryu_copper::connect::{Copper, IslandId, Node, Placement};
 use ryu_copper::measure::{Body, BodyOptions, Distance};
 use ryu_copper::netlist::{self, Open, Report};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+
+/// What an [`Connectivity::apply`] changed: the layout keys, and their
+/// references before and after.
+#[derive(Clone, Debug, Default)]
+pub struct Changed {
+    pub keys: BTreeSet<Key>,
+    pub refs: BTreeSet<String>,
+}
 
 /// A board's copper, connected and compared.
 pub struct Connectivity {
@@ -46,16 +54,100 @@ impl Connectivity {
     /// from the old layout to the new one, the net points placed and
     /// compared again. Equal to `connect(board, s)`. `None`, unchanged,
     /// when the layers differ (a stackup change): build anew.
-    pub fn apply(&mut self, board: &str, s: &BoardShapes) -> Option<ryu_copper::connect::Applied> {
+    pub fn apply(&mut self, board: &str, s: &BoardShapes) -> Option<Changed> {
         let built = layout::build(board, s);
         if built.layout.layers != self.built.layout.layers {
             return None;
         }
-        let edits = self.copper.apply_layout(&self.built.layout, &built.layout);
+        let (old, new) = (&self.built.layout, &built.layout);
+        let mut keys: BTreeSet<Key> = BTreeSet::new();
+        for (k, it) in &old.items {
+            if new.items.get(k) != Some(it) {
+                keys.insert(k.clone());
+            }
+        }
+        for (k, it) in &new.items {
+            if old.items.get(k) != Some(it) {
+                keys.insert(k.clone());
+            }
+        }
+        for (k, h) in &old.holes {
+            if new.holes.get(k) != Some(h) {
+                keys.insert(k.clone());
+            }
+        }
+        for (k, h) in &new.holes {
+            if old.holes.get(k) != Some(h) {
+                keys.insert(k.clone());
+            }
+        }
+        // Every item and hole of an island holding a changed key, before
+        // and after, with that island's ID and claims: those that differ
+        // are changed too (a net joined or split, an island renamed).
+        let node = |l: &ryu_copper::layout::Layout<Key>, k: &Key| {
+            if l.holes.contains_key(k) {
+                Node::Hole(k.clone())
+            } else {
+                Node::Piece(k.clone(), 0)
+            }
+        };
+        type Seen = BTreeMap<Key, (IslandId<Key>, Vec<String>)>;
+        let read = |copper: &Copper<Key>,
+                    l: &ryu_copper::layout::Layout<Key>,
+                    ks: &mut dyn Iterator<Item = Key>|
+         -> Seen {
+            let mut seen = Seen::new();
+            let mut done: BTreeSet<IslandId<Key>> = BTreeSet::new();
+            for k in ks {
+                if seen.contains_key(&k) {
+                    continue;
+                }
+                let Some(isl) = copper.island(&node(l, &k)) else {
+                    continue;
+                };
+                if !done.insert(isl.id.clone()) {
+                    continue;
+                }
+                for x in isl.items.iter().chain(&isl.holes) {
+                    seen.insert(x.clone(), (isl.id.clone(), isl.claims.clone()));
+                }
+            }
+            seen
+        };
+        let before = read(
+            &self.copper,
+            old,
+            &mut keys
+                .iter()
+                .filter(|k| old.items.contains_key(*k) || old.holes.contains_key(*k))
+                .cloned(),
+        );
+        let mut refs: BTreeSet<String> = keys.iter().map(|k| self.built.reference(k)).collect();
+        self.copper.apply_layout(old, new);
+        let mut again = keys
+            .iter()
+            .filter(|k| new.items.contains_key(*k) || new.holes.contains_key(*k))
+            .cloned()
+            .chain(before.keys().cloned())
+            .collect::<Vec<_>>()
+            .into_iter();
+        let after = read(&self.copper, new, &mut again);
+        for (k, was) in &before {
+            if after.get(k) != Some(was) {
+                refs.insert(self.built.reference(k));
+                keys.insert(k.clone());
+            }
+        }
+        for (k, now) in &after {
+            if before.get(k) != Some(now) {
+                keys.insert(k.clone());
+            }
+        }
+        refs.extend(keys.iter().map(|k| built.reference(k)));
         self.placed = netlist::placements(&self.copper, &built.layout.points);
         self.report = netlist::compare_placed(&self.copper, &built.layout.points, &self.placed);
         self.built = built;
-        Some(edits)
+        Some(Changed { keys, refs })
     }
 
     /// Every piece of an island with its body.
