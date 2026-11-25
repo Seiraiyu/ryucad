@@ -21,6 +21,8 @@ pub enum Topic {
     Merge,
     /// `pdm.changed`: parts' release states or tags changed (design 629).
     Pdm,
+    /// `board.checked`: a board's findings changed (design 924).
+    Boards,
 }
 
 impl ryu_session::notify::Topics for Topic {
@@ -31,6 +33,7 @@ impl ryu_session::notify::Topics for Topic {
         Topic::Progress,
         Topic::Merge,
         Topic::Pdm,
+        Topic::Boards,
     ];
     const PARTICIPANTS: Topic = Topic::Participants;
     const ACTIVITY: Topic = Topic::Activity;
@@ -51,4 +54,7 @@ pub struct Seen {
     /// The key the parts' release states were last read at (the PDM
     /// revision and the release branch's refs), and each part's value.
     pub pdm: Option<(String, BTreeMap<String, serde_json::Value>)>,
+    /// Each board's revision and findings last told (ryueda 7.E): told
+    /// again when its findings move.
+    pub boards: BTreeMap<String, (String, Vec<crate::board::drc::Finding>)>,
 }

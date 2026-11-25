@@ -6546,3 +6546,74 @@ fn a_kept_board_answers_as_a_fresh_one() {
     }
     p.both_in("board", &drc);
 }
+
+/// A board write through the daemon publishes `board.checked` to a
+/// watcher of `boards` (ryueda 7.E), with what the write added and the
+/// board's counts.
+#[test]
+fn board_writes_publish_board_checked() {
+    let p = Pair::breakout();
+    for args in breakout_board::script() {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        p.ok(&args);
+    }
+    let id = breakout_board::BOARD;
+    let watch = p.command_in(
+        &p.daemon,
+        "board",
+        &[
+            "--as",
+            "watcher",
+            "watch",
+            "--topic",
+            "boards",
+            "--count",
+            "2",
+            "--timeout",
+            "20",
+        ],
+    );
+    let waiting = std::thread::spawn(move || {
+        let mut watch = watch;
+        watch.output().unwrap()
+    });
+    let attached = || {
+        let (_, v) = p.run_in(&p.daemon, "board", &["participants"]);
+        v["result"]["participants"]
+            .as_array()
+            .is_some_and(|l| l.iter().any(|x| x["name"] == "watcher"))
+    };
+    for _ in 0..200 {
+        if attached() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    // Nothing says when the watcher has subscribed: write and undo until
+    // it has heard two changes.
+    let mut added = false;
+    while !waiting.is_finished() {
+        let args: &[&str] = if added {
+            &["undo"]
+        } else {
+            &[
+                "board", "track", "add", id, "--net", "rail:gnd", "--layer", "bottom", "--path",
+                "2,9", "3,9", "--id", "k1",
+            ]
+        };
+        let (code, v) = p.run_in(&p.daemon, "board", args);
+        assert_eq!(code, 0, "{v}");
+        added = !added;
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let out = waiting.join().unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let notes = v["result"]["notifications"].as_array().unwrap();
+    assert!(!notes.is_empty(), "{v}");
+    for n in notes {
+        assert_eq!(n["method"], "board.checked", "{v}");
+        assert_eq!(n["params"]["board"], format!("board/{id}"), "{v}");
+        assert!(n["params"]["errors"].is_u64(), "{v}");
+        assert!(n["params"]["delta"]["added"].is_array(), "{v}");
+    }
+}

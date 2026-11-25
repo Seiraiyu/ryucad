@@ -604,7 +604,8 @@ enum Command {
     Cancel { token: String },
     /// Wait for the daemon's notifications.
     Watch {
-        /// project, participants, activity; all when none.
+        /// project, participants, activity, progress, merge, pdm, boards; all
+        /// when none.
         #[arg(long = "topic")]
         topics: Vec<String>,
         #[arg(long, default_value_t = 1)]

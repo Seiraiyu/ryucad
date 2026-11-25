@@ -177,6 +177,12 @@ impl<T: Topics> Hub<T> {
             .any(|s| s.participant == participant)
     }
 
+    /// Whether any open subscription takes `topic`.
+    pub fn watches_topic(&mut self, topic: T) -> bool {
+        self.subscribers.retain(|s| !s.is_closed());
+        self.subscribers.iter().any(|s| s.topics.contains(&topic))
+    }
+
     /// Whether anyone is subscribed.
     pub fn is_watched(&mut self) -> bool {
         self.subscribers.retain(|s| !s.is_closed());

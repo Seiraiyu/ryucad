@@ -323,6 +323,7 @@ pub fn answer(
         publish(l, session);
         publish_merge(l, session);
         publish_pdm(l, session);
+        publish_boards(l, session);
     }
     result
 }
@@ -2601,6 +2602,73 @@ pub fn publish_pdm(live: &mut Live<Eda>, session: &mut Session) {
     live.seen.pdm = Some((key, now));
 }
 
+/// `board.checked` for each board whose findings moved since its watchers
+/// were last told (ryueda 7.E): its revision, what the change added and
+/// removed, and its counts. A board first seen while watched is told
+/// whole. Nothing is checked while nobody watches `boards`.
+pub fn publish_boards(live: &mut Live<Eda>, session: &mut Session) {
+    if !live.hub.watches_topic(Topic::Boards) {
+        live.seen.boards.clear();
+        return;
+    }
+    let ids: Vec<crate::id::Id> = session.project().boards.keys().cloned().collect();
+    for id in ids {
+        let revision = session.project().boards[&id].revision.clone();
+        let board = format!("board/{id}");
+        let seen = live.seen.boards.get(id.as_str());
+        match session.board_check(&id) {
+            Ok(c) => {
+                let same = |a: &crate::board::drc::Finding, b: &crate::board::drc::Finding| {
+                    a.id == b.id && a.waived == b.waived
+                };
+                let moved = seen.is_none_or(|(_, before)| {
+                    before.len() != c.findings.len()
+                        || before.iter().zip(&c.findings).any(|(a, b)| !same(a, b))
+                });
+                if !moved {
+                    continue;
+                }
+                let before: &[crate::board::drc::Finding] = seen.map_or(&[], |(_, f)| f);
+                let added: Vec<&crate::board::drc::Finding> = c
+                    .findings
+                    .iter()
+                    .filter(|f| !before.iter().any(|b| same(b, f)))
+                    .collect();
+                let removed: Vec<&str> = before
+                    .iter()
+                    .filter(|b| !c.findings.iter().any(|f| same(b, f)))
+                    .map(|b| b.id.as_str())
+                    .collect();
+                let params = json!({
+                    "board": board,
+                    "revision": revision,
+                    "delta": {"added": added, "removed": removed},
+                    "errors": c.errors(),
+                    "warnings": c.warnings(),
+                    "waived": c.waived(),
+                });
+                live.hub.send(Topic::Boards, "board.checked", &params);
+                live.seen
+                    .boards
+                    .insert(id.to_string(), (revision, c.findings.clone()));
+            }
+            Err(e) => {
+                if seen.is_some_and(|(r, _)| *r == revision) {
+                    continue;
+                }
+                live.hub.send(
+                    Topic::Boards,
+                    "board.checked",
+                    &json!({"board": board, "revision": revision, "error": e}),
+                );
+                live.seen
+                    .boards
+                    .insert(id.to_string(), (revision, Vec::new()));
+            }
+        }
+    }
+}
+
 /// Brings the session and what subscribers know up to date with the
 /// files: before a subscription, and while anyone watches.
 pub fn settle(slot: &mut Option<Session>, live: &mut Live<Eda>, root: &Path) {
@@ -2615,6 +2683,7 @@ pub fn settle(slot: &mut Option<Session>, live: &mut Live<Eda>, root: &Path) {
         publish(live, s);
         publish_merge(live, s);
         publish_pdm(live, s);
+        publish_boards(live, s);
         Ok(())
     });
 }
