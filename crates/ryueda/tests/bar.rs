@@ -866,9 +866,9 @@ fn a_generated_board_checks_and_answers_a_write_within_its_bars() {
 /// Design 924's plane bar: the bars' generated board with a whole `top`
 /// plane of its first chain's net round every other net's pads and
 /// tracks, filled from shapes already built (the fill step alone timed)
-/// in 500 ms. 7.D missed it at 11.6 s (#1067); at 7.E's 1 µm bound it
-/// filled in 0.64 s on a quiet cox-worker-2, so it asserts 1 s until
-/// fills go by tile (plan 989's Task 17), and 500 ms after. The plan said
+/// in 500 ms. 7.D missed it at 11.6 s (#1067); 7.E's 1 µm bound took it
+/// to 0.64 s on a quiet cox-worker-2, and its 8 mm tiles, filled in
+/// parallel, under the bar. The plan said
 /// `bottom`, but the board has no copper there and no vias, so a bottom
 /// plane is one island its net never reaches.
 #[test]
@@ -900,7 +900,7 @@ fn a_plane_fills_within_its_bar() {
         ryueda::board::pour::Pour::whole(&net, ryueda::board::file::CopperLayer::Top),
     )];
     let t = Instant::now();
-    let f = ryueda::board::pour::fill_all(&pours, &s, &rules, &preset);
+    let f = ryueda::board::pour::fill_all(&pours, &s, &rules, &preset, &[]);
     let took = t.elapsed();
     println!(
         "a top plane among {} pads and {} tracks: {} regions, {} thermals, filled in {took:?}",
@@ -910,7 +910,7 @@ fn a_plane_fills_within_its_bar() {
         f[0].thermals.len()
     );
     assert!(!f[0].regions.is_empty());
-    assert!(took < bar(Duration::from_secs(1)), "{took:?}");
+    assert!(took < bar(Duration::from_millis(500)), "{took:?}");
 }
 
 /// Design 732's bar: a track write on the breakout as agent round 5.D

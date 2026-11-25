@@ -270,7 +270,7 @@ pub struct TileFill {
 }
 
 /// A fill by tiles.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Tiled {
     pub side: Nm,
     pub tiles: Vec<TileFill>,
@@ -422,9 +422,9 @@ pub fn fill_tiled_counted(ask: &Ask, side: Nm, prev: Option<&Tiled>) -> (Tiled, 
         .max()
         .unwrap_or(0);
     // A tile's fill reads what lies within the least width (the opening),
-    // two spokes' lengths (its pads' spokes, chosen against its window)
-    // and the bounds of it.
-    let reach = ask.min_width + 2 * longest + 4 * BOUND + 2;
+    // a spoke's length (its pads' spokes, from a centre inside it, chosen
+    // against its window) and the bounds of it.
+    let reach = ask.min_width + longest + 4 * BOUND + 2;
     let Some(bounds) = ask.area.bounds() else {
         return (
             Tiled {

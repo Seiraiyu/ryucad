@@ -908,7 +908,6 @@ pub fn assemble(
     ps: &Pieces,
     prev_pours: &[super::pour::PourInfo],
 ) -> Result<BoardShapes> {
-    let _ = prev_pours;
     let (file, preset, n) = base_of(p, b)?;
     let board = b.id.to_string();
     let mut out = BoardShapes {
@@ -943,7 +942,7 @@ pub fn assemble(
         out.outline = region;
         out.edges = edges;
         let rules = super::rules::of(p, b)?;
-        out.pours = super::pour::fill_all(&pours, &out, &rules, &preset);
+        out.pours = super::pour::fill_all(&pours, &out, &rules, &preset, prev_pours);
         for f in &out.pours {
             let name = &super::stackup::names(n)[f.layer];
             for r in &f.regions {

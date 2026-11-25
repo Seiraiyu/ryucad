@@ -343,7 +343,8 @@ mod tests {
             String::from_utf8(svg).unwrap()
         };
         let bare = draw(&s, "gnd");
-        s.pours = crate::board::pour::fill_all(&pours, &s, &rules, &crate::board::preset::JLC_2L);
+        s.pours =
+            crate::board::pour::fill_all(&pours, &s, &rules, &crate::board::preset::JLC_2L, &[]);
         let filled = draw(&s, "gnd");
         assert!(
             filled.matches("<path").count() > bare.matches("<path").count(),

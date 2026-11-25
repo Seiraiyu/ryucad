@@ -221,6 +221,9 @@ pub struct PourInfo {
     pub uncertain: Vec<usize>,
     /// Each thermal pad's reference and its kept spokes.
     pub thermals: Vec<(String, u8)>,
+    /// The fill by tile (ryueda 7.E): the next fill reuses the tiles
+    /// whose inputs held.
+    pub tiled: fill::Tiled,
 }
 
 /// A shape flattened at the fill's bound.
@@ -252,7 +255,8 @@ fn contour_polys(c: &super::file::Contour) -> Option<Polygons> {
 
 /// How far an obstacle grows: its rule, the bound and a nanometre.
 fn reach(rule: i64) -> i64 {
-    rule + BOUND + 1
+    // The tiles' seams snap the fill's outline by a nanometre more.
+    rule + BOUND + 1 + fill::TILE_SNAP
 }
 
 /// One pour filled on its layer, after `done` (the layer's higher pours).
@@ -266,6 +270,7 @@ fn fill_one(
     preset: &Preset,
     outline: &Polygons,
     done: &[PourInfo],
+    prev: Option<&fill::Tiled>,
 ) -> PourInfo {
     let n = s.n();
     let opts = fill::opts();
@@ -418,7 +423,7 @@ fn fill_one(
         );
         obstacles.push(g);
     }
-    let f = fill::fill(&Ask {
+    let ask = Ask {
         area,
         obstacles,
         spoke_obstacles: blocked,
@@ -426,28 +431,41 @@ fn fill_one(
         min_width: r.min_width.value,
         own,
         keep_islands: p.islands == Islands::Keep,
-    });
-    let regions = f.polygons.polygons.iter().filter_map(region).collect();
+    };
+    let t = fill::fill_tiled(&ask, fill::TILE, prev);
+    // Each kept piece is a region, tile by tile; an uncertain piece's
+    // region index is its place among them.
+    let pieces: Vec<(usize, usize)> = t.pieces().map(|(ti, i, _)| (ti, i)).collect();
+    let regions = t.pieces().filter_map(|(_, _, p)| region(p)).collect();
+    let uncertain = t
+        .uncertain
+        .iter()
+        .filter_map(|u| pieces.iter().position(|x| x == u))
+        .collect();
     PourInfo {
         id: id.clone(),
         net: p.net.clone(),
         layer: l,
         rules: r,
         regions,
-        islands_removed: f.islands_removed,
-        uncertain: f.uncertain,
-        thermals: names.into_iter().zip(f.spokes).collect(),
-        polygons: f.polygons,
+        islands_removed: t.islands_removed,
+        uncertain,
+        thermals: names.into_iter().zip(t.spokes.iter().copied()).collect(),
+        polygons: t.polygons(),
+        tiled: t,
     }
 }
 
 /// Every pour filled: on each layer by priority (higher first) then ID,
 /// layers in parallel. `pours` are the board's readable, fault-free ones.
+/// `prev` are the last fills: each pour reuses its own's tiles whose
+/// inputs held (ryueda 7.E).
 pub fn fill_all(
     pours: &[(Id, Pour)],
     s: &BoardShapes,
     rules: &Rules,
     preset: &Preset,
+    prev: &[PourInfo],
 ) -> Vec<PourInfo> {
     let n = s.n();
     let outline = flat(&s.outline);
@@ -465,7 +483,11 @@ pub fn fill_all(
             list.sort_by(|a, b| b.1.priority.cmp(&a.1.priority).then_with(|| a.0.cmp(&b.0)));
             let mut done: Vec<PourInfo> = Vec::new();
             for (id, p) in list {
-                let f = fill_one(id, p, *l, s, rules, preset, &outline, &done);
+                let old = prev
+                    .iter()
+                    .find(|x| &x.id == id && x.layer == *l)
+                    .map(|x| &x.tiled);
+                let f = fill_one(id, p, *l, s, rules, preset, &outline, &done, old);
                 done.push(f);
             }
             done
@@ -604,7 +626,7 @@ mod tests {
         s.smd("r1", "1", (5 * MM, 5 * MM), (MM, MM), Some("gnd"))
             .smd("r1", "2", (15 * MM, 5 * MM), (MM, MM), Some("sig"));
         let pours = vec![(Id::parse("p1", "pour").unwrap(), plane("gnd"))];
-        let f = fill_all(&pours, &s, &rules(), &JLC_2L);
+        let f = fill_all(&pours, &s, &rules(), &JLC_2L, &[]);
         assert_eq!(f.len(), 1);
         let p = &f[0];
         assert!(!p.polygons.is_empty());
@@ -644,7 +666,7 @@ mod tests {
             (Id::parse("lo", "pour").unwrap(), lo),
             (Id::parse("hi", "pour").unwrap(), hi),
         ];
-        let f = fill_all(&pours, &s, &rules(), &JLC_2L);
+        let f = fill_all(&pours, &s, &rules(), &JLC_2L, &[]);
         let a = f.iter().find(|x| x.net == "a").unwrap();
         let b = f.iter().find(|x| x.net == "b").unwrap();
         assert!(a.polygons.area2() > 0);
@@ -666,7 +688,7 @@ mod tests {
                 .num_threads(n)
                 .build()
                 .unwrap()
-                .install(|| fill_all(&pours, &s, &rules(), &JLC_2L))
+                .install(|| fill_all(&pours, &s, &rules(), &JLC_2L, &[]))
         };
         assert_eq!(run(1), run(8));
     }
@@ -694,7 +716,7 @@ mod tests {
             ..plane("gnd")
         };
         let pours = vec![(Id::parse("p1", "pour").unwrap(), tiny)];
-        s.pours = fill_all(&pours, &s, &rules(), &JLC_2L);
+        s.pours = fill_all(&pours, &s, &rules(), &JLC_2L, &[]);
         let f = findings(&s, "b");
         assert_eq!(
             f.iter().map(|x| x.code).collect::<Vec<_>>(),
@@ -711,7 +733,7 @@ mod tests {
             .smd("r3", "1", (5 * MM, 66 * MM / 10), (MM, MM), Some("sig"))
             .smd("r4", "1", (5 * MM, 34 * MM / 10), (MM, MM), Some("sig"));
         let pours = vec![(Id::parse("p1", "pour").unwrap(), plane("gnd"))];
-        s.pours = fill_all(&pours, &s, &rules(), &JLC_2L);
+        s.pours = fill_all(&pours, &s, &rules(), &JLC_2L, &[]);
         let f = findings(&s, "b");
         let starved: Vec<_> = f
             .iter()
@@ -720,5 +742,38 @@ mod tests {
         assert_eq!(starved.len(), 1, "{f:?}");
         assert_eq!(starved[0].details["spokes"], 1);
         assert!(starved[0].refs.contains(&"b:r1/1".to_owned()));
+    }
+
+    #[test]
+    fn a_refill_reuses_the_tiles_an_edit_doesnt_reach() {
+        let mut s = board(40 * MM, 20 * MM);
+        s.smd("r1", "1", (5 * MM, 5 * MM), (MM, MM), Some("gnd"))
+            .smd("r1", "2", (35 * MM, 15 * MM), (MM, MM), Some("sig"));
+        let pours = vec![(Id::parse("p1", "pour").unwrap(), plane("gnd"))];
+        let first = fill_all(&pours, &s, &rules(), &JLC_2L, &[]);
+        assert!(
+            first[0].tiled.tiles.len() > 8,
+            "a 40 by 20 mm board in 8 mm tiles"
+        );
+        s.smd("r2", "1", (35 * MM, 5 * MM), (MM, MM), Some("sig"));
+        let again = fill_all(&pours, &s, &rules(), &JLC_2L, &first);
+        assert_eq!(again, fill_all(&pours, &s, &rules(), &JLC_2L, &[]));
+        let changed = again[0]
+            .tiled
+            .tiles
+            .iter()
+            .filter(|t| {
+                first[0]
+                    .tiled
+                    .tiles
+                    .iter()
+                    .find(|u| u.at == t.at)
+                    .is_none_or(|u| u.key != t.key)
+            })
+            .count();
+        assert!(
+            (1..=4).contains(&changed),
+            "{changed} tiles changed for one pad"
+        );
     }
 }

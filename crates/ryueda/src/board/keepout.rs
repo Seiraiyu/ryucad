@@ -344,6 +344,7 @@ mod tests {
             islands_removed: 0,
             uncertain: vec![],
             thermals: vec![],
+            tiled: Default::default(),
         });
         s.keepouts.push(ko(vec![Keep::Pours], vec![0], None));
         let f = check(&s, "b", crate::board::drc::Scope::All);
