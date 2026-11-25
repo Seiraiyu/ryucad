@@ -1780,6 +1780,39 @@ fn a_partial_blend_delete_has_its_budget_per_unit() {
     assert_eq!(built(&mut s, "d", &imp).body.dump(), all);
 }
 
+/// Plan 23.D: after a partial delete, a later feature naming a kept
+/// bridge's face resolves (deleting it is the kernel's refusal, never an
+/// unresolved reference), and one naming the deleted fillet's face is
+/// refused naming the delete.
+#[test]
+fn references_to_a_partial_deletes_kept_and_deleted_faces() {
+    let (_f, _d, mut s, imp) = bridged();
+    add(
+        &mut s,
+        json!({"type": "delete_blend", "id": "d", "below": "5 mm", "partial": true}),
+    );
+    let rep = report(&mut s, "d");
+    let at = |hex: &Value| format!("p/{imp}/{}", hex.as_str().unwrap());
+    let kept = at(&rep["kept"][0]["faces"][0]);
+    let gone = at(&rep["blends"][0]["faces"][0]);
+    add(
+        &mut s,
+        json!({"type": "delete_face", "id": "k", "faces": [kept], "heal": "grow"}),
+    );
+    let e = failure(&mut s, "k");
+    assert_eq!(e.code, Code::TweakFailed, "{e}");
+    must(&mut s, "feature.delete", json!({"part": "p", "id": "k"}));
+    // Refused as it is added: the face is gone from the solid.
+    let e = call(
+        &mut s,
+        "feature.add",
+        json!({"part": "p", "type": "delete_face", "id": "g", "faces": [gone], "heal": "grow"}),
+    )
+    .unwrap_err();
+    assert_eq!(e.code, Code::ReferenceUnresolved, "{e}");
+    assert_eq!(e.details["removed_by"], "d", "{e}");
+}
+
 /// The committed NIST corpus (ryustep's `tests/corpus`), each file
 /// imported as solids, each solid's blends at most 2 mm deleted under the
 /// default edit budget: every outcome is a body that passes the kernel's
