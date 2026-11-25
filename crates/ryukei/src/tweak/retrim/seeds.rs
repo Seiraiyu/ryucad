@@ -757,8 +757,7 @@ mod tests {
         }
         uses.iter().all(|(&(g, forward), &n)| {
             n == 1
-                && (arr.laminar.contains(&g)
-                    || uses.get(&(g, !forward)).copied().unwrap_or(0) == 1)
+                && (arr.laminar.contains(&g) || uses.get(&(g, !forward)).copied().unwrap_or(0) == 1)
         })
     }
 
@@ -869,5 +868,91 @@ mod tests {
             walk(&c.arr, &fewer, &free()),
             Err(WalkError::Ambiguous { piece: fewer[0] })
         );
+    }
+
+    /// NIST CTC 02 with PMI #295's walk at rung 3's narrowed retry, given
+    /// room twice (census IX, plan 24.A): `Ambiguous` at pinned cylinder
+    /// `e153cd0e`.
+    fn ctc_02_room2() -> Cut {
+        read_cut(include_str!(
+            "../../../tests/data/nist_ctc_02_closures_room2.arr"
+        ))
+    }
+
+    /// The same rung with `e153cd0e` released (plan 23.A): `Ambiguous` at
+    /// working plane `06252748`.
+    fn ctc_02_released() -> Cut {
+        read_cut(include_str!(
+            "../../../tests/data/nist_ctc_02_closures_released.arr"
+        ))
+    }
+
+    /// The piece each walk names (census VIII and IX).
+    const ROOM2_PIECE: usize = 454;
+    const RELEASED_PIECE: usize = 491;
+    /// The Room(2) walk's disputed pieces (census IX): the pinned
+    /// cylinder `e153cd0e`, planes `06252748` and `ad25abb3`, plane
+    /// `1294043e`.
+    const ROOM2_DISPUTED: [usize; 4] = [454, 490, 511, 517];
+    /// The released walk's disputed pieces: planes `06252748` and
+    /// `ad25abb3`, the released cylinder `e153cd0e`, plane `1294043e`.
+    const RELEASED_DISPUTED: [usize; 4] = [491, 513, 520, 528];
+
+    /// The pieces closures `a` and `b` disagree on.
+    fn disputed(a: &BTreeSet<usize>, b: &BTreeSet<usize>) -> Vec<usize> {
+        a.symmetric_difference(b).copied().collect()
+    }
+
+    /// CTC 02's Room(2) walk closes more than one way, and the ways
+    /// disagree on a piece of the pin (design 990): counting can't choose.
+    /// Census IX read two closures: the two planes `06252748` and
+    /// `ad25abb3`, or the pinned cylinder and plane `1294043e`.
+    #[test]
+    fn ctc_02s_room_walk_closes_two_ways_at_its_pin() {
+        let c = ctc_02_room2();
+        assert_eq!(
+            walk(&c.arr, &c.tries[0], &free()),
+            Err(WalkError::Ambiguous { piece: ROOM2_PIECE })
+        );
+        assert!(c.pins.contains(&c.arr.pieces[ROOM2_PIECE].0));
+        assert!(c.closures.len() >= 2);
+        for k in &c.closures {
+            assert!(is_closure(&c.arr, &c.tries[0], k));
+        }
+        let d = disputed(&c.closures[0], &c.closures[1]);
+        assert_eq!(d, ROOM2_DISPUTED);
+        assert!(d.contains(&ROOM2_PIECE));
+        assert!(d.iter().any(|&i| c.pins.contains(&c.arr.pieces[i].0)));
+    }
+
+    /// Released, the walk still closes two ways (plan 23.A's census
+    /// VIII): by the two planes, or by the cylinder and the third plane.
+    /// No disputed piece is a pin's, so nothing more is released.
+    #[test]
+    fn ctc_02s_released_walk_closes_by_two_planes_or_the_cylinder_and_a_third() {
+        let c = ctc_02_released();
+        assert_eq!(
+            walk(&c.arr, &c.tries[0], &free()),
+            Err(WalkError::Ambiguous {
+                piece: RELEASED_PIECE
+            })
+        );
+        assert!(c.closures.len() >= 2);
+        for k in &c.closures {
+            assert!(is_closure(&c.arr, &c.tries[0], k));
+        }
+        let d = disputed(&c.closures[0], &c.closures[1]);
+        assert_eq!(d, RELEASED_DISPUTED);
+        assert!(d.iter().all(|&i| !c.pins.contains(&c.arr.pieces[i].0)));
+        // Each closure keeps two of the four: one face pair or the other.
+        let faces = |k: &BTreeSet<usize>| -> BTreeSet<usize> {
+            d.iter()
+                .filter(|i| k.contains(i))
+                .map(|&i| c.arr.pieces[i].0)
+                .collect()
+        };
+        assert_eq!(faces(&c.closures[0]).len(), 2);
+        assert_eq!(faces(&c.closures[1]).len(), 2);
+        assert!(faces(&c.closures[0]).is_disjoint(&faces(&c.closures[1])));
     }
 }
