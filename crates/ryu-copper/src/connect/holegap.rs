@@ -37,11 +37,56 @@ impl<K: Ord + Hash + Clone + Send + Sync> Copper<K> {
         if below <= 0 || !self.layers.get(layer).is_some_and(|l| l.copper) {
             return Vec::new();
         }
-        let holes: Vec<(&K, &crate::layout::Hole)> = self
+        let holes: Vec<&K> = self
             .holes
             .iter()
             .filter(|(_, h)| h.span.0 <= layer && layer <= h.span.1)
+            .map(|(k, _)| k)
             .collect();
+        self.hole_gaps(layer, below, holes)
+    }
+
+    /// [`Copper::hole_clearance`]'s gaps whose hole or piece is in `keys`
+    /// (ryueda 7.E): the walls of the holes in `keys`, and the walls near
+    /// an item in `keys`, judged against that item alone.
+    pub fn hole_clearance_of(
+        &self,
+        layer: usize,
+        below: Nm,
+        keys: &std::collections::BTreeSet<K>,
+    ) -> Vec<HoleGap<K>> {
+        if below <= 0 || !self.layers.get(layer).is_some_and(|l| l.copper) {
+            return Vec::new();
+        }
+        let on = |k: &K| {
+            self.holes
+                .get(k)
+                .is_some_and(|h| h.span.0 <= layer && layer <= h.span.1)
+        };
+        let mut holes: std::collections::BTreeSet<&K> = keys.iter().filter(|k| on(k)).collect();
+        for k in keys {
+            if self.bodies.layer(k) != Some(layer) {
+                continue;
+            }
+            let Some(b) = self.bodies.body(k) else {
+                continue;
+            };
+            for n in self.drills.near_body(0, b, below) {
+                if let Some((hk, _)) = self.holes.get_key_value(&n.key)
+                    && on(hk)
+                {
+                    holes.insert(hk);
+                }
+            }
+        }
+        let mut out = self.hole_gaps(layer, below, holes.into_iter().collect());
+        out.retain(|g| keys.contains(&g.hole) || keys.contains(&g.piece.0));
+        out
+    }
+
+    fn hole_gaps(&self, layer: usize, below: Nm, holes: Vec<&K>) -> Vec<HoleGap<K>> {
+        let holes: Vec<(&K, &crate::layout::Hole)> =
+            holes.into_iter().map(|k| (k, &self.holes[k])).collect();
         let mut out: Vec<HoleGap<K>> = holes
             .par_iter()
             .flat_map_iter(|(hk, h)| {

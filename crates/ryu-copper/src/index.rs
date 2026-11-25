@@ -364,6 +364,40 @@ impl<K: Ord + Hash + Clone + Send + Sync> Index<K> {
         out
     }
 
+    /// [`Index::pairs`] with an end in `keys` (ryueda 7.E): each key's
+    /// neighbours on `layer` within `d`, in the same order.
+    pub fn pairs_with(
+        &self,
+        layer: usize,
+        d: Nm,
+        keys: &std::collections::BTreeSet<K>,
+    ) -> Vec<Pair<K>> {
+        let keys: Vec<&K> = keys
+            .iter()
+            .filter(|k| self.layer(k) == Some(layer))
+            .collect();
+        let mut out: Vec<Pair<K>> = keys
+            .par_iter()
+            .flat_map_iter(|k| {
+                self.near(k, d).into_iter().map(move |n| {
+                    let (a, b) = if **k < n.key {
+                        ((*k).clone(), n.key)
+                    } else {
+                        (n.key, (*k).clone())
+                    };
+                    Pair {
+                        a,
+                        b,
+                        verdict: n.verdict,
+                    }
+                })
+            })
+            .collect();
+        out.sort_by(|p, q| (&p.a, &p.b).cmp(&(&q.a, &q.b)));
+        out.dedup_by(|p, q| (&p.a, &p.b) == (&q.a, &q.b));
+        out
+    }
+
     /// The item on `layer` nearest a point, by its distance rounded to the
     /// nanometre, ties by key; `None` on an empty layer.
     pub fn nearest(&self, layer: usize, p: Point) -> Option<(K, Distance)> {

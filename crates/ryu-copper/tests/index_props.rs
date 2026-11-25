@@ -179,3 +179,35 @@ fn one_thread_and_eight_agree() {
     };
     assert_eq!(run(1), run(8));
 }
+
+/// `pairs_with` is `pairs` filtered to the pairs with an end in the keys
+/// (ryueda 7.E), for seeded subsets of a seeded index.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release only: seeded indexes")]
+fn pairs_with_keys_are_the_whole_pairs_filtered() {
+    for seed in 0..8u64 {
+        let l = seeded_layout(0x7769_7468 ^ seed, 150);
+        let ix = Index::of_layout(&l, BodyOptions::default());
+        let mut g = Lcg::new(seed);
+        let keys: std::collections::BTreeSet<u32> = l
+            .items
+            .keys()
+            .copied()
+            .filter(|_| g.range(0, 3) == 0)
+            .collect();
+        for d in [0, 50_000, 300_000] {
+            for layer in 0..2 {
+                let whole: Vec<Pair<u32>> = ix
+                    .pairs(layer, d)
+                    .into_iter()
+                    .filter(|p| keys.contains(&p.a) || keys.contains(&p.b))
+                    .collect();
+                assert_eq!(
+                    ix.pairs_with(layer, d, &keys),
+                    whole,
+                    "seed {seed} d {d} layer {layer}"
+                );
+            }
+        }
+    }
+}

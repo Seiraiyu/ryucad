@@ -619,3 +619,44 @@ fn apply_matches_a_rebuild() {
         same(&c, &b, &format!("seed {seed}"));
     }
 }
+
+/// `clearance_of` and `hole_clearance_of` are the whole queries filtered
+/// to the keys (ryueda 7.E), over seeded layouts with holes.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release only: seeded layouts")]
+fn clearance_of_keys_is_the_whole_query_filtered() {
+    for seed in 0..16u64 {
+        let mut l = seeded(seed, 80, true);
+        add_holes(&mut l, seed, 8);
+        let c = Copper::new(&l, BodyOptions::default());
+        let keys: std::collections::BTreeSet<u32> = l
+            .items
+            .keys()
+            .chain(l.holes.keys())
+            .copied()
+            .filter(|k| k % 3 == seed as u32 % 3)
+            .collect();
+        for layer in 0..l.layers.len() {
+            let whole: Vec<_> = c
+                .clearance(layer, 400_000)
+                .into_iter()
+                .filter(|g| keys.contains(&g.a.0) || keys.contains(&g.b.0))
+                .collect();
+            assert_eq!(
+                c.clearance_of(layer, 400_000, &keys),
+                whole,
+                "seed {seed} layer {layer}"
+            );
+            let holes: Vec<_> = c
+                .hole_clearance(layer, 400_000)
+                .into_iter()
+                .filter(|g| keys.contains(&g.hole) || keys.contains(&g.piece.0))
+                .collect();
+            assert_eq!(
+                c.hole_clearance_of(layer, 400_000, &keys),
+                holes,
+                "seed {seed} layer {layer}"
+            );
+        }
+    }
+}
