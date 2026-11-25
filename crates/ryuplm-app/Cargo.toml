@@ -23,6 +23,11 @@ ryu-session = { path = "../ryu-session" }
 ryuplm = { path = "../ryuplm", default-features = false }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 
+# ShellExecuteW opens a document on Windows: never through cmd, which
+# would read a committer's file name (`&`, `^`, `%`) as a command.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 winit = { version = "0.30", default-features = false, features = ["wayland-csd-adwaita"] }
 

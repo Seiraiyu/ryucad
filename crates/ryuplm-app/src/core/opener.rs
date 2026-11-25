@@ -49,29 +49,152 @@ pub fn fetch_cli(exe: &Path, root: &Path, id: &str, out: &Path) -> Result<()> {
         .unwrap_or_else(|_| Error::new(Code::Internal, v["error"].to_string())))
 }
 
-/// Opens `path` with `program`, else the OS's opener, detached.
+/// Opens `path` with `program`, else the OS's opener, detached. The path
+/// is one argument, never a command line: on Windows the shell opens it
+/// (ShellExecuteW), as no `cmd /C start` would, since cmd reads `&`, `^`
+/// and `%` in a file name as its own.
 pub fn open_with(program: Option<&OsStr>, path: &Path) -> Result<()> {
+    let failed = |why: String| {
+        Error::new(
+            Code::Internal,
+            format!("nothing opened {}: {why}", path.display()),
+        )
+        .with("path", path)
+    };
     let mut cmd = match program {
         Some(p) => Command::new(p),
-        None if cfg!(target_os = "macos") => Command::new("open"),
         None if cfg!(windows) => {
-            let mut c = Command::new("cmd");
-            c.args(["/C", "start", ""]);
-            c
+            refuse_programs(path)?;
+            return shell_open(path).map_err(failed);
         }
+        None if cfg!(target_os = "macos") => Command::new("open"),
         None => Command::new("xdg-open"),
     };
     cmd.arg(path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    spawn_detached(&mut cmd).map(drop).map_err(|e| {
-        Error::new(
+    spawn_detached(&mut cmd)
+        .map(drop)
+        .map_err(|e| failed(e.to_string()))
+}
+
+/// What Windows' shell runs rather than opens, beside `PATHEXT`'s.
+const PROGRAMS: &[&str] = &[
+    "exe",
+    "com",
+    "bat",
+    "cmd",
+    "ps1",
+    "psm1",
+    "vbs",
+    "vbe",
+    "js",
+    "jse",
+    "wsf",
+    "wsh",
+    "msc",
+    "msi",
+    "msp",
+    "scr",
+    "lnk",
+    "url",
+    "hta",
+    "cpl",
+    "pif",
+    "reg",
+    "appref-ms",
+    "application",
+    "jar",
+    "inf",
+    "scf",
+];
+
+/// Whether Windows' shell would run a file named `name` rather than
+/// open it: its extension a program's, `PATHEXT`'s or [`PROGRAMS`].
+pub fn runs_on_windows(name: &str, pathext: &str) -> bool {
+    // Windows drops a name's trailing dots and spaces.
+    let Some((_, ext)) = name.trim_end_matches([' ', '.']).rsplit_once('.') else {
+        return false;
+    };
+    let ext = ext.to_ascii_lowercase();
+    PROGRAMS.contains(&ext.as_str())
+        || pathext
+            .split(';')
+            .any(|p| p.trim().trim_start_matches('.').eq_ignore_ascii_case(&ext))
+}
+
+/// A document a committer named `x.bat` is left where it was written:
+/// the shell's Open would run it.
+fn refuse_programs(path: &Path) -> Result<()> {
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned());
+    let pathext = std::env::var("PATHEXT").unwrap_or_default();
+    if name
+        .as_deref()
+        .is_some_and(|n| runs_on_windows(n, &pathext))
+    {
+        let folder = path.parent().unwrap_or(path);
+        return Err(Error::new(
             Code::Internal,
-            format!("nothing opened {}: {e}", path.display()),
+            format!(
+                "{} is a program's file: Windows would run it rather than open it, so it is left in {}",
+                path.display(),
+                folder.display()
+            ),
         )
-        .with("path", path)
-    })
+        .with("path", path));
+    }
+    Ok(())
+}
+
+/// `path` as ShellExecuteW's file: its UTF-16, NUL-ended, as it is.
+pub fn wide(path: &Path) -> Vec<u16> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        path.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
+    }
+    #[cfg(not(windows))]
+    {
+        path.to_string_lossy()
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect()
+    }
+}
+
+#[cfg(windows)]
+fn shell_open(path: &Path) -> std::result::Result<(), String> {
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    let file = wide(path);
+    // SAFETY: `file` is NUL-ended and outlives the call; every other
+    // pointer is null, which ShellExecuteW takes as the default verb, no
+    // parameters and no folder.
+    let r = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            file.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    // Above 32 is success; anything else is one of its error numbers.
+    if r as usize > 32 {
+        Ok(())
+    } else {
+        Err(format!("the shell refused it (error {})", r as usize))
+    }
+}
+
+#[cfg(not(windows))]
+fn shell_open(_: &Path) -> std::result::Result<(), String> {
+    unreachable!("the shell opens documents on Windows only")
 }
 
 /// [`open_with`] `RYUPLM_OPENER`, else the OS's opener.
@@ -103,6 +226,42 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(e.code, Code::AppNotInstalled);
+    }
+
+    #[test]
+    fn a_name_cmd_would_read_goes_to_the_shell_as_it_is() {
+        // `&` ends cmd's command, `^` escapes, `%PATH%` expands and the
+        // parentheses group: each allowed in a document's file name.
+        let name = "spec&calc ^x %PATH% (1).pdf";
+        assert!(ryuplm::document::name_ok(name), "a name ryuplm allows");
+        let p = temp_path("d000000000001", name);
+        let w = wide(&p);
+        assert_eq!(w.last(), Some(&0));
+        assert_eq!(
+            String::from_utf16(&w[..w.len() - 1]).unwrap(),
+            p.to_string_lossy(),
+            "the file, with nothing quoted or added"
+        );
+    }
+
+    #[test]
+    fn a_program_s_file_is_never_run_on_windows() {
+        let pathext = ".COM;.EXE;.BAT;.CMD;.VBS;.JS;.WS;.MSC";
+        for n in [
+            "evil.exe", "a.BAT", "x.cmd", "y.ps1", "z.lnk", "w.ws", "v.js. ",
+        ] {
+            assert!(runs_on_windows(n, pathext), "{n}");
+        }
+        for n in [
+            "spec.pdf",
+            "drawing.dxf",
+            "notes",
+            "spec&calc.pdf",
+            "a.exe.pdf",
+        ] {
+            assert!(!runs_on_windows(n, pathext), "{n}");
+        }
+        assert!(runs_on_windows("m.foo", ".FOO"), "PATHEXT's own");
     }
 
     #[cfg(unix)]
