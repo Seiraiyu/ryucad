@@ -427,14 +427,34 @@ pub fn show(session: &mut Session, document: &str) -> Result<Value> {
     Ok(v)
 }
 
+/// `document list`: each document's row (`id`, `number`, `title`, `type`,
+/// `size`, `storage`, and the record's `file`, `description`, `pin` and
+/// `previous_numbers`), with its `state` for the working files. At `rev`
+/// the rows are that revision's records and carry no state. Schema 1:
+/// the hosted service reads it (ryuplm 3.C).
 pub fn list(
-    session: &Session,
+    session: &mut Session,
     doc_type: Option<String>,
     number: Option<String>,
     text: Option<String>,
     limit: Option<usize>,
-) -> Value {
-    let c = session.catalogue();
+    rev: Option<&str>,
+) -> Result<Value> {
+    let states = match rev {
+        None => {
+            let releases = crate::release::releases_or_none(session);
+            Some(ryupdm::state::derive_all_for::<crate::Plm>(
+                &session.snapshot(),
+                &releases,
+            ))
+        }
+        Some(_) => None,
+    };
+    let at = match rev {
+        None => None,
+        Some(r) => Some(Catalogue::load(&files_at_rev(session, r)?)?),
+    };
+    let c = at.as_ref().unwrap_or_else(|| session.catalogue());
     let ids: Vec<Id> = match &number {
         Some(n) => c.documents_by_number(n),
         None => c.documents.keys().cloned().collect(),
@@ -459,11 +479,22 @@ pub fn list(
         .take(limit.unwrap_or(usize::MAX))
         .map(|id| {
             let d = &c.documents[&id];
-            json!({"id": id, "number": d.number, "title": d.title, "type": d.doc_type,
-                   "size": d.file.size, "storage": d.storage.as_str()})
+            let full = d.to_json();
+            let mut v = json!({"id": id, "number": d.number, "title": d.title, "type": d.doc_type,
+                               "size": d.file.size, "storage": d.storage.as_str(),
+                               "file": full["file"]});
+            for k in ["description", "pin", "previous_numbers"] {
+                if let Some(x) = full.get(k) {
+                    v[k] = x.clone();
+                }
+            }
+            if let Some(s) = states.as_ref().and_then(|s| s.get(&id)) {
+                v["state"] = s.to_json();
+            }
+            v
         })
         .collect();
-    json!({"count": rows.len(), "documents": rows})
+    Ok(json!({"schema": crate::OUTPUT_SCHEMA, "count": rows.len(), "documents": rows}))
 }
 
 pub fn edit(
@@ -1383,6 +1414,7 @@ pub(crate) mod tests {
                 number: None,
                 text: None,
                 limit: None,
+                rev: None,
             },
         )
         .unwrap();
@@ -1777,6 +1809,87 @@ pub(crate) mod tests {
                 .join(&v["document"]["id"].as_str().unwrap()[..2])
                 .join(v["document"]["id"].as_str().unwrap())
                 .exists()
+        );
+    }
+
+    #[test]
+    fn list_gives_each_records_file_and_reads_a_revision() {
+        let (_d, root) = catalogue();
+        let outside = tempfile::tempdir().unwrap();
+        let made = ask(
+            &root,
+            Request::DocumentAdd {
+                file: Some(source(outside.path(), "a.pdf", b"%PDF a")),
+                number: Some("D-1".into()),
+                next: None,
+                fields: New {
+                    title: Some("A".into()),
+                    ..Default::default()
+                },
+                storage: None,
+                drive: None,
+                expected_revision: None,
+            },
+        )
+        .unwrap();
+        let id = made["document"]["id"].as_str().unwrap().to_owned();
+        let git = |args: &[&str]| {
+            let o = std::process::Command::new("git")
+                .current_dir(&root)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        };
+        git(&["init", "-q"]);
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "--no-verify", "-m", "one"]);
+        ask(
+            &root,
+            Request::DocumentReplace {
+                document: id.clone(),
+                file: source(outside.path(), "b.pdf", b"%PDF bb"),
+                media_type: None,
+                expected_revision: None,
+            },
+        )
+        .unwrap();
+        let list = |rev: Option<&str>| {
+            ask(
+                &root,
+                Request::DocumentList {
+                    doc_type: None,
+                    number: None,
+                    text: None,
+                    limit: None,
+                    rev: rev.map(String::from),
+                },
+            )
+            .unwrap()
+        };
+        let now = list(None);
+        assert_eq!(now["schema"], 1);
+        let row = &now["documents"][0];
+        assert_eq!(row["id"], json!(id));
+        assert_eq!(
+            row["file"]["blake3"],
+            json!(blake3::hash(b"%PDF bb").to_hex().to_string())
+        );
+        assert_eq!(row["file"]["media_type"], "application/pdf");
+        assert_eq!(row["state"]["state"], "in_work");
+        let then = list(Some("HEAD"));
+        let row = &then["documents"][0];
+        assert_eq!(
+            row["file"]["blake3"],
+            json!(blake3::hash(b"%PDF a").to_hex().to_string()),
+            "the committed record, not the working one"
+        );
+        assert!(
+            row.get("state").is_none(),
+            "state is the working files' alone"
         );
     }
 

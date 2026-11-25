@@ -565,6 +565,9 @@ enum DocumentCmd {
         text: Option<String>,
         #[arg(long)]
         limit: Option<usize>,
+        /// A Git revision of the catalogue: the working files by default.
+        #[arg(long, value_name = "REV")]
+        rev: Option<String>,
     },
     /// Change the title, type or description; --unset description clears it.
     Edit {
@@ -929,6 +932,7 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
             number,
             text,
             limit,
+            rev,
         }) => (
             root()?,
             Request::DocumentList {
@@ -936,6 +940,7 @@ fn request(cmd: &Command, here: &Path) -> Result<Option<(PathBuf, Request)>> {
                 number: number.clone(),
                 text: text.clone(),
                 limit: *limit,
+                rev: rev.clone(),
             },
         ),
         Command::Document(DocumentCmd::Edit {

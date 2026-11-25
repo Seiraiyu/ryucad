@@ -169,6 +169,7 @@ The design is document 937 in the Coxswain planning project `ryucad-ryukei`; thi
   - `document upload [<document>…]` (all service-stored documents when none are named) uploads what the service lacks, from the cache. It fails with `document_bytes_missing` naming any document whose bytes are in neither.
   - `document sync [<document>…|--all] [--dry-run]` pins each document's Drive file again (`document.sync`). The same revision and hash write nothing (`unchanged`).
   - `document.locate` (read only) says each document's storage, file, pin and, for service storage, whether this machine's cache holds the bytes.
+  - `document list` (schema 1) gives each row the record's `file`, `description`, `pin` and `previous_numbers`, and its `state` for the working files; `--rev REV` lists a revision's records, with no state. ryupdm-service reads it to index documents (plan 3.C).
 - **Offline.** An upload the service can't take (no network, no token, no GitHub remote, not a repository) leaves the record written, with `not_uploaded` in the answer and the warning `document_not_uploaded: …; run ryuplm document upload`. Any other refusal fails the command after the record is written, and `document upload` retries it. `check` never needs the network.
 - **Undo** restores a service-stored record's earlier `file`. The earlier bytes stay in the cache and on the service, where retention keeps them for 30 days after nothing names them.
 - **The window's Documents tab** is built with the window, in ryuplm 1.E (question 1263).
