@@ -11,8 +11,12 @@ use crate::tree;
 use rayon::prelude::*;
 use ryu_board::geom::{Mdeg, Nm, Place, Point, Rect};
 
-/// The bound fills are flattened at.
-pub const BOUND: Nm = 10;
+/// The bound fills are flattened at (ryueda 7.E, question 1305: 1 µm;
+/// 7.D's 10 nm put a plane's time in its round corners' vertices, 9.9 s
+/// against 0.64 s on the bars' board). Obstacles grow by their rule plus
+/// this and a nanometre, so a fill is exactly clear of copper by its rule
+/// either way.
+pub const BOUND: Nm = 1_000;
 
 /// The flattening fills use.
 pub fn opts() -> FlattenOptions {
