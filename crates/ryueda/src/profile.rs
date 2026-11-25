@@ -9,8 +9,12 @@ use std::time::Instant;
 
 fn sink() -> Option<&'static str> {
     static SINK: OnceLock<Option<String>> = OnceLock::new();
-    SINK.get_or_init(|| std::env::var("RYUEDA_PROFILE").ok().filter(|v| !v.is_empty()))
-        .as_deref()
+    SINK.get_or_init(|| {
+        std::env::var("RYUEDA_PROFILE")
+            .ok()
+            .filter(|v| !v.is_empty())
+    })
+    .as_deref()
 }
 
 /// A stage's timer: prints its time when dropped.
@@ -32,7 +36,11 @@ impl Drop for Stage {
         );
         if to == "1" {
             eprint!("{line}");
-        } else if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(to) {
+        } else if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(to)
+        {
             let _ = f.write_all(line.as_bytes());
         }
     }

@@ -120,7 +120,10 @@ pub fn handle_job(
     )
     .then(|| req.clone());
     let mut live = live;
-    let r = guarded(slot, root, |s| answer(s, live.as_deref_mut(), me, req, job));
+    let watch = live.is_some();
+    let r = guarded(slot, root, watch, |s| {
+        answer(s, live.as_deref_mut(), me, req, job)
+    });
     let r = match (r, merge, sessionless) {
         (Err(e), Some(req), _) if manifest_record(&e) => {
             crate::validate::unloaded(root, req).map(Answer::json)
@@ -187,11 +190,23 @@ pub fn prepare(
 fn guarded<T>(
     slot: &mut Option<Session>,
     root: &Path,
+    watch: bool,
     f: impl FnOnce(&mut Session) -> Result<T>,
 ) -> Result<T> {
     let session = match slot {
         Some(s) => s,
-        None => slot.insert(Session::open(root)?),
+        None => {
+            let mut s = Session::open(root)?;
+            // A daemon's session lives on: file events narrow its checks,
+            // its markers beside its log (ryueda 7.E).
+            if watch {
+                let markers = ryu_session::endpoint::Endpoint::<crate::Eda>::for_project(root)?
+                    .log
+                    .with_extension("watch");
+                s = s.with_watch(&markers);
+            }
+            slot.insert(s)
+        }
     };
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(session))) {
         Ok(r) => r,
@@ -2589,7 +2604,7 @@ pub fn publish_pdm(live: &mut Live<Eda>, session: &mut Session) {
 /// Brings the session and what subscribers know up to date with the
 /// files: before a subscription, and while anyone watches.
 pub fn settle(slot: &mut Option<Session>, live: &mut Live<Eda>, root: &Path) {
-    let _ = guarded(slot, root, |s| {
+    let _ = guarded(slot, root, true, |s| {
         let before = live.snapshot();
         let external = s.refresh_changes()?;
         if !external.is_empty() {

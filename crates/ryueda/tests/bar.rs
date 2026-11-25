@@ -794,6 +794,7 @@ fn a_generated_board_checks_and_answers_a_write_within_its_bars() {
     let board = dir.path().join("board");
     std::fs::create_dir_all(&board).unwrap();
     board_gen::write(&board, &board_gen::Spec::bar());
+    board_gen::age(&board);
     git(&board, &["init", "-q"]);
     let id = ryueda::id::Id::parse("main", "board").unwrap();
     let t = Instant::now();

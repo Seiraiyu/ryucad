@@ -437,3 +437,21 @@ pub fn seeded_multilayer(seed: u64) -> Spec {
         ..seeded(seed)
     }
 }
+
+/// Every file under `dir` modified an hour ago: a session trusts a file's
+/// stamp only once it is two seconds old, so a bar run just after
+/// generating a board would read every file again on every request.
+pub fn age(dir: &Path) {
+    let then = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap().flatten() {
+            let path = e.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if let Ok(f) = std::fs::File::options().write(true).open(&path) {
+                f.set_modified(then).unwrap();
+            }
+        }
+    }
+}
