@@ -43,6 +43,66 @@ fn unknown(path: &str) -> Fault {
     .with("path", path)
 }
 
+/// Board files read before, by their bytes (ryueda 7.E): a session's
+/// sources share one buffer per file while it is unchanged, so the
+/// buffer itself is the key (held, so its address can't be reused while
+/// the entry lives) and nothing is hashed. Each load keeps the entries it
+/// used and drops the rest, so the cache holds about one project's board
+/// files; loads side by side only miss more.
+struct Parsed {
+    now: std::collections::HashMap<Key, Entry>,
+    next: std::collections::HashMap<Key, Entry>,
+}
+
+type Key = (usize, usize, &'static str);
+type Entry = (
+    std::sync::Arc<[u8]>,
+    std::sync::Arc<dyn std::any::Any + Send + Sync>,
+);
+
+static PARSED: std::sync::Mutex<Option<Parsed>> = std::sync::Mutex::new(None);
+
+/// `bytes` read as a `T` of `kind`, or the copy parsed from the same
+/// buffer before. Errors aren't kept: they parse again.
+fn parse<T: serde::de::DeserializeOwned + Clone + Send + Sync + 'static>(
+    bytes: &std::sync::Arc<[u8]>,
+    path: &str,
+    kind: &'static str,
+    newest: u64,
+) -> Result<T> {
+    let key = (bytes.as_ptr() as usize, bytes.len(), kind);
+    {
+        let mut g = PARSED.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(c) = g.as_mut() {
+            let hit = c.next.get(&key).or_else(|| c.now.get(&key)).cloned();
+            if let Some((b, v)) = hit
+                && let Some(t) = v.downcast_ref::<T>()
+            {
+                let t = t.clone();
+                c.next.insert(key, (b, v));
+                return Ok(t);
+            }
+        }
+    }
+    let t: T = doc::read(bytes, path, kind, newest)?;
+    let mut g = PARSED.lock().unwrap_or_else(|e| e.into_inner());
+    let c = g.get_or_insert_with(|| Parsed {
+        now: Default::default(),
+        next: Default::default(),
+    });
+    c.next
+        .insert(key, (bytes.clone(), std::sync::Arc::new(t.clone())));
+    Ok(t)
+}
+
+/// Ends a load: what it used is what the next one looks in first.
+fn parsed_done() {
+    let mut g = PARSED.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(c) = g.as_mut() {
+        c.now = std::mem::take(&mut c.next);
+    }
+}
+
 fn read(src: &dyn Source, path: &str) -> Result<std::sync::Arc<[u8]>> {
     src.read_shared(path)?
         .ok_or_else(|| Error::new(Code::NotFound, format!("{path} vanished")))
@@ -67,6 +127,7 @@ pub fn load(src: &dyn Source) -> Result<(BTreeMap<Id, BoardFiles>, Vec<Fault>)> 
             boards.insert(b.id.clone(), b);
         }
     }
+    parsed_done();
     Ok((boards, faults))
 }
 
@@ -129,7 +190,7 @@ fn load_one(
                     let bytes = read(src, &at)?;
                     piece(&mut h, join(PLACEMENTS, &file).as_bytes());
                     piece(&mut h, &bytes);
-                    let loaded = match doc::read::<Placement>(&bytes, &at, PLACEMENT_KIND, NEWEST) {
+                    let loaded = match parse::<Placement>(&bytes, &at, PLACEMENT_KIND, NEWEST) {
                         Ok(p) => Loaded {
                             faults: placement_faults(&p)
                                 .into_iter()
@@ -323,11 +384,11 @@ fn load_one(
 /// One route folder's files, each `<id>.json`, hashed into the board's
 /// revision; whether it held any.
 #[allow(clippy::too_many_arguments)]
-fn routes<T: serde::de::DeserializeOwned>(
+fn routes<T: serde::de::DeserializeOwned + Clone + Send + Sync + 'static>(
     src: &dyn Source,
     dir: &str,
     folder: &str,
-    kind: &str,
+    kind: &'static str,
     what: &str,
     h: &mut blake3::Hasher,
     faults: &mut Vec<Fault>,
@@ -354,7 +415,7 @@ fn routes<T: serde::de::DeserializeOwned>(
         } else {
             NEWEST
         };
-        let loaded = match doc::read::<T>(&bytes, &at, kind, newest) {
+        let loaded = match parse::<T>(&bytes, &at, kind, newest) {
             Ok(x) => Loaded {
                 faults: check(&x).into_iter().map(|f| f.with("path", &at)).collect(),
                 item: Ok(x),
