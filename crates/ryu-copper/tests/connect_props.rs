@@ -620,6 +620,91 @@ fn apply_matches_a_rebuild() {
     }
 }
 
+/// A point outside every box the edits since `mark_changes` marked lands
+/// on the nodes it landed on before, and those read as islands place it
+/// where a rebuild does (ryueda 7.E), over random edits of seeded layouts
+/// with negatives and holes, on a grid of points from either side and
+/// none.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "release only: booleans of seeded shapes take minutes in a debug build"
+)]
+fn landings_outside_the_marks_are_kept() {
+    use ryu_copper::layout::PointSide;
+    let sides = [Some(PointSide::Top), Some(PointSide::Bottom), None];
+    let points: Vec<(Point, Option<PointSide>)> = (0..24)
+        .flat_map(|i| (0..24).map(move |j| (i, j)))
+        .flat_map(|(i, j)| {
+            let at = Point::new(-5_000_000 + i * 434_783, -5_000_000 + j * 434_783);
+            sides.iter().map(move |s| (at, *s))
+        })
+        .collect();
+    let mut kept_total = 0usize;
+    for case in 0..CASES {
+        let mut full = seeded(0x6c61_6e64 + case, 100, false);
+        add_holes(&mut full, case + 7, 24);
+        let mut g = Lcg::new(case ^ 0x6d61_726b);
+        let mut l = Layout {
+            layers: full.layers.clone(),
+            ..Layout::default()
+        };
+        for (k, it) in &full.items {
+            if g.coin() {
+                l.items.insert(*k, it.clone());
+            }
+        }
+        for (k, h) in &full.holes {
+            if g.coin() {
+                l.holes.insert(*k, h.clone());
+            }
+        }
+        let mut c = Copper::new(&l, BodyOptions::default());
+        let mut landed: Vec<_> = points.iter().map(|(p, s)| c.land(*p, *s)).collect();
+        let items: Vec<u32> = full.items.keys().copied().collect();
+        let holes: Vec<u32> = full.holes.keys().copied().collect();
+        for step in 0..24 {
+            c.mark_changes();
+            for _ in 0..1 + g.range(0, 2) {
+                if g.range(0, 3) < 2 {
+                    let k = items[g.range(0, items.len() as i64 - 1) as usize];
+                    if l.items.remove(&k).is_some() {
+                        c.remove_item(&k);
+                    } else {
+                        l.items.insert(k, full.items[&k].clone());
+                        c.insert_item(k, full.items[&k].clone());
+                    }
+                } else {
+                    let k = holes[g.range(0, holes.len() as i64 - 1) as usize];
+                    if l.holes.remove(&k).is_some() {
+                        c.remove_hole(&k);
+                    } else {
+                        l.holes.insert(k, full.holes[&k].clone());
+                        c.insert_hole(k, full.holes[&k].clone());
+                    }
+                }
+            }
+            let marks = c.take_marks();
+            let fresh = Copper::new(&l, BodyOptions::default());
+            for (i, (p, s)) in points.iter().enumerate() {
+                let now = c.land(*p, *s);
+                if !marks.iter().any(|r| r.contains(*p)) {
+                    assert_eq!(now, landed[i], "case {case}, step {step}, point {p:?}");
+                    kept_total += 1;
+                }
+                landed[i] = now;
+                assert_eq!(
+                    c.placement_of(&landed[i]),
+                    fresh.place(*p, *s),
+                    "case {case}, step {step}, point {p:?}"
+                );
+            }
+        }
+    }
+    // The edits must leave most points where they were.
+    assert!(kept_total > 0);
+}
+
 /// `clearance_of` and `hole_clearance_of` are the whole queries filtered
 /// to the keys (ryueda 7.E), over seeded layouts with holes.
 #[test]

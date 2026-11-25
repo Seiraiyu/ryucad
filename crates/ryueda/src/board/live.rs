@@ -89,8 +89,15 @@ impl Live {
             Arc::try_unwrap(c.conn).ok().map(|conn| (conn, raw))
         });
         let stage = crate::profile::stage("live.apply");
-        let applied =
-            taken.and_then(|(mut conn, raw)| conn.apply(&board, &s).map(|ch| (conn, raw, ch)));
+        let delta = super::connect::Delta {
+            was: &self.pieces,
+            now: &pieces,
+            old_pours: &old_shapes.pours,
+        };
+        let applied = taken.and_then(|(mut conn, raw)| {
+            conn.apply_delta(&board, &s, Some(&delta))
+                .map(|ch| (conn, raw, ch))
+        });
         match applied {
             Some((conn, raw, changed)) => {
                 drop(stage);

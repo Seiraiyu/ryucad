@@ -68,7 +68,7 @@ pub use edit::Applied;
 pub use gap::Gap;
 use graph::Graph;
 pub use holegap::HoleGap;
-pub use place::Placement;
+pub use place::{Landing, Placement};
 pub use resolve::{group_touch, groups};
 
 /// A node of the contact graph.
@@ -269,6 +269,24 @@ pub struct Copper<K> {
     /// Items put through the boolean since this was built, counted for
     /// tests and benchmarks: what edits cost.
     resolves: AtomicU64,
+    /// While set, the boxes (grown by their bodies' bounds) of every item
+    /// whose body or pieces an edit changed and of every hole it drilled
+    /// or filled (ryueda 7.E: points elsewhere land where they did).
+    marks: Option<Vec<Rect>>,
+}
+
+/// Notes a body's box, grown by its bound, while `marks` is set.
+fn note<K: Ord + Hash + Clone + Send + Sync>(
+    marks: &mut Option<Vec<Rect>>,
+    index: &Index<K>,
+    key: &K,
+) {
+    if let Some(m) = marks
+        && let Some(b) = index.body(key)
+        && let Some(r) = b.bounds()
+    {
+        m.push(grown(&r, b.bound.saturating_add(1)));
+    }
 }
 
 impl<K: Ord + Hash + Clone + Send + Sync> Copper<K> {
@@ -310,6 +328,7 @@ impl<K: Ord + Hash + Clone + Send + Sync> Copper<K> {
             graph: Graph::new(),
             uncertain: BTreeMap::new(),
             resolves: AtomicU64::new(0),
+            marks: None,
         };
         let modes: Vec<(usize, Modes<K>)> = (0..n)
             .into_par_iter()
@@ -354,6 +373,20 @@ impl<K: Ord + Hash + Clone + Send + Sync> Copper<K> {
 
     pub fn layers(&self) -> &[Layer] {
         &self.layers
+    }
+
+    /// Starts noting what edits change (ryueda 7.E): from now until
+    /// [`Self::take_marks`], each edit notes the box of every item whose
+    /// body or pieces it changed and of every hole it drilled or filled,
+    /// before and after. A point outside them all lands on the nodes it
+    /// landed on before ([`Self::land`]).
+    pub fn mark_changes(&mut self) {
+        self.marks = Some(Vec::new());
+    }
+
+    /// The boxes noted since [`Self::mark_changes`], and noting stopped.
+    pub fn take_marks(&mut self) -> Vec<Rect> {
+        self.marks.take().unwrap_or_default()
     }
 
     pub fn options(&self) -> &BodyOptions {
@@ -546,6 +579,7 @@ impl<K: Ord + Hash + Clone + Send + Sync> Copper<K> {
         for (k, g) in m.resolved {
             if let Some(e) = self.entries.get_mut(&k) {
                 e.resolved = Some(g);
+                note(&mut self.marks, &self.bodies, &k);
             }
         }
         self.hard[layer].extend(m.hard);

@@ -3,7 +3,8 @@
 //! drill as a hole; one netlist point per pad with a net, so the copper
 //! is compared with the design's own netlist.
 
-use super::shapes::{BoardShapes, HoleOf};
+use super::pour::PourInfo;
+use super::shapes::{BoardShapes, HoleInfo, HoleOf, PadInfo, TrackInfo, ViaInfo};
 use ryu_board::geom::Point;
 use ryu_board::model::Side;
 use ryu_copper::layout::{Hole, HoleShape, Item, Layer, Layout, NetPoint, PointSide};
@@ -79,9 +80,8 @@ fn centre(h: &HoleShape) -> Point {
     }
 }
 
-/// The layout of board `board`'s shapes.
-pub fn build(board: &str, s: &BoardShapes) -> Built {
-    let n = s.n();
+/// The copper layers of an `n`-layer board, and their names.
+pub fn layers_of(n: usize) -> (Vec<Layer>, Vec<String>) {
     let names = super::stackup::names(n);
     let layers = names
         .iter()
@@ -98,19 +98,23 @@ pub fn build(board: &str, s: &BoardShapes) -> Built {
             copper: true,
         })
         .collect();
-    let mut layout = Layout {
-        layers,
-        ..Layout::default()
-    };
-    let mut pads = BTreeMap::new();
-    for pd in &s.pads {
-        pads.insert(
-            (pd.occurrence.clone(), pd.pad.clone()),
-            pd.reference.clone(),
-        );
+    (layers, names)
+}
+
+/// The items of pads, tracks and vias on an `n`-layer board, put in
+/// `items` (one object's, or the whole board's: ryueda 7.E builds the
+/// layout of the objects an update changed alone).
+pub fn put_items(
+    n: usize,
+    pads: &[PadInfo],
+    tracks: &[TrackInfo],
+    vias: &[ViaInfo],
+    items: &mut BTreeMap<Key, Item>,
+) {
+    for pd in pads {
         for layer in 0..n as u8 {
             if pd.on(usize::from(layer), n) {
-                layout.items.insert(
+                items.insert(
                     Key::Pad {
                         occ: pd.occurrence.clone(),
                         pad: pd.pad.clone(),
@@ -125,11 +129,11 @@ pub fn build(board: &str, s: &BoardShapes) -> Built {
             }
         }
     }
-    for t in &s.tracks {
+    for t in tracks {
         let Some(layer) = t.layer.index(n) else {
             continue;
         };
-        layout.items.insert(
+        items.insert(
             Key::Track(t.id.to_string()),
             Item {
                 layer,
@@ -138,9 +142,9 @@ pub fn build(board: &str, s: &BoardShapes) -> Built {
             },
         );
     }
-    for v in &s.vias {
+    for v in vias {
         for layer in v.from as u8..=v.to.min(n - 1) as u8 {
-            layout.items.insert(
+            items.insert(
                 Key::Via(v.id.to_string(), layer),
                 Item {
                     layer: usize::from(layer),
@@ -150,39 +154,42 @@ pub fn build(board: &str, s: &BoardShapes) -> Built {
             );
         }
     }
-    for f in &s.pours {
-        for (r, (x, y, n)) in f.regions.iter().zip(&f.places) {
-            layout.items.insert(
-                Key::Pour {
-                    id: f.id.to_string(),
-                    tile: (*x, *y),
-                    n: *n,
-                },
-                Item {
-                    layer: f.layer,
-                    shape: r.clone(),
-                    net: Some(f.net.clone()),
-                },
-            );
-        }
+}
+
+/// A pour's filled pieces as items, put in `items`.
+pub fn put_pour(f: &PourInfo, items: &mut BTreeMap<Key, Item>) {
+    for (r, (x, y, n)) in f.regions.iter().zip(&f.places) {
+        items.insert(
+            Key::Pour {
+                id: f.id.to_string(),
+                tile: (*x, *y),
+                n: *n,
+            },
+            Item {
+                layer: f.layer,
+                shape: r.clone(),
+                net: Some(f.net.clone()),
+            },
+        );
     }
-    let mut drills: BTreeMap<(String, String), HoleShape> = BTreeMap::new();
-    for h in &s.holes {
-        let key = match &h.of {
-            HoleOf::Pad { occ, pad } => {
-                if h.plated {
-                    drills.insert((occ.clone(), pad.clone()), h.shape);
-                }
-                Key::PadDrill {
-                    occ: occ.clone(),
-                    pad: pad.clone(),
-                }
-            }
-            HoleOf::Via(id) => Key::ViaDrill(id.to_string()),
-            HoleOf::Hole(id) => Key::Hole(id.to_string()),
-        };
-        layout.holes.insert(
-            key,
+}
+
+fn hole_key(h: &HoleInfo) -> Key {
+    match &h.of {
+        HoleOf::Pad { occ, pad } => Key::PadDrill {
+            occ: occ.clone(),
+            pad: pad.clone(),
+        },
+        HoleOf::Via(id) => Key::ViaDrill(id.to_string()),
+        HoleOf::Hole(id) => Key::Hole(id.to_string()),
+    }
+}
+
+/// Drills as holes on an `n`-layer board, put in `out`.
+pub fn put_holes(n: usize, holes: &[HoleInfo], out: &mut BTreeMap<Key, Hole>) {
+    for h in holes {
+        out.insert(
+            hole_key(h),
             Hole {
                 shape: h.shape,
                 span: (h.span.0, h.span.1.min(n - 1)),
@@ -191,9 +198,24 @@ pub fn build(board: &str, s: &BoardShapes) -> Built {
             },
         );
     }
-    for pd in &s.pads {
+}
+
+/// The netlist points of an `n`-layer board's pads, in the pads' order:
+/// a pad with a plated drill through its drill, a surface pad on its
+/// side's outer layer.
+pub fn points_of(n: usize, pads: &[PadInfo], holes: &[HoleInfo]) -> Vec<NetPoint<Key>> {
+    let drills: std::collections::HashMap<(&str, &str), &HoleShape> = holes
+        .iter()
+        .filter(|h| h.plated)
+        .filter_map(|h| match &h.of {
+            HoleOf::Pad { occ, pad } => Some(((occ.as_str(), pad.as_str()), &h.shape)),
+            _ => None,
+        })
+        .collect();
+    let mut points = Vec::new();
+    for pd in pads {
         let Some(net) = &pd.net else { continue };
-        let at_drill = drills.get(&(pd.occurrence.clone(), pd.pad.clone()));
+        let at_drill = drills.get(&(pd.occurrence.as_str(), pd.pad.as_str()));
         let (key, at, side) = match at_drill {
             Some(h) => (
                 Key::PadDrill {
@@ -223,13 +245,40 @@ pub fn build(board: &str, s: &BoardShapes) -> Built {
             ),
             None => continue,
         };
-        layout.points.push(NetPoint {
+        points.push(NetPoint {
             net: net.clone(),
             at,
             side,
             key,
         });
     }
+    points
+}
+
+/// The layout of board `board`'s shapes.
+pub fn build(board: &str, s: &BoardShapes) -> Built {
+    let n = s.n();
+    let (layers, names) = layers_of(n);
+    let mut layout = Layout {
+        layers,
+        ..Layout::default()
+    };
+    put_items(n, &s.pads, &s.tracks, &s.vias, &mut layout.items);
+    for f in &s.pours {
+        put_pour(f, &mut layout.items);
+    }
+    put_holes(n, &s.holes, &mut layout.holes);
+    layout.points = points_of(n, &s.pads, &s.holes);
+    let pads = s
+        .pads
+        .iter()
+        .map(|pd| {
+            (
+                (pd.occurrence.clone(), pd.pad.clone()),
+                pd.reference.clone(),
+            )
+        })
+        .collect();
     Built {
         board: board.to_owned(),
         layout,

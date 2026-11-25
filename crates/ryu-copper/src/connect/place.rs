@@ -39,16 +39,25 @@ impl<K: Ord + Hash + Clone + Send + Sync> Copper<K> {
     /// pieces that hold it there. With no side, through the wall of a
     /// plated hole that holds it.
     pub fn place(&self, at: Point, side: Option<PointSide>) -> Placement<K> {
+        self.placement_of(&self.land(at, side))
+    }
+
+    /// The nodes a point lands on, before they are read as islands: what
+    /// [`Self::place`] judges from the copper near the point alone, kept
+    /// while no edit marks a box holding the point ([`Self::mark_changes`]).
+    pub fn land(&self, at: Point, side: Option<PointSide>) -> Landing<K> {
+        let mut out = Landing {
+            nodes: Vec::new(),
+            doubt: false,
+        };
         let layer = match side {
             Some(s) => match self.outer(s) {
                 Some(l) => Some(l),
-                None => return Placement::Off,
+                None => return out,
             },
             None => None,
         };
         let pt = Body::point(at);
-        let mut found: BTreeSet<IslandId<K>> = BTreeSet::new();
-        let mut doubt = false;
         let mut drilled = false;
         for n in self.drills.near_body(0, &pt, 0) {
             let h = &self.holes[&n.key];
@@ -58,7 +67,7 @@ impl<K: Ord + Hash + Clone + Send + Sync> Copper<K> {
                 continue;
             }
             if n.verdict != Verdict::Yes {
-                doubt = true;
+                out.doubt = true;
                 continue;
             }
             drilled = true;
@@ -66,19 +75,15 @@ impl<K: Ord + Hash + Clone + Send + Sync> Copper<K> {
                 Some(l) => !stripped(h, l),
                 None => h.plated,
             };
-            if joins && let Some(id) = self.island_of(&Node::Hole(n.key.clone())) {
-                found.insert(id);
+            if joins {
+                out.nodes.push(Node::Hole(n.key.clone()));
             }
         }
         if !drilled && let Some(l) = layer {
             for n in self.bodies.near_body(l, &pt, 0) {
                 let mut mark = |v: Verdict, node: Node<K>| match v {
-                    Verdict::Yes => {
-                        if let Some(id) = self.island_of(&node) {
-                            found.insert(id);
-                        }
-                    }
-                    Verdict::Uncertain => doubt = true,
+                    Verdict::Yes => out.nodes.push(node),
+                    Verdict::Uncertain => out.doubt = true,
                     Verdict::No => {}
                 };
                 match &self.entries[&n.key].resolved {
@@ -95,7 +100,18 @@ impl<K: Ord + Hash + Clone + Send + Sync> Copper<K> {
                 }
             }
         }
-        if doubt || found.len() > 1 {
+        out
+    }
+
+    /// Where a landing lies: on its nodes' one island, off copper when
+    /// they lie on none, uncertain with a doubt or two islands.
+    pub fn placement_of(&self, l: &Landing<K>) -> Placement<K> {
+        if l.doubt {
+            return Placement::Uncertain;
+        }
+        let found: BTreeSet<IslandId<K>> =
+            l.nodes.iter().filter_map(|n| self.island_of(n)).collect();
+        if found.len() > 1 {
             return Placement::Uncertain;
         }
         found
@@ -103,6 +119,14 @@ impl<K: Ord + Hash + Clone + Send + Sync> Copper<K> {
             .next()
             .map_or(Placement::Off, Placement::On)
     }
+}
+
+/// The nodes a point landed on, and whether some bound couldn't say
+/// ([`Copper::land`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Landing<K> {
+    pub nodes: Vec<Node<K>>,
+    pub doubt: bool,
 }
 
 #[cfg(test)]
