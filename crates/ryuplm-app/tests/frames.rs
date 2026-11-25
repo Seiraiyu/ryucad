@@ -56,6 +56,17 @@ fn window(root: &Path) -> Harness<'static, App> {
         .build_eframe(move |cc| App::open(&cc.egui_ctx, &root, daemon()))
 }
 
+/// A wait loop's deadline: well past every bar, loose or strict, so a
+/// lost daemon fails the test instead of hanging it.
+const GIVE_UP: Duration = Duration::from_secs(120);
+
+fn waiting(what: &str, since: Instant) {
+    assert!(
+        since.elapsed() < GIVE_UP,
+        "{what}: nothing after {GIVE_UP:?}"
+    );
+}
+
 #[test]
 #[ignore = "a bar: hardware adapters, a quiet machine"]
 fn a_hundred_thousand_items_in_the_window() {
@@ -67,6 +78,7 @@ fn a_hundred_thousand_items_in_the_window() {
     let t = Instant::now();
     let mut h = window(&root);
     while !h.state().opened().is_some_and(|w| w.rows.get(0).is_some()) {
+        waiting("the first rows", t);
         h.step();
     }
     h.step();
@@ -108,6 +120,7 @@ fn a_hundred_thousand_items_in_the_window() {
         .opened()
         .is_some_and(|w| w.rows.filter.text.as_deref() == Some("item 4242") && w.rows.current())
     {
+        waiting("a search's rows", t);
         h.step();
     }
     h.step();
@@ -116,9 +129,11 @@ fn a_hundred_thousand_items_in_the_window() {
     // A pick seen by an agent.
     let w = h.state_mut().opened_mut().unwrap();
     w.set_filter(Default::default());
+    let cleared = Instant::now();
     while !h.state().opened().is_some_and(|w| {
         w.rows.filter.text.is_none() && w.rows.current() && w.rows.get(0).is_some()
     }) {
+        waiting("the unfiltered rows", cleared);
         h.step();
     }
     // Drawn, so the row is there to click.
@@ -139,6 +154,7 @@ fn a_hundred_thousand_items_in_the_window() {
     h.get_by_label(format!("{} {}", r.number, r.name.clone().unwrap_or_default()).trim())
         .click();
     loop {
+        waiting("a pick seen by an agent", t);
         h.step();
         if conn.call(&get).unwrap().unwrap()["selection"] == json!([r.reference()]) {
             break;

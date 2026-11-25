@@ -89,7 +89,7 @@ impl egui_tiles::Behavior<Pane> for Behavior<'_> {
                 "navigator" => navigator(ui, self.w),
                 "items" => items(ui, self.w, self.local, self.now, self.copy),
                 "item" => item(ui, self.w, self.copy),
-                "bom" => bom(ui, self.w, self.now, self.copy),
+                "bom" => bom(ui, self.w, self.local, self.now, self.copy),
                 "where_used" => where_used(ui, self.w),
                 "findings" => findings(ui, self.w),
                 "changes" => changes(ui, self.w),
@@ -614,17 +614,24 @@ fn line_cols(l: &BomLine, depth: usize) -> Vec<(f32, String)> {
     ]
 }
 
+/// One BOM line and, opened, its child's own lines. `above` holds the
+/// items from the open one down to `parent`: a child already among them
+/// closes a loop (writes refuse one, but a merged or hand-edited catalogue
+/// can hold it, and `check` reports it), so it is drawn with no lines of
+/// its own.
 #[allow(clippy::too_many_arguments)]
 fn line_row(
     ui: &mut egui::Ui,
     w: &Window,
-    parent: &str,
+    above: &mut Vec<String>,
     l: &BomLine,
     depth: usize,
     now: Instant,
     copy: &mut Option<String>,
     acts: &mut Vec<Act>,
 ) {
+    let parent = above.last().cloned().unwrap_or_default();
+    let parent = parent.as_str();
     let bg = ui.visuals().panel_fill;
     let reference = l.reference(parent);
     let m = reference
@@ -640,8 +647,12 @@ fn line_row(
         .as_ref()
         .and_then(|c| c.strip_prefix("item/"))
         .map(str::to_owned);
+    let looped = child.as_ref().is_some_and(|id| above.contains(id));
     ui.horizontal(|ui| {
         match &child {
+            Some(_) if looped => {
+                ui.add_space(22.0);
+            }
             Some(id) => {
                 let open = w.children.contains_key(id);
                 let b = ui
@@ -678,19 +689,37 @@ fn line_row(
             row_menu(&resp, id, l.number.as_deref().unwrap_or(""), copy, acts);
         }
     });
+    if looped {
+        ui.weak(format!(
+            "{}{} is above this line: a loop (`ryuplm check` reports it)",
+            "   ".repeat(depth + 1),
+            l.title()
+        ));
+        return;
+    }
     if let Some(id) = &child
         && let Some(g) = w.children.get(id)
     {
         if let Some(e) = &g.error {
             ui.colored_label(ui.visuals().error_fg_color, &e.message);
         }
-        for c in g.value.iter().flatten() {
-            line_row(ui, w, id, c, depth + 1, now, copy, acts);
+        above.push(id.clone());
+        for (k, c) in g.value.iter().flatten().enumerate() {
+            ui.push_id(k, |ui| {
+                line_row(ui, w, above, c, depth + 1, now, copy, acts)
+            });
         }
+        above.pop();
     }
 }
 
-fn bom(ui: &mut egui::Ui, w: &mut Window, now: Instant, copy: &mut Option<String>) {
+fn bom(
+    ui: &mut egui::Ui,
+    w: &mut Window,
+    local: &mut Local,
+    now: Instant,
+    copy: &mut Option<String>,
+) {
     let Some(parent) = w.item.clone() else {
         ui.weak("Open an item to see its BOM.");
         return;
@@ -716,10 +745,13 @@ fn bom(ui: &mut egui::Ui, w: &mut Window, now: Instant, copy: &mut Option<String
     let mut acts = Vec::new();
     egui::ScrollArea::vertical().id_salt("bom").show(ui, |ui| {
         for (k, l) in lines.iter().enumerate() {
-            ui.push_id(k, |ui| line_row(ui, w, &parent, l, 0, now, copy, &mut acts));
+            let mut above = vec![parent.clone()];
+            ui.push_id(k, |ui| {
+                line_row(ui, w, &mut above, l, 0, now, copy, &mut acts)
+            });
         }
     });
-    apply(w, None, acts);
+    apply(w, Some(local), acts);
 }
 
 /// A Show button, always drawn so a list's buttons line up; disabled
@@ -990,10 +1022,17 @@ fn doc_row(
 }
 
 fn documents(ui: &mut egui::Ui, w: &mut Window, local: &mut Local, copy: &mut Option<String>) {
-    let mut all = w.docs_all || w.item.is_none();
+    // With no item open the tab lists every document, but that isn't the
+    // person's choice: opening an item shows its own again.
+    let all = w.docs_listing();
     ui.horizontal(|ui| {
-        if ui.checkbox(&mut all, "Every document").changed() || (all && !w.docs_all) {
-            w.set_docs(all, &local.doc_search);
+        let mut chosen = all;
+        let b = ui.add_enabled(
+            w.item.is_some(),
+            egui::Checkbox::new(&mut chosen, "Every document"),
+        );
+        if b.changed() {
+            w.set_docs(chosen, &local.doc_search);
         }
         if all {
             let r = ui.add(
@@ -1001,7 +1040,7 @@ fn documents(ui: &mut egui::Ui, w: &mut Window, local: &mut Local, copy: &mut Op
                     .hint_text("A number, a title or a description"),
             );
             if r.changed() {
-                w.set_docs(true, &local.doc_search);
+                w.set_docs(w.docs_all, &local.doc_search);
             }
         }
     });

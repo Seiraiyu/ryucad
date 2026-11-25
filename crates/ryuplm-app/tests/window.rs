@@ -1,7 +1,7 @@
 //! The window against real daemons (design 938, Testing): the list over
 //! the seeded catalogue, a search, a pick read by an agent, an agent's
 //! show adopted, a finding's Show, Undo, an import arriving as one round,
-//! and a lost daemon found again.
+//! a lost daemon found again, documents and a BOM that loops.
 
 mod common;
 
@@ -411,4 +411,147 @@ fn a_document_opens_through_the_opener() {
             .and_then(|w| w.documents.value.as_ref())
             .is_some_and(|d| d.iter().any(|d| d.number == number))
     });
+}
+
+#[test]
+fn the_documents_tab_shown_first_lists_the_opened_item_s_own() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let root = common::write(
+        "documents-first",
+        ryuplm::testing::documents("app", 300, 20),
+    );
+    let listed = cli(&root, &["document", "list"]);
+    let (doc, item) = listed["documents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|d| {
+            let id = d["id"].as_str()?;
+            let s = cli(&root, &["document", "show", id]);
+            Some((id.to_owned(), s["items"][0]["id"].as_str()?.to_owned()))
+        })
+        .expect("a document named by an item");
+    let mut h = window(&root);
+    frames(&mut h, |a| {
+        a.opened().is_some_and(|w| w.rows.total.is_some())
+    });
+    // The tab first, with no item open: every document.
+    ryu_app::shell::open(
+        &ryuplm_app::ui::tiles::SPEC,
+        &mut h.state_mut().tree,
+        "documents",
+    );
+    frames(&mut h, |a| {
+        a.opened().is_some_and(|w| w.documents.value.is_some())
+    });
+    let w = h.state().opened().unwrap();
+    assert!(w.docs_listing() && !w.docs_all, "listed, not chosen");
+    // Then an item: its own documents, read card by card.
+    h.state_mut()
+        .opened_mut()
+        .unwrap()
+        .open_item(Some(item.clone()));
+    frames(&mut h, |a| {
+        a.opened()
+            .and_then(|w| w.doc_cards.get(&doc))
+            .is_some_and(|g| g.value.is_some())
+    });
+    h.step();
+    let w = h.state().opened().unwrap();
+    assert!(!w.docs_listing(), "the item's own documents, not every one");
+    assert!(!w.docs_all);
+}
+
+#[test]
+fn a_bom_that_loops_opens_without_end() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    // A's own line names B and B's names A, as a hand edit or a merge
+    // leaves (writes refuse it); C's names itself.
+    let mut files = ryuplm::testing::catalogue("loop", 40);
+    let items: Vec<(String, String)> = files
+        .keys()
+        .filter_map(|p| {
+            let id = p
+                .strip_prefix("items/")?
+                .split('/')
+                .nth(1)?
+                .strip_suffix(".json")?;
+            Some((p.clone(), id.to_owned()))
+        })
+        .take(3)
+        .collect();
+    let [(pa, a), (pb, b), (pc, c)] = &items[..] else {
+        panic!("three item files")
+    };
+    for (path, child) in [(pa, b), (pb, a), (pc, c)] {
+        let mut item: serde_json::Value = serde_json::from_slice(&files[path]).unwrap();
+        item["bom"] = json!([{"line": "0000000000001", "item": child, "quantity": "1"}]);
+        files.insert(
+            path.clone(),
+            ryuplm::canonical::to_string(&item).into_bytes(),
+        );
+    }
+    let root = common::write("loop", files);
+    let mut h = window(&root);
+    frames(&mut h, |a| {
+        a.opened().is_some_and(|w| w.rows.total.is_some())
+    });
+    let st = h.state_mut();
+    st.opened_mut().unwrap().open_item(Some(a.clone()));
+    ryu_app::shell::open(&ryuplm_app::ui::tiles::SPEC, &mut st.tree, "bom");
+    let bom = |h: &Harness<'static, App>| {
+        h.state()
+            .opened()
+            .and_then(|w| w.bom.value.clone())
+            .filter(|b| !b.is_empty())
+    };
+    let end = Instant::now() + Duration::from_secs(30);
+    while bom(&h).is_none() {
+        assert!(Instant::now() < end, "A's BOM never came");
+        h.step();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    h.step();
+    let b_title = bom(&h).unwrap()[0].title();
+    // B's lines: A, which is above them.
+    h.get_by_label(&format!("Lines of {b_title}")).click();
+    frames(&mut h, |w| {
+        w.opened()
+            .and_then(|w| w.children.get(b))
+            .is_some_and(|g| g.value.is_some())
+    });
+    for _ in 0..3 {
+        h.step();
+    }
+    let a_title = h.state().opened().unwrap().children[b]
+        .value
+        .as_ref()
+        .unwrap()[0]
+        .title();
+    assert!(
+        h.query_by_label(&format!("Lines of {a_title}")).is_none(),
+        "A under B is drawn with no lines of its own"
+    );
+    // C under itself, at the top: no lines either.
+    h.state_mut()
+        .opened_mut()
+        .unwrap()
+        .open_item(Some(c.clone()));
+    let end = Instant::now() + Duration::from_secs(30);
+    while !bom(&h).is_some_and(|l| l[0].child.as_deref() == Some(&format!("item/{c}"))) {
+        assert!(Instant::now() < end, "C's BOM never came");
+        h.step();
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    for _ in 0..3 {
+        h.step();
+    }
+    let c_title = bom(&h).unwrap()[0].title();
+    assert!(h.query_by_label(&format!("Lines of {c_title}")).is_none());
 }

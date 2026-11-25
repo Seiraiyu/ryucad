@@ -10,14 +10,32 @@ pub const SELECT_EVERY: Duration = Duration::from_millis(150);
 /// How many `view.set`s a window remembers.
 pub const SENT_VIEWS: usize = 8;
 
-/// Sends the last value at most every [`SELECT_EVERY`].
+/// Sends the last value at most every [`SELECT_EVERY`]. One kept
+/// [`Throttle::ordered`] also waits for each value's answer before the
+/// next goes, so values sent on different connections are still applied
+/// in the order they were sent.
 #[derive(Debug, Default)]
 pub struct Throttle {
     due: bool,
     sent: Option<Instant>,
+    ordered: bool,
+    out: bool,
 }
 
 impl Throttle {
+    /// A throttle whose values wait for the last one's answer.
+    pub fn ordered() -> Throttle {
+        Throttle {
+            ordered: true,
+            ..Throttle::default()
+        }
+    }
+
+    /// The value sent was answered (or its connection lost): the next may go.
+    pub fn answered(&mut self) {
+        self.out = false;
+    }
+
     pub fn due(&mut self) {
         self.due = true;
     }
@@ -25,24 +43,27 @@ impl Throttle {
     /// Whether to send now; if so, it counts as sent.
     pub fn ready(&mut self, now: Instant) -> bool {
         let ok = self.due
+            && !self.out
             && self
                 .sent
                 .is_none_or(|t| now.saturating_duration_since(t) >= SELECT_EVERY);
         if ok {
             self.due = false;
             self.sent = Some(now);
+            self.out = self.ordered;
         }
         ok
     }
 
     /// How long until a due value may go.
     pub fn wait(&self, now: Instant) -> Option<Duration> {
-        let t = self.sent.filter(|_| self.due)?;
+        let t = self.sent.filter(|_| self.due && !self.out)?;
         Some(SELECT_EVERY.saturating_sub(now.saturating_duration_since(t))).filter(|d| !d.is_zero())
     }
 
     pub fn reset(&mut self) {
         self.sent = None;
+        self.out = false;
     }
 }
 
@@ -120,6 +141,25 @@ mod tests {
             list: Default::default(),
             shown_by: by.map(str::to_owned),
         }
+    }
+
+    #[test]
+    fn an_ordered_throttle_sends_nothing_while_its_last_value_is_out() {
+        let t0 = Instant::now();
+        let mut t = Throttle::ordered();
+        t.due();
+        assert!(t.ready(t0));
+        t.due();
+        let later = t0 + Duration::from_secs(1);
+        assert!(!t.ready(later), "the first pick isn't answered yet");
+        assert_eq!(t.wait(later), None, "its answer wakes the window");
+        t.answered();
+        assert!(t.ready(later), "the last value goes once it is");
+        t.answered();
+        assert!(!t.ready(later), "nothing more due");
+        t.due();
+        t.reset();
+        assert!(t.ready(later), "a lost connection's value never blocks");
     }
 
     #[test]

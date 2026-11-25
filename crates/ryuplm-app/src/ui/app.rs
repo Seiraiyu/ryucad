@@ -441,6 +441,7 @@ impl App {
                     copy: &mut copy,
                 };
                 self.tree.ui(&mut b, ui);
+                w.drawn();
                 if let Some(r) = copy {
                     ctx.copy_text(r);
                 }

@@ -126,6 +126,15 @@ pub fn counts_from(v: &Value) -> BTreeMap<String, usize> {
     out
 }
 
+/// The view's new tab once a frame drew `drawn`: none while `tab` is
+/// among them (or nothing was drawn), else the first drawn.
+fn next_tab<'a>(tab: Option<&str>, drawn: &[&'a str]) -> Option<&'a str> {
+    match drawn.first() {
+        Some(first) if !tab.is_some_and(|t| drawn.contains(&t)) => Some(first),
+        _ => None,
+    }
+}
+
 /// Why a request was sent: what to do with its answer.
 #[derive(Clone, Debug)]
 enum Why {
@@ -141,6 +150,8 @@ enum Why {
     /// A write (undo, redo): its failure toasts.
     Write(&'static str),
     People,
+    /// `selection.set`: the next waits for its answer.
+    Selected,
     /// `document.get` into this file, then the opener.
     Opened(PathBuf),
     Quiet,
@@ -191,15 +202,17 @@ pub struct Window {
     pub imports: Got<Vec<Import>>,
     pub activity: Got<Vec<Entry>>,
     /// The Documents tab: every document (`document.list`), when it lists
-    /// them all or no item is open.
+    /// them all or no item is open ([`Window::docs_listing`]).
     pub documents: Got<Vec<documents::Doc>>,
     /// Each document's card by ID (`document.show`), as the tab needs them.
     pub doc_cards: BTreeMap<String, Got<documents::Card>>,
-    /// Every document, not only the open item's.
+    /// Every document, not only the open item's: the person's choice.
     pub docs_all: bool,
     pub docs_query: String,
     /// The bottom tab shown.
     pub tab: Option<String>,
+    /// The view's tabs drawn this frame, in the order drawn.
+    tabs_drawn: Vec<&'static str>,
     /// A tab to bring to the front at the next frame (a show named it).
     pub open_tab: Option<String>,
     pub selection: Vec<String>,
@@ -218,6 +231,9 @@ pub struct Window {
     /// Whether the first tick has asked for everything (after the rows).
     started: bool,
     places_query: Option<String>,
+    /// The query of the `@` request out, so an answer to one no longer
+    /// typed is dropped.
+    places_out: Option<String>,
 }
 
 impl Window {
@@ -269,12 +285,13 @@ impl Window {
             docs_all: false,
             docs_query: String::new(),
             tab: None,
+            tabs_drawn: Vec::new(),
             open_tab: None,
             selection: Vec::new(),
             hover: None,
             flash: Flash::default(),
             flash_on: crate::core::prefs::flag("ui.flash_changes"),
-            select: Throttle::default(),
+            select: Throttle::ordered(),
             view: Throttle::default(),
             sent: Sent::default(),
             following: None,
@@ -282,6 +299,7 @@ impl Window {
             places: Vec::new(),
             started: false,
             places_query: None,
+            places_out: None,
         };
         Ok(w)
     }
@@ -339,8 +357,18 @@ impl Window {
                 self.ask_item_docs();
             }
         }
-        if ryuplm::view::TABS.contains(&tile) && self.tab.as_deref() != Some(tile) {
-            self.tab = Some(tile.to_owned());
+        if ryuplm::view::TABS.contains(&tile) {
+            self.tabs_drawn.push(tile);
+        }
+    }
+
+    /// The frame's tiles are drawn: the view's tab stays while it is drawn
+    /// (two bottom tabs split side by side are both drawn every frame),
+    /// and is the first drawn otherwise.
+    pub fn drawn(&mut self) {
+        let drawn = std::mem::take(&mut self.tabs_drawn);
+        if let Some(t) = next_tab(self.tab.as_deref(), &drawn) {
+            self.tab = Some(t.to_owned());
             self.view_due();
         }
     }
@@ -367,6 +395,9 @@ impl Window {
             return;
         };
         *self.asks.entry(key.to_owned()).or_default() += 1;
+        if key == "places" {
+            self.places_out = self.places_query.clone();
+        }
         let why = Why::Read {
             key: key.to_owned(),
             item,
@@ -449,6 +480,10 @@ impl Window {
         for k in keys {
             self.want(k);
         }
+        if self.item.is_none() && self.shown.contains("documents") {
+            // The tab lists every document again.
+            self.want("documents");
+        }
         true
     }
 
@@ -465,14 +500,21 @@ impl Window {
         }
     }
 
-    /// Every document (and its search), or the open item's.
+    /// Every document (and its search), or the open item's: the person's
+    /// choice, kept as items open and close.
     pub fn set_docs(&mut self, all: bool, query: &str) {
         let moved = self.docs_all != all || self.docs_query != query;
         self.docs_all = all;
         self.docs_query = query.to_owned();
-        if moved && all {
+        if moved && self.docs_listing() {
             self.want("documents");
         }
+    }
+
+    /// Whether the Documents tab lists every document: chosen, or no item
+    /// is open.
+    pub fn docs_listing(&self) -> bool {
+        self.docs_all || self.item.is_none()
     }
 
     /// The card of document `id`, read once it is wanted.
@@ -679,6 +721,10 @@ impl Window {
                     self.people.reset(&v["participants"]);
                 }
             }
+            Why::Selected => {
+                self.select.answered();
+                self.send_selection(now);
+            }
             Why::Quiet => {}
         }
     }
@@ -735,7 +781,8 @@ impl Window {
             "bom" => self.bom.set(a.map(|v| lists::bom(&v))),
             "used" => self.used.set(a.map(|v| lists::where_used(&v))),
             "check" => {
-                self.checking = false;
+                // A check asked again meanwhile is still to come.
+                self.checking = self.readers.again("check");
                 let r = match &a {
                     Err(e) if e.code != Code::CheckFailed => Err(e.clone()),
                     _ => Ok(lists::findings(&a)),
@@ -757,7 +804,11 @@ impl Window {
             "imports" => self.imports.set(a.map(|v| lists::imports(&v))),
             "activity" => self.activity.set(a.map(|v| lists::activity(&v))),
             "places" => {
-                if let Ok(v) = a {
+                // Typed over or cleared since it was sent: the newer query's
+                // answer (or none) stands.
+                if let Ok(v) = a
+                    && self.places_out == self.places_query
+                {
                     self.places = places(&v);
                 }
             }
@@ -851,6 +902,7 @@ impl Window {
         }
         self.lost = true;
         self.pending.clear();
+        self.select.answered();
         self.readers.reset();
         self.rows.lost();
         self.checking = false;
@@ -892,14 +944,16 @@ impl Window {
     /// The selection to the daemon, when the throttle allows: on the main
     /// connection while the Items list has nothing out there (a pick then
     /// waits behind no view.set or tile reader), else aside, so a search
-    /// never waits behind it.
+    /// never waits behind it. The daemon serves the two connections apart,
+    /// so one `selection.set` is out at a time: the next (the last value)
+    /// goes once it is answered, and the session applies them in order.
     fn send_selection(&mut self, now: Instant) {
         if self.select.ready(now) {
             let r = req("selection.set", json!({"refs": self.selection.clone()}));
             if self.rows.busy() {
-                self.send_aside(r, Why::Quiet);
+                self.send_aside(r, Why::Selected);
             } else {
-                self.send(r, Why::Quiet);
+                self.send(r, Why::Selected);
             }
         }
     }
@@ -1121,6 +1175,15 @@ mod tests {
                 assert!(!keys_of(id).is_empty(), "{id} reads nothing");
             }
         }
+    }
+
+    #[test]
+    fn two_tabs_drawn_side_by_side_keep_the_view_s() {
+        assert_eq!(next_tab(None, &["bom", "findings"]), Some("bom"));
+        assert_eq!(next_tab(Some("findings"), &["bom", "findings"]), None);
+        assert_eq!(next_tab(Some("bom"), &["bom", "findings"]), None);
+        assert_eq!(next_tab(Some("bom"), &["releases"]), Some("releases"));
+        assert_eq!(next_tab(Some("bom"), &[]), None, "nothing drawn");
     }
 
     #[test]

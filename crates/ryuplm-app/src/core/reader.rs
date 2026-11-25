@@ -40,6 +40,12 @@ impl Readers {
         std::mem::take(&mut r.again)
     }
 
+    /// Whether `key` was asked again while its request was out: it is
+    /// sent again once that is answered.
+    pub fn again(&self, key: &str) -> bool {
+        self.0.get(key).is_some_and(|r| r.again)
+    }
+
     pub fn busy(&self, key: &str) -> bool {
         self.0.get(key).is_some_and(|r| r.out)
     }
@@ -67,6 +73,7 @@ mod tests {
             assert!(!r.ask("bom"), "held while one is out");
         }
         assert!(r.ask("findings"), "another reader isn't held by it");
+        assert!(r.again("bom") && !r.again("findings"));
         assert!(
             r.answered("bom"),
             "once more for everything asked meanwhile"
