@@ -1478,6 +1478,11 @@ fn dispatch(
         Request::BoardRulesExplain { board, refs } => {
             crate::board::rulecmd::explain(session, &board, &refs)
         }
+        Request::BoardRatsnest {
+            board,
+            net,
+            reference,
+        } => crate::board::cmd::ratsnest(session, &board, net.as_deref(), reference.as_deref()),
         Request::BoardMeasure { board, a, b, layer } => {
             crate::board::cmd::measure(session, &board, &a, &b, layer.as_deref())
         }

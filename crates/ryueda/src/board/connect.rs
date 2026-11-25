@@ -4,6 +4,7 @@
 
 use super::layout::{self, Built, Key};
 use super::shapes::BoardShapes;
+use rayon::prelude::*;
 use ryu_copper::connect::{Copper, IslandId, Node, Placement};
 use ryu_copper::measure::{Body, BodyOptions, Distance};
 use ryu_copper::netlist::{self, Open, Report};
@@ -188,44 +189,119 @@ pub fn connections(c: &Connectivity, open: &Open<Key>) -> Vec<Connection> {
         .map(|(id, _)| c.island_bodies(id))
         .collect();
     let n = islands.len();
-    let mut near: BTreeMap<(usize, usize), Nearest> = BTreeMap::new();
-    for i in 0..n {
-        for j in i + 1..n {
-            if let Some(found) = ryu_copper::index::nearest_pair(&islands[i], &islands[j]) {
-                near.insert((i, j), found);
-            }
-        }
-    }
-    let mut inside = vec![false; n];
     let mut out = Vec::new();
     if n == 0 {
         return out;
     }
+    // Prim's, growing from island 0: each island outside keeps its best
+    // link to the tree, by (distance, the lesser island's piece, the
+    // other's) as the pair is oriented lesser island first, and only the
+    // island just joined is measured against the rest (ryueda 7.E: the
+    // whole table of pairs first was quadratic in islands).
+    let mut inside = vec![false; n];
+    let mut best: Vec<Option<((usize, usize), Nearest)>> = vec![None; n];
+    let mut joined = 0usize;
     inside[0] = true;
     for _ in 1..n {
-        let best = near
-            .iter()
-            .filter(|((i, j), _)| inside[*i] != inside[*j])
-            .min_by(|(_, x), (_, y)| (x.0.nm, &x.1, &x.2).cmp(&(y.0.nm, &y.1, &y.2)));
-        let Some(((i, j), (d, a, b))) = best else {
+        let updates: Vec<(usize, Option<((usize, usize), Nearest)>)> = (0..n)
+            .into_par_iter()
+            .filter(|&j| !inside[j])
+            .map(|j| {
+                let (lo, hi) = (joined.min(j), joined.max(j));
+                (
+                    j,
+                    ryu_copper::index::nearest_pair(&islands[lo], &islands[hi])
+                        .map(|f| ((lo, hi), f)),
+                )
+            })
+            .collect();
+        for (j, found) in updates {
+            if let Some(f) = found {
+                let better = best[j].as_ref().is_none_or(|(at, b)| {
+                    (f.1.0.nm, &f.1.1, &f.1.2, f.0) < (b.0.nm, &b.1, &b.2, *at)
+                });
+                if better {
+                    best[j] = Some(f);
+                }
+            }
+        }
+        let pick = (0..n)
+            .filter(|&j| !inside[j])
+            .filter_map(|j| best[j].as_ref().map(|b| (j, b)))
+            .min_by(|(_, (x_at, x)), (_, (y_at, y))| {
+                (x.0.nm, &x.1, &x.2, x_at).cmp(&(y.0.nm, &y.1, &y.2, y_at))
+            });
+        let Some((j, ((lo, _), (d, a, b)))) = pick.map(|(j, b)| (j, b.clone())) else {
             break;
         };
-        let (i, j) = (*i, *j);
-        let (a, b) = if inside[i] {
-            (a.clone(), b.clone())
-        } else {
-            (b.clone(), a.clone())
-        };
-        out.push(Connection { a, b, distance: *d });
-        inside[i] = true;
+        let (a, b) = if inside[lo] { (a, b) } else { (b, a) };
+        out.push(Connection { a, b, distance: d });
         inside[j] = true;
+        joined = j;
     }
     out
+}
+
+/// A connection as answers print it: each end's reference, layer and
+/// point, and the distance.
+pub fn connection_json(c: &Connectivity, x: &Connection) -> serde_json::Value {
+    serde_json::json!({
+        "a": c.built.reference(&x.a.0),
+        "a_layer": c.built.layer_name(c.layer_of(&x.a.0)),
+        "a_at": [x.distance.a.x, x.distance.a.y],
+        "b": c.built.reference(&x.b.0),
+        "b_layer": c.built.layer_name(c.layer_of(&x.b.0)),
+        "b_at": [x.distance.b.x, x.distance.b.y],
+        "distance_nm": x.distance.nm,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 7.D's connections: every pair of islands measured first.
+    fn connections_all_pairs(c: &Connectivity, open: &Open<Key>) -> Vec<Connection> {
+        let islands: Vec<Vec<((Key, u32), Body)>> = open
+            .islands
+            .iter()
+            .map(|(id, _)| c.island_bodies(id))
+            .collect();
+        let n = islands.len();
+        let mut near: BTreeMap<(usize, usize), Nearest> = BTreeMap::new();
+        for i in 0..n {
+            for j in i + 1..n {
+                if let Some(found) = ryu_copper::index::nearest_pair(&islands[i], &islands[j]) {
+                    near.insert((i, j), found);
+                }
+            }
+        }
+        let mut inside = vec![false; n];
+        let mut out = Vec::new();
+        if n == 0 {
+            return out;
+        }
+        inside[0] = true;
+        for _ in 1..n {
+            let best = near
+                .iter()
+                .filter(|((i, j), _)| inside[*i] != inside[*j])
+                .min_by(|(_, x), (_, y)| (x.0.nm, &x.1, &x.2).cmp(&(y.0.nm, &y.1, &y.2)));
+            let Some(((i, j), (d, a, b))) = best else {
+                break;
+            };
+            let (i, j) = (*i, *j);
+            let (a, b) = if inside[i] {
+                (a.clone(), b.clone())
+            } else {
+                (b.clone(), a.clone())
+            };
+            out.push(Connection { a, b, distance: *d });
+            inside[i] = true;
+            inside[j] = true;
+        }
+        out
+    }
     use crate::board::file::CopperLayer;
     use crate::board::testing::{MM, UM, board};
 
@@ -242,6 +318,40 @@ mod tests {
             )
             .smd("r3", "1", (6 * MM, 8 * MM), (600 * UM, 600 * UM), Some("b"));
         s
+    }
+
+    /// The connections grown one island at a time (ryueda 7.E) are those
+    /// the table of every pair gave, on seeded scatters of one net's pads.
+    #[test]
+    fn connections_are_the_all_pairs_ones() {
+        let mut g = 0x7261_7473u64;
+        let mut next = || {
+            g = g
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (g >> 33) as i64
+        };
+        for case in 0..12 {
+            let mut s = board(40 * MM, 30 * MM);
+            for i in 0..(3 + case % 10) {
+                let (x, y) = (MM + next() % (38 * MM), MM + next() % (28 * MM));
+                s.smd(
+                    &format!("r{i}"),
+                    "1",
+                    (x, y),
+                    (600 * UM, 600 * UM),
+                    Some("a"),
+                );
+            }
+            let c = connect("b", &s);
+            for o in &c.report.opens {
+                assert_eq!(
+                    connections(&c, o),
+                    connections_all_pairs(&c, o),
+                    "case {case}"
+                );
+            }
+        }
     }
 
     #[test]

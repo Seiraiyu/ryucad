@@ -1083,6 +1083,18 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
     },
+    /// The unrouted connections of a board's open nets (design 924): the
+    /// nearest links that would join each net's islands.
+    #[serde(rename = "board.ratsnest")]
+    BoardRatsnest {
+        board: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        net: Option<String>,
+        /// A part (its designator or occurrence): only connections with an
+        /// end on it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reference: Option<String>,
+    },
     /// The exact distance between two items of a board, per copper layer.
     #[serde(rename = "board.measure")]
     BoardMeasure {

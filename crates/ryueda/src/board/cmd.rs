@@ -375,6 +375,72 @@ pub fn measure(
     Ok(v)
 }
 
+/// `board ratsnest` (design 924): each open net's unrouted connections,
+/// the nearest links that would join its islands, narrowed to a net or
+/// to the connections with an end on a part; and how many parts are
+/// unplaced (they have no connections).
+pub fn ratsnest(
+    session: &mut Session,
+    board: &str,
+    net: Option<&str>,
+    reference: Option<&str>,
+) -> Result<Value> {
+    let id = find(session.project(), board)?.id.clone();
+    let c = session.board_check(&id)?;
+    let p = session.project();
+    let b = &p.boards[&id];
+    let file = board_of(b)?;
+    let net = match net {
+        Some(n) => Some(super::route::net_of(
+            &super::route::nets(p, &file.design)?,
+            &file.design,
+            n,
+        )?),
+        None => None,
+    };
+    let (_, occs) = occ::occurrences(p, &file.design)?;
+    let prefix = match reference {
+        Some(r) => {
+            if !occs.iter().any(|o| o.label() == r || o.reference == r) {
+                return Err(crate::error::Error::new(
+                    crate::error::Code::NotFound,
+                    format!("board {id} has no part {r}"),
+                )
+                .with("reference", r));
+            }
+            Some(format!("{id}:{r}/"))
+        }
+        None => None,
+    };
+    let mut out = Vec::new();
+    for o in &c.conn.report.opens {
+        if net.as_ref().is_some_and(|n| *n != o.net) {
+            continue;
+        }
+        for x in super::connect::connections(&c.conn, o) {
+            let mut v = super::connect::connection_json(&c.conn, &x);
+            if let Some(pre) = &prefix
+                && !(v["a"].as_str().is_some_and(|a| a.starts_with(pre.as_str()))
+                    || v["b"].as_str().is_some_and(|b| b.starts_with(pre.as_str())))
+            {
+                continue;
+            }
+            v["net"] = json!(o.net);
+            out.push(v);
+        }
+    }
+    let unplaced = occs
+        .iter()
+        .filter(|o| o.footprint_ref.is_some() && !b.placements.contains_key(&o.reference))
+        .count();
+    Ok(json!({
+        "board": format!("board/{id}"),
+        "revision": b.revision,
+        "connections": out,
+        "unplaced": unplaced,
+    }))
+}
+
 /// `board status`: placed and unplaced parts, nets routed and open, and
 /// findings by code.
 pub fn status(session: &mut Session, board: &str) -> Result<Value> {

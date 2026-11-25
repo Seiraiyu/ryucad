@@ -865,6 +865,7 @@ fn every_protocol_method_has_a_command() {
         ("board.rules.explain", &["board", "rules", "explain"]),
         ("board.waive", &["board", "waive"]),
         ("board.measure", &["board", "measure"]),
+        ("board.ratsnest", &["board", "ratsnest"]),
         ("board.group.list", &["board", "group", "list"]),
         ("board.keepout.add", &["board", "keepout", "add"]),
         ("board.text.add", &["board", "text", "add"]),
@@ -6616,4 +6617,35 @@ fn board_writes_publish_board_checked() {
         assert!(n["params"]["errors"].is_u64(), "{v}");
         assert!(n["params"]["delta"]["added"].is_array(), "{v}");
     }
+}
+
+/// `board ratsnest` (ryueda 7.E): the breakout routed is an empty
+/// ratsnest; a track removed gives the connection it made, with its
+/// layers and points; `--net` and `--ref` narrow it.
+#[test]
+fn ratsnest_from_the_cli() {
+    let p = Pair::breakout();
+    for args in breakout_board::script() {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        p.ok(&args);
+    }
+    let id = breakout_board::BOARD;
+    let r = p.ok(&["board", "ratsnest", id]);
+    assert_eq!(r["connections"].as_array().unwrap().len(), 0, "{r}");
+    p.ok(&["board", "track", "delete", id, "sda"]);
+    let r = p.ok(&["board", "ratsnest", id]);
+    let c = &r["connections"][0];
+    assert_eq!(c["net"], "sda", "{r}");
+    assert!(c["distance_nm"].as_i64().unwrap() > 0, "{r}");
+    assert!(c["a_at"].is_array() && c["b_layer"].is_string(), "{r}");
+    let scl = p.ok(&["board", "ratsnest", id, "--net", "scl"]);
+    assert_eq!(scl["connections"].as_array().unwrap().len(), 0, "{scl}");
+    let u1 = p.ok(&["board", "ratsnest", id, "--ref", "U1"]);
+    assert!(!u1["connections"].as_array().unwrap().is_empty(), "{u1}");
+    p.fails(&["board", "ratsnest", id, "--ref", "Z9"], "not_found", 1);
+    p.fails(
+        &["board", "ratsnest", id, "--net", "nope"],
+        "board_net_not_found",
+        1,
+    );
 }

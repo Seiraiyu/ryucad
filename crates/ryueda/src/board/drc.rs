@@ -203,17 +203,7 @@ pub fn copper(c: &Connectivity, incomplete: bool) -> Vec<Finding> {
             .collect();
         let next: Vec<Value> = connect::connections(c, o)
             .iter()
-            .map(|x| {
-                json!({
-                    "a": c.built.reference(&x.a.0),
-                    "a_layer": c.built.layer_name(c.layer_of(&x.a.0)),
-                    "a_at": [x.distance.a.x, x.distance.a.y],
-                    "b": c.built.reference(&x.b.0),
-                    "b_layer": c.built.layer_name(c.layer_of(&x.b.0)),
-                    "b_at": [x.distance.b.x, x.distance.b.y],
-                    "distance_nm": x.distance.nm,
-                })
-            })
+            .map(|x| connect::connection_json(c, x))
             .collect();
         out.push(finding(
             Code::NetOpen,
