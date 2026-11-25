@@ -679,12 +679,19 @@ mod tests {
 
     /// A cut arrangement (plan 21.C): pieces, clipped, laminar and old
     /// edges, the seed sets tried in order, the shortcut's seeds, and
-    /// those of them whose inner point lies inside their old face.
+    /// those of them whose inner point lies inside their old face; where
+    /// a census read them, the pinned faces and the walk's closures (plan
+    /// 24.A).
     struct Cut {
         arr: Arrangement,
         tries: Vec<Vec<usize>>,
         shortcut: BTreeSet<usize>,
         holds: BTreeSet<usize>,
+        /// The arrangement's face indices that are pins (plan 24.A).
+        pins: BTreeSet<usize>,
+        /// The closures a census read (plan 24.A): each its kept pieces,
+        /// none reversed.
+        closures: Vec<BTreeSet<usize>>,
     }
 
     fn read_cut(text: &str) -> Cut {
@@ -693,6 +700,8 @@ mod tests {
             tries: Vec::new(),
             shortcut: BTreeSet::new(),
             holds: BTreeSet::new(),
+            pins: BTreeSet::new(),
+            closures: Vec::new(),
         };
         for line in text.lines() {
             let line = line.split('#').next().unwrap_or("").trim();
@@ -720,10 +729,76 @@ mod tests {
                 "try" => c.tries.push(nums(words)),
                 "shortcut" => c.shortcut.extend(nums(words)),
                 "holds" => c.holds.extend(nums(words)),
+                "pins" => c.pins.extend(nums(words)),
+                "closure" => c.closures.push(nums(words).into_iter().collect()),
                 other => panic!("unknown line {other}"),
             }
         }
         c
+    }
+
+    /// Whether keeping exactly `kept` (none reversed) is a closure of
+    /// `arr` from `seeds`, by the walk's own counting (plan 24.A): the
+    /// seeds are kept, no kept piece uses a clipped edge, and every edge a
+    /// kept piece uses is used exactly once that way and, unless laminar,
+    /// exactly once the other way.
+    fn is_closure(arr: &Arrangement, seeds: &[usize], kept: &BTreeSet<usize>) -> bool {
+        if !seeds.iter().all(|s| kept.contains(s)) {
+            return false;
+        }
+        let mut uses: BTreeMap<(usize, bool), usize> = BTreeMap::new();
+        for &i in kept {
+            for &(g, s) in &arr.pieces[i].1 {
+                if arr.clipped.contains(&g) {
+                    return false;
+                }
+                *uses.entry((g, s == F)).or_default() += 1;
+            }
+        }
+        uses.iter().all(|(&(g, forward), &n)| {
+            n == 1
+                && (arr.laminar.contains(&g)
+                    || uses.get(&(g, !forward)).copied().unwrap_or(0) == 1)
+        })
+    }
+
+    /// A cut's `pins` and `closure` lines (plan 24.A), and `is_closure`
+    /// on a pillow: two pieces sharing three edges close; one alone
+    /// doesn't, nor do both where a seed is left out or an edge is
+    /// clipped.
+    #[test]
+    fn a_cut_carries_its_pins_and_closures() {
+        let c = read_cut(
+            "p 7 0+ 1+ 2+ # 0\n\
+             p 9 0- 1- 2- # 1\n\
+             p 9 3+ 3- # 2 a slit elsewhere\n\
+             try 0\n\
+             pins 9\n\
+             closure 0 1\n\
+             closure 0 1 2\n",
+        );
+        assert_eq!(c.pins, BTreeSet::from([9]));
+        assert_eq!(
+            c.closures,
+            vec![BTreeSet::from([0, 1]), BTreeSet::from([0, 1, 2])]
+        );
+        for k in &c.closures {
+            assert!(is_closure(&c.arr, &c.tries[0], k));
+        }
+        assert!(!is_closure(&c.arr, &c.tries[0], &BTreeSet::from([0])));
+        assert!(!is_closure(&c.arr, &c.tries[0], &BTreeSet::from([1])));
+        assert!(!is_closure(&c.arr, &[2], &BTreeSet::from([0, 1])));
+        let mut clipped = c.arr.clone();
+        clipped.clipped.insert(1);
+        assert!(!is_closure(&clipped, &c.tries[0], &c.closures[0]));
+        // A laminar edge takes one use.
+        let mut laminar = c.arr.clone();
+        laminar.laminar.extend([0, 1, 2]);
+        assert!(is_closure(&laminar, &c.tries[0], &BTreeSet::from([0])));
+        // A third use of an edge is no closure.
+        let mut third = c.arr.clone();
+        third.pieces.push((8, vec![(0, F), (4, F), (4, R)]));
+        assert!(!is_closure(&third, &c.tries[0], &BTreeSet::from([0, 1, 3])));
     }
 
     /// FTC 10 rb's walk at rung 2's narrowed retry (#652, census VI, plan
