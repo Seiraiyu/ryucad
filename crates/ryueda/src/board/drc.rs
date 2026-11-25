@@ -660,10 +660,12 @@ pub fn mask_clearance(c: &Connectivity, s: &BoardShapes, preset: &Preset) -> Vec
 const FLAT: Nm = 10;
 
 /// Tracks narrower than the rule.
-pub fn widths(s: &BoardShapes, board: &str, rules: &Rules) -> Vec<Finding> {
+pub fn widths(s: &BoardShapes, board: &str, rules: &Rules, scope: Scope) -> Vec<Finding> {
     s.tracks
         .iter()
+        .filter(|t| scope.reference(&format!("{board}:track/{}", t.id)))
         .filter_map(|t| {
+            judging();
             let rule = rules.track_width_min(Some(&t.net));
             if t.width_nm >= rule.value {
                 return None;
@@ -694,12 +696,13 @@ fn drill_of(h: &HoleShape) -> Nm {
 }
 
 /// Drills outside the range, and vias under the least diameter.
-pub fn drills(s: &BoardShapes, board: &str, preset: &Preset) -> Vec<Finding> {
+pub fn drills(s: &BoardShapes, board: &str, preset: &Preset, scope: Scope) -> Vec<Finding> {
     let mut out = Vec::new();
     for h in &s.holes {
-        if matches!(h.of, super::shapes::HoleOf::Via(_)) {
+        if matches!(h.of, super::shapes::HoleOf::Via(_)) || !scope.reference(&h.owner) {
             continue;
         }
+        judging();
         let d = drill_of(&h.shape);
         // Plated holes (vias' and through pads') and unplated ones have
         // their own least drills.
@@ -720,7 +723,12 @@ pub fn drills(s: &BoardShapes, board: &str, preset: &Preset) -> Vec<Finding> {
         }
     }
     // A via's drill and diameter: one finding saying what is wrong.
-    for v in &s.vias {
+    for v in s
+        .vias
+        .iter()
+        .filter(|v| scope.reference(&format!("{board}:via/{}", v.id)))
+    {
+        judging();
         let (min, max) = (preset.drill_min_nm, preset.drill_max_nm);
         let mut wrong = Vec::new();
         if v.drill_nm < min || v.drill_nm > max {
@@ -820,13 +828,18 @@ fn ring_finding(
 
 /// Vias' rings, exactly from their numbers, against the via rule;
 /// through pads' from the hole to the pad's outline, against the PTH rule.
-pub fn rings(c: &Connectivity, s: &BoardShapes, preset: &Preset) -> Vec<Finding> {
+pub fn rings(c: &Connectivity, s: &BoardShapes, preset: &Preset, scope: Scope) -> Vec<Finding> {
     let board = c.built.board.as_str();
     let min = preset.annular_ring_min_nm;
     let via_min = preset.via_annular_ring_min_nm;
     let opts = BodyOptions::default();
     let mut out = Vec::new();
-    for v in &s.vias {
+    for v in s
+        .vias
+        .iter()
+        .filter(|v| scope.reference(&format!("{board}:via/{}", v.id)))
+    {
+        judging();
         // (diameter - drill) / 2 < min, without halving.
         if v.diameter_nm - v.drill_nm < 2 * via_min {
             out.push(ring_finding(
@@ -853,6 +866,10 @@ pub fn rings(c: &Connectivity, s: &BoardShapes, preset: &Preset) -> Vec<Finding>
                 return None;
             };
             let pd = pads.get(&(occ.as_str(), pad.as_str()))?;
+            if !scope.reference(&pd.reference) {
+                return None;
+            }
+            judging();
             let hole = h.shape.body();
             let copper = Body::of_shape(&pd.copper, &opts);
             let (outline, flat) = outline_of(&pd.copper);
@@ -932,7 +949,7 @@ pub fn hole_spacing(s: &BoardShapes, board: &str, preset: &Preset) -> Vec<Findin
 
 /// Copper and holes closer to the outline or a cutout than the rule, or
 /// outside the board: once per item (pads and vias on both layers once).
-pub fn edges(c: &Connectivity, s: &BoardShapes, rules: &Rules) -> Vec<Finding> {
+pub fn edges(c: &Connectivity, s: &BoardShapes, rules: &Rules, scope: Scope) -> Vec<Finding> {
     let board = c.built.board.as_str();
     let opts = BodyOptions::default();
     let edge = Body::of_shape(&s.edges, &opts);
@@ -961,7 +978,9 @@ pub fn edges(c: &Connectivity, s: &BoardShapes, rules: &Rules) -> Vec<Finding> {
     }
     things
         .par_iter()
+        .filter(|(r, _)| scope.reference(r))
         .filter_map(|(r, (b, rule))| {
+            judging();
             let rule = *rule;
             let v = measure::closer(b, &edge, rule);
             let outside = v == Verdict::No
@@ -1073,6 +1092,23 @@ pub struct Dirty {
     pub refs: std::collections::BTreeSet<String>,
 }
 
+/// How many objects the scoped rules judged, for tests (ryueda 7.E).
+#[cfg(test)]
+pub(crate) static JUDGED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// [`JUDGED`] now.
+#[cfg(test)]
+#[allow(dead_code)] // read by the live tests from Task 13
+pub(crate) fn judged() -> usize {
+    JUDGED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Counts one object a scoped rule judged.
+fn judging() {
+    #[cfg(test)]
+    JUDGED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Which objects a rule judges.
 #[derive(Clone, Copy, Debug)]
 pub enum Scope<'a> {
@@ -1088,10 +1124,14 @@ impl Scope<'_> {
         }
     }
 
+    /// Whether the scope holds a reference: itself, or the object it is a
+    /// part of (`<owner>#hole`, `<pour>#<k>`).
     pub fn reference(&self, r: &str) -> bool {
         match self {
             Scope::All => true,
-            Scope::Dirty(d) => d.refs.contains(r),
+            Scope::Dirty(d) => {
+                d.refs.contains(r) || r.split_once('#').is_some_and(|(a, _)| d.refs.contains(a))
+            }
         }
     }
 
@@ -1293,7 +1333,7 @@ pub fn hole_clearance(c: &Connectivity, s: &BoardShapes, rules: &Rules) -> Vec<F
 }
 
 /// Blind and buried vias where the preset makes only through vias.
-pub fn via_spans(s: &BoardShapes, board: &str, preset: &Preset) -> Vec<Finding> {
+pub fn via_spans(s: &BoardShapes, board: &str, preset: &Preset, scope: Scope) -> Vec<Finding> {
     if preset.blind_vias {
         return Vec::new();
     }
@@ -1301,7 +1341,11 @@ pub fn via_spans(s: &BoardShapes, board: &str, preset: &Preset) -> Vec<Finding> 
     let name = |l: usize| super::file::CopperLayer::at(l, n).short();
     s.vias
         .iter()
-        .filter(|v| (v.from, v.to) != (0, n - 1))
+        .filter(|v| scope.reference(&format!("{board}:via/{}", v.id)))
+        .filter(|v| {
+            judging();
+            (v.from, v.to) != (0, n - 1)
+        })
         .map(|v| {
             finding(
                 Code::DrcViaSpan,
@@ -1331,6 +1375,8 @@ struct Ctx<'a> {
     preset: &'a Preset,
     rules: &'a Rules,
     incomplete: bool,
+    /// Which objects the scoped rules judge (ryueda 7.E).
+    scope: Scope<'a>,
 }
 
 type Rule = fn(&Ctx) -> Vec<Finding>;
@@ -1340,13 +1386,13 @@ const RULES: [Rule; 15] = [
     |c| copper(c.conn, c.incomplete),
     |c| clearance(c.conn, c.rules),
     |c| mask_clearance(c.conn, c.shapes, c.preset),
-    |c| widths(c.shapes, c.board, c.rules),
-    |c| drills(c.shapes, c.board, c.preset),
-    |c| via_spans(c.shapes, c.board, c.preset),
-    |c| rings(c.conn, c.shapes, c.preset),
+    |c| widths(c.shapes, c.board, c.rules, c.scope),
+    |c| drills(c.shapes, c.board, c.preset, c.scope),
+    |c| via_spans(c.shapes, c.board, c.preset, c.scope),
+    |c| rings(c.conn, c.shapes, c.preset, c.scope),
     |c| hole_spacing(c.shapes, c.board, c.preset),
     |c| hole_clearance(c.conn, c.shapes, c.rules),
-    |c| edges(c.conn, c.shapes, c.rules),
+    |c| edges(c.conn, c.shapes, c.rules, c.scope),
     |c| courtyards(c.shapes, c.board, c.rules),
     |c| super::place::constraints(c.board, c.files, c.occs, c.shapes),
     |c| super::keepout::check(c.shapes, c.board),
@@ -1393,6 +1439,7 @@ pub fn check_with(
         preset: &preset,
         rules: &rules,
         incomplete,
+        scope: Scope::All,
     };
     let mut findings: Vec<Finding> = RULES.par_iter().flat_map_iter(|r| r(&ctx)).collect();
     sort(&mut findings);
@@ -1520,6 +1567,50 @@ mod tests {
         s
     }
 
+    /// Per-object rules (ryueda 7.E) scoped to nothing find nothing, and
+    /// scoped to every reference of their whole findings find them all.
+    #[test]
+    fn per_object_rules_scoped_see_only_the_dirty() {
+        let mut s = board(20 * MM, 10 * MM);
+        s.track(
+            "t1",
+            "a",
+            super::super::file::CopperLayer::Top,
+            50 * UM,
+            &[(2 * MM, 2 * MM), (6 * MM, 2 * MM)],
+        )
+        .track(
+            "t2",
+            "b",
+            super::super::file::CopperLayer::Top,
+            150 * UM,
+            &[(25 * MM, 2 * MM), (26 * MM, 2 * MM)],
+        )
+        .via("v1", "a", (10 * MM, 5 * MM), 50 * UM, 600 * UM)
+        .via("v2", "b", (14 * MM, 5 * MM), 250 * UM, 300 * UM);
+        let rules = Rules::plain(&preset::JLC_2L);
+        let c = connect::connect("b", &s);
+        let judged: Vec<(&str, Box<dyn Fn(Scope) -> Vec<Finding>>)> = vec![
+            ("widths", Box::new(|sc| widths(&s, "b", &rules, sc))),
+            (
+                "drills",
+                Box::new(|sc| drills(&s, "b", &preset::JLC_2L, sc)),
+            ),
+            ("rings", Box::new(|sc| rings(&c, &s, &preset::JLC_2L, sc))),
+            ("edges", Box::new(|sc| edges(&c, &s, &rules, sc))),
+        ];
+        for (name, rule) in &judged {
+            let all = rule(Scope::All);
+            assert!(!all.is_empty(), "{name} finds something here");
+            assert!(rule(Scope::Dirty(&Dirty::default())).is_empty(), "{name}");
+            let mut d = Dirty::default();
+            for f in &all {
+                d.refs.extend(f.refs.iter().cloned());
+            }
+            assert_eq!(rule(Scope::Dirty(&d)), all, "{name}");
+        }
+    }
+
     fn codes(f: &[Finding]) -> Vec<Code> {
         f.iter().map(|x| x.code).collect()
     }
@@ -1538,7 +1629,7 @@ mod tests {
         s.vias[2].from = 1;
         s.vias[2].to = 2;
         s.holes[2].span = (1, 2);
-        let f = via_spans(&s, "b", &preset::JLC_2L);
+        let f = via_spans(&s, "b", &preset::JLC_2L, super::Scope::All);
         let refs: Vec<&str> = f.iter().map(|x| x.refs[0].as_str()).collect();
         assert_eq!(refs, ["b:via/v1", "b:via/v2"]);
         assert!(f.iter().all(|x| x.code == Code::DrcViaSpan && x.is_error()));
@@ -1548,7 +1639,7 @@ mod tests {
             blind_vias: true,
             ..preset::JLC_2L
         };
-        assert!(via_spans(&s, "b", &open).is_empty());
+        assert!(via_spans(&s, "b", &open, super::Scope::All).is_empty());
     }
 
     #[test]
@@ -1782,7 +1873,7 @@ mod tests {
         f.defaults.track_width_nm = Some(200 * UM);
         f.defaults.courtyard_clearance_nm = Some(150 * UM);
         let r = rules_with(f, &[]);
-        let w = widths(&s, "b", &r);
+        let w = widths(&s, "b", &r, super::Scope::All);
         assert_eq!(w.len(), 1);
         assert_eq!(w[0].details["rule_nm"], 200 * UM);
         let c = courtyards(&s, "b", &r);
@@ -2006,7 +2097,7 @@ mod tests {
                 width,
                 &[(2 * MM, 5 * MM), (8 * MM, 5 * MM)],
             );
-            widths(&s, "b", &Rules::plain(P))
+            widths(&s, "b", &Rules::plain(P), super::Scope::All)
         };
         assert!(w(P.track_width_min_nm).is_empty());
         assert_eq!(codes(&w(P.track_width_min_nm - 1)), [Code::DrcTrackWidth]);
@@ -2015,8 +2106,8 @@ mod tests {
             let mut s = board(20 * MM, 10 * MM);
             s.via("v1", "a", (10 * MM, 5 * MM), drill, dia);
             let c = connect::connect("b", &s);
-            let mut f = drills(&s, "b", P);
-            f.extend(rings(&c, &s, P));
+            let mut f = drills(&s, "b", P, super::Scope::All);
+            f.extend(rings(&c, &s, P, super::Scope::All));
             f
         };
         // A via's ring is judged by the via rule; a drill one over keeps
@@ -2051,7 +2142,7 @@ mod tests {
         let pad = |side| {
             let mut s = board(20 * MM, 10 * MM);
             s.through("j1", "1", (10 * MM, 5 * MM), side, 1000 * UM, None);
-            rings(&connect::connect("b", &s), &s, P)
+            rings(&connect::connect("b", &s), &s, P, super::Scope::All)
         };
         assert!(pad(1000 * UM + 2 * P.annular_ring_min_nm).is_empty());
         let f = pad(1000 * UM + 2 * P.annular_ring_min_nm - 2);
@@ -2062,7 +2153,7 @@ mod tests {
         let npth = |drill| {
             let mut s = board(20 * MM, 10 * MM);
             s.hole("h1", (10 * MM, 5 * MM), drill);
-            drills(&s, "b", P)
+            drills(&s, "b", P, super::Scope::All)
         };
         assert!(npth(P.npth_drill_min_nm).is_empty());
         assert_eq!(codes(&npth(P.npth_drill_min_nm - 1)), [Code::DrcDrill]);
@@ -2100,7 +2191,12 @@ mod tests {
         let at = |x| {
             let mut s = board(20 * MM, 10 * MM);
             s.smd("r1", "1", (x, 5 * MM), (600 * UM, 600 * UM), None);
-            edges(&connect::connect("b", &s), &s, &Rules::plain(P))
+            edges(
+                &connect::connect("b", &s),
+                &s,
+                &Rules::plain(P),
+                super::Scope::All,
+            )
         };
         assert!(at(300 * UM + P.edge_clearance_nm).is_empty());
         let f = at(300 * UM + P.edge_clearance_nm - 1);
@@ -2115,7 +2211,12 @@ mod tests {
             (500 * UM + P.edge_clearance_nm - 1, 5 * MM),
             1000 * UM,
         );
-        let f = edges(&connect::connect("b", &s), &s, &Rules::plain(P));
+        let f = edges(
+            &connect::connect("b", &s),
+            &s,
+            &Rules::plain(P),
+            super::Scope::All,
+        );
         assert_eq!(codes(&f), [Code::DrcEdgeClearance]);
         assert_eq!(f[0].refs, ["b:hole/h1#hole"]);
     }
@@ -2264,7 +2365,7 @@ mod tests {
             P.drill_min_nm - 1,
             P.via_diameter_min_nm - 1,
         );
-        let f = drills(&s, "b", P);
+        let f = drills(&s, "b", P, super::Scope::All);
         assert_eq!(codes(&f), [Code::DrcDrill], "{f:?}");
         assert_eq!(f[0].details["drill_nm"], json!(P.drill_min_nm - 1));
         assert_eq!(
