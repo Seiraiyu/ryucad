@@ -1066,7 +1066,7 @@ pub fn courtyards(s: &BoardShapes, board: &str, rules: &Rules) -> Vec<Finding> {
 /// findings sorted, and whether a placement's pads were left out.
 pub struct BoardCheck {
     pub shapes: Arc<BoardShapes>,
-    pub conn: Connectivity,
+    pub conn: Arc<Connectivity>,
     pub preset: Arc<Preset>,
     /// The board's rules, resolved (design 924).
     pub rules: Rules,
@@ -1318,6 +1318,20 @@ const RULES: [Rule; 15] = [
 /// A board checked from shapes already built. A design that doesn't
 /// flatten refuses with its faults.
 pub fn check_shapes(p: &Project, b: &BoardFiles, shapes: Arc<BoardShapes>) -> Result<BoardCheck> {
+    let board = b.id.to_string();
+    let conn = Arc::new(connect::connect(&board, &shapes));
+    check_with(p, b, shapes, conn)
+}
+
+/// A board checked from its shapes and its connectivity, both built
+/// already (ryueda 7.E: [`super::live::Live`] edits the connectivity in
+/// place).
+pub fn check_with(
+    p: &Project,
+    b: &BoardFiles,
+    shapes: Arc<BoardShapes>,
+    conn: Arc<Connectivity>,
+) -> Result<BoardCheck> {
     let file = b.board.item.as_ref().map_err(Clone::clone)?;
     let preset =
         preset::resolve(p, &file.preset).unwrap_or_else(|| Arc::new(preset::DEFAULT.clone()));
@@ -1328,7 +1342,6 @@ pub fn check_shapes(p: &Project, b: &BoardFiles, shapes: Arc<BoardShapes>) -> Re
         &netlist,
     );
     let board = b.id.to_string();
-    let conn = connect::connect(&board, &shapes);
     let incomplete = shapes
         .notices
         .iter()

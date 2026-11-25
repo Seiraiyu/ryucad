@@ -42,6 +42,22 @@ pub fn connect(board: &str, s: &BoardShapes) -> Connectivity {
 }
 
 impl Connectivity {
+    /// This connectivity carried to `s` (ryueda 7.E): the copper edited
+    /// from the old layout to the new one, the net points placed and
+    /// compared again. Equal to `connect(board, s)`. `None`, unchanged,
+    /// when the layers differ (a stackup change): build anew.
+    pub fn apply(&mut self, board: &str, s: &BoardShapes) -> Option<ryu_copper::connect::Applied> {
+        let built = layout::build(board, s);
+        if built.layout.layers != self.built.layout.layers {
+            return None;
+        }
+        let edits = self.copper.apply_layout(&self.built.layout, &built.layout);
+        self.placed = netlist::placements(&self.copper, &built.layout.points);
+        self.report = netlist::compare_placed(&self.copper, &built.layout.points, &self.placed);
+        self.built = built;
+        Some(edits)
+    }
+
     /// Every piece of an island with its body.
     fn island_bodies(&self, id: &IslandId<Key>) -> Vec<((Key, u32), Body)> {
         let Some(island) = self.copper.island(&Node::Piece(id.0.clone(), id.1)) else {
