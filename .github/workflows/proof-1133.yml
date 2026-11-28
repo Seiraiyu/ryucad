@@ -10,7 +10,7 @@ permissions:
 jobs:
   macos:
     runs-on: macos-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install
@@ -25,15 +25,14 @@ jobs:
       - name: the watcher test, sampled when a call stalls
         run: |
           fails=0
-          for i in $(seq 1 30); do
+          for i in $(seq 1 60); do
             cargo test -q -p ryueda --test cli watchers_hear_of_library_changes > out.txt 2>&1 &
             t=$!
-            sampled=0
+            sampled=0; secs=0
             while kill -0 $t 2>/dev/null; do
-              sleep 1
-              if [ $sampled = 0 ]; then
-                ps -axo pid=,etime=,command= | grep "[r]yueda participants" | while read pid et rest; do
-                  case $et in *:0[5-9]|*:[1-5][0-9]|*-*|*:*:*) ;; *) continue ;; esac
+              sleep 1; secs=$((secs + 1))
+              if [ $sampled = 0 ] && [ $secs -ge 8 ]; then
+                ps -axo pid=,etime=,command= | grep -E "[r]yueda (participants|--as watcher)" | while read pid et rest; do
                   echo "== run $i: participants $pid stalled ($et)"
                   sample $pid 2 -mayDie -file cli-$i.txt >/dev/null 2>&1; cat cli-$i.txt | grep -E "Thread_|ryu|std::|interprocess|read|write|connect|lock|wait" | head -60
                   for d in $(pgrep -f "daemon run"); do
@@ -41,9 +40,9 @@ jobs:
                   done
                   touch stalled-$i
                 done
-                [ -e stalled-$i ] && sampled=1
+                sampled=1
               fi
             done
             if wait $t; then echo "run $i ok"; else fails=$((fails + 1)); echo "run $i FAILED"; grep -o "the watcher heard nothing.*" out.txt | cut -c1-600; fi
           done
-          echo "watcher test: $((30 - fails)) of 30 ok"
+          echo "watcher test: $((60 - fails)) of 60 ok"
