@@ -32,8 +32,10 @@ fn replace_root(v: &mut Value, forms: &[&str]) {
 
 /// `ryueda` with the variables that keep a test's daemons and settings
 /// its own.
-fn ryueda(run: &Path) -> Command {
-    let mut cmd = Command::cargo_bin("ryueda").unwrap();
+/// As a std `Command`: a watcher spawned on the test's thread and waited
+/// for on another needs one (#1133); [`ryueda`] is assert_cmd's.
+fn ryueda_std(run: &Path) -> std::process::Command {
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_ryueda"));
     // No repository above the test's folder is found (#1004).
     cmd.env("GIT_CEILING_DIRECTORIES", std::env::temp_dir());
     cmd.env("RYUEDA_RUNTIME_DIR", run)
@@ -51,6 +53,11 @@ fn ryueda(run: &Path) -> Command {
         cmd.env_remove(v);
     }
     cmd
+}
+
+/// [`ryueda_std`], as assert_cmd's `Command`.
+fn ryueda(run: &Path) -> Command {
+    Command::from_std(ryueda_std(run))
 }
 
 fn parse(out: std::process::Output, root: &Path) -> (i32, Value) {
@@ -674,7 +681,7 @@ fn watchers_hear_of_library_changes() {
         assert_eq!(p.run_in(&p.daemon, sub, &args).0, 0);
     }
     let board = p.daemon.join("board");
-    let mut watch = ryueda(&p.run);
+    let mut watch = ryueda_std(&p.run);
     watch.current_dir(&board).args([
         "--as",
         "watcher",
@@ -684,7 +691,16 @@ fn watchers_hear_of_library_changes() {
         "--timeout",
         "20",
     ]);
-    let waiting = std::thread::spawn(move || watch.output().unwrap());
+    // Spawned here and only waited for on a thread: two threads spawning
+    // at once can hand one's output pipe to the other's child on macOS,
+    // which has no pipe2, and `output()` then waits for that child (#1133).
+    let child = watch
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let waiting = std::thread::spawn(move || child.wait_with_output().unwrap());
     // The watcher says hello, then subscribes at once.
     let attached = || {
         let (_, v) = p.run_in(&p.daemon, "board", &["participants"]);
@@ -704,6 +720,7 @@ fn watchers_hear_of_library_changes() {
     // sleep before the write was a guess a busy machine broke, as it
     // once did ryucad's.)
     let mut named = false;
+    let mut writes = 0;
     while !waiting.is_finished() {
         let args: &[&str] = match named {
             false => &["lib", "add", "passives", "../passives"],
@@ -711,11 +728,19 @@ fn watchers_hear_of_library_changes() {
         };
         assert_eq!(p.run_in(&p.daemon, "board", args).0, 0, "{args:?}");
         named = !named;
+        writes += 1;
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
     let (code, v) = parse(waiting.join().unwrap(), &p.daemon);
     assert_eq!(code, 0, "{v}");
     let notes = v["result"]["notifications"].as_array().unwrap();
+    // Two daemons started at once (#1133): the watcher on one, the writes
+    // on the other. Say what was heard and who serves the project.
+    let (_, status) = p.run_in(&p.daemon, "board", &["daemon", "status"]);
+    assert!(
+        !notes.is_empty(),
+        "the watcher heard nothing in 20 s of {writes} writes: {v}; daemon: {status}"
+    );
     assert_eq!(notes[0]["method"], "project.changed", "{v}");
     let changed = &notes[0]["params"]["changed"];
     assert_eq!(changed, &json!(["lib/passives", "project"]));
@@ -738,7 +763,7 @@ fn watchers_hear_of_pointing() {
     let p = Pair::breakout();
     p.ok(&["layout"]);
     let board = p.daemon.join("board");
-    let mut watch = ryueda(&p.run);
+    let mut watch = ryueda_std(&p.run);
     watch.current_dir(&board).args([
         "--as",
         "watcher",
@@ -748,7 +773,16 @@ fn watchers_hear_of_pointing() {
         "--timeout",
         "20",
     ]);
-    let waiting = std::thread::spawn(move || watch.output().unwrap());
+    // Spawned here and only waited for on a thread: two threads spawning
+    // at once can hand one's output pipe to the other's child on macOS,
+    // which has no pipe2, and `output()` then waits for that child (#1133).
+    let child = watch
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let waiting = std::thread::spawn(move || child.wait_with_output().unwrap());
     let attached = || {
         let (_, v) = p.run_in(&p.daemon, "board", &["participants"]);
         v["result"]["participants"]
