@@ -80,11 +80,22 @@ jobs:
     # Beside the workspace's tests, not after them, so neither waits for
     # the other (issue #63: the Windows job ran them one after the other,
     # 43-54 min in all).
-    name: release suites on ${{ matrix.os }}
+    # Windows runs them in two parts, side by side: in one job they ran past
+    # GitHub's six hours and were cancelled (#1107). Part 1 is ryukei's and
+    # ryustep's suites and the benches' build, part 2 the rest; every other
+    # platform runs both in one job (no part). A slow run fails at the
+    # timeout rather than being cancelled at six hours.
+    name: release suites on ${{ matrix.os }}${{ matrix.part && format(' ({0}/2)', matrix.part) || '' }}
+    timeout-minutes: 330
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+        include:
+          - os: windows-latest
+            part: 1
+          - os: windows-latest
+            part: 2
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -111,126 +122,209 @@ jobs:
       # merges on 64 seeded blocks, and ryudfm's a dense board read and drawn (here a seeded stand-in; the
       # devcontainer job times the pinned board): minutes in a debug build,
       # so they are ignored there and run in release.
-      - run: cargo test -p ryukei --release --test boolean_props
-      - run: cargo test -p ryukei --release --test booleans
-      - run: cargo test -p ryukei --release --test general_booleans
-      - run: cargo test -p ryukei --release --test general_boolean_props
-      - run: cargo test -p ryukei --release --test pipe_props
-      - run: cargo test -p ryukei --release --test mesh_props
-      - run: cargo test -p ryukei --release --test general_props
-      - run: cargo test -p ryukei --release --test blends
-      - run: cargo test -p ryukei --release --test chamfers
-      - run: cargo test -p ryukei --release --test blend_props
-      - run: cargo test -p ryukei --release --test corners
-      - run: cargo test -p ryukei --release --test corner_props
-      - run: cargo test -p ryukei --release --test blend_booleans
-      - run: cargo test -p ryukei --release --test spline_blends
-      - run: cargo test -p ryukei --release --test tangent_crossings
-      - run: cargo test -p ryukei --release --test spline_offsets
-      - run: cargo test -p ryukei --release --test offsets
-      - run: cargo test -p ryukei --release --test drafts
-      - name: Tweak properties (release)
+      - if: matrix.part != 2
+        run: cargo test -p ryukei --release --test boolean_props
+      - if: matrix.part != 2
+        run: cargo test -p ryukei --release --test booleans
+      - if: matrix.part != 2
+        run: cargo test -p ryukei --release --test general_booleans
+      - if: matrix.part != 2
+        run: cargo test -p ryukei --release --test general_boolean_props
+      - if: matrix.part != 2
+        run: cargo test -p ryukei --release --test pipe_props
+      - if: matrix.part != 2
+        run: cargo test -p ryukei --release --test mesh_props
+      - if: matrix.part != 2
+        run: cargo test -p ryukei --release --test general_props
+      - if: matrix.part != 2
+        run: cargo test -p ryukei --release --test blends
+      - if: matrix.part != 2
+        run: cargo test -p ryukei --release --test chamfers
+      - if: matrix.part != 2
+        run: cargo test -p ryukei --release --test blend_props
+      - if: matrix.part != 2
+        run: cargo test -p ryukei --release --test corners
+      - if: matrix.part != 2
+        run: cargo test -p ryukei --release --test corner_props
+      - if: matrix.part != 2
+        run: cargo test -p ryukei --release --test blend_booleans
+      - if: matrix.part != 2
+        run: cargo test -p ryukei --release --test spline_blends
+      - if: matrix.part != 2
+        run: cargo test -p ryukei --release --test tangent_crossings
+      - if: matrix.part != 2
+        run: cargo test -p ryukei --release --test spline_offsets
+      - if: matrix.part != 2
+        run: cargo test -p ryukei --release --test offsets
+      - if: matrix.part != 2
+        run: cargo test -p ryukei --release --test drafts
+      - if: matrix.part != 2
+        name: Tweak properties (release)
         run: cargo test -p ryukei --release --test tweak_props -- --nocapture
-      - name: Edit properties (release)
+      - if: matrix.part != 2
+        name: Edit properties (release)
         run: cargo test -p ryukei --release --test edit_props -- --nocapture
-      - run: cargo test -p ryukei --release --test work -- --nocapture
-      - run: cargo test -p ryukei --release --test silhouettes
-      - run: cargo test -p ryukei --release --test projection_props -- --nocapture
+      - if: matrix.part != 2
+        run: cargo test -p ryukei --release --test work -- --nocapture
+      - if: matrix.part != 2
+        run: cargo test -p ryukei --release --test silhouettes
+      - if: matrix.part != 2
+        run: cargo test -p ryukei --release --test projection_props -- --nocapture
       # The cusp and silhouette-end regression test (release only).
-      - run: cargo test -p ryukei --release --test hidden_lines
-      - run: cargo test -p ryukei --release --test heal_props
+      - if: matrix.part != 2
+        run: cargo test -p ryukei --release --test hidden_lines
+      - if: matrix.part != 2
+        run: cargo test -p ryukei --release --test heal_props
       # Every race body as a BrepArray passing the schema's checks (#469).
-      - run: cargo test -p ryuformats --release --test usd
-      - run: cargo test -p ryukei --release --test sheet_props
-      - run: cargo test -p ryukei --release --test sheet_boolean_props
-      - run: cargo test -p ryukei --release --test sheet_metal_props
-      - run: cargo test -p ryukei --release --test sheet_metal_bar -- --nocapture
-      - run: cargo test -p ryukei --release --test thicken_props
-      - run: cargo test -p ryukei --release --test sheet_blend_props
-      - run: cargo test -p ryukei --release --test fill_props
-      - run: cargo test -p ryukei --release --test mirror
-      - run: cargo test -p ryukei --release --test along
-      - run: cargo test -p ryukei --release --test loft
-      - run: cargo test -p ryukei --release --test measure_props
-      - run: cargo test -p ryukei --release --test fuzz_regressions
-      - run: cargo test -p ryukei --release --test snug_fits
-      - run: cargo test -p ryukei --release --test tangent_unions
-      - run: cargo test -p ryukei --release --test tolerant_boolean_props
-      - name: Global offset properties (release)
+      - if: matrix.part != 2
+        run: cargo test -p ryuformats --release --test usd
+      - if: matrix.part != 2
+        run: cargo test -p ryukei --release --test sheet_props
+      - if: matrix.part != 2
+        run: cargo test -p ryukei --release --test sheet_boolean_props
+      - if: matrix.part != 2
+        run: cargo test -p ryukei --release --test sheet_metal_props
+      - if: matrix.part != 2
+        run: cargo test -p ryukei --release --test sheet_metal_bar -- --nocapture
+      - if: matrix.part != 2
+        run: cargo test -p ryukei --release --test thicken_props
+      - if: matrix.part != 2
+        run: cargo test -p ryukei --release --test sheet_blend_props
+      - if: matrix.part != 2
+        run: cargo test -p ryukei --release --test fill_props
+      - if: matrix.part != 2
+        run: cargo test -p ryukei --release --test mirror
+      - if: matrix.part != 2
+        run: cargo test -p ryukei --release --test along
+      - if: matrix.part != 2
+        run: cargo test -p ryukei --release --test loft
+      - if: matrix.part != 2
+        run: cargo test -p ryukei --release --test measure_props
+      - if: matrix.part != 2
+        run: cargo test -p ryukei --release --test fuzz_regressions
+      - if: matrix.part != 2
+        run: cargo test -p ryukei --release --test snug_fits
+      - if: matrix.part != 2
+        run: cargo test -p ryukei --release --test tangent_unions
+      - if: matrix.part != 2
+        run: cargo test -p ryukei --release --test tolerant_boolean_props
+      - if: matrix.part != 2
+        name: Global offset properties (release)
         run: cargo test -p ryukei --release --test global_offset_props -- --nocapture
-      - run: cargo test -p ryukei --release --test tolerant_blends
-      - run: cargo test -p ryukei --release --test tolerant_blend_props
-      - run: cargo test -p ryukei --release --test self_union_props
-      - run: cargo test -p ryukei --release --test global_offsets
-      - run: cargo test -p ryustep --release --test round_trip_props
-      - run: cargo test -p ryustep --release --test write
-      - run: cargo test -p ryustep --release --test drill
-      - run: cargo test -p ryustep --release --test defeature -- --nocapture
-      - run: cargo test -p ryustep --release --test checks
-      - run: cargo test -p ryustep --release --test reference
-      - run: cargo test -p ryustep --release --test mass
-      - run: cargo test -p ryustep --release --test cancel
-      - run: cargo test -p ryucad --release --test bar -- --nocapture
-      - run: cargo test -p ryucad --release --test fuzz_regressions -- --nocapture
-      - run: cargo test -p ryucad --release --test sheet_metal_flat_bar -- --nocapture
-      - run: cargo test -p ryucad --release --test drawing_bar -- --nocapture
-      - run: cargo test -p ryucad --release --test assembly_bar -- --nocapture
-      - run: cargo test -p ryucad --release --test motion_bar -- --nocapture
-      - run: cargo test -p ryupdm --release --test api -- --nocapture
-      - run: cargo test -p ryucad --release --test step_bar -- --nocapture
-      - name: reference bar
+      - if: matrix.part != 2
+        run: cargo test -p ryukei --release --test tolerant_blends
+      - if: matrix.part != 2
+        run: cargo test -p ryukei --release --test tolerant_blend_props
+      - if: matrix.part != 2
+        run: cargo test -p ryukei --release --test self_union_props
+      - if: matrix.part != 2
+        run: cargo test -p ryukei --release --test global_offsets
+      - if: matrix.part != 2
+        run: cargo test -p ryustep --release --test round_trip_props
+      - if: matrix.part != 2
+        run: cargo test -p ryustep --release --test write
+      - if: matrix.part != 2
+        run: cargo test -p ryustep --release --test drill
+      - if: matrix.part != 2
+        run: cargo test -p ryustep --release --test defeature -- --nocapture
+      - if: matrix.part != 2
+        run: cargo test -p ryustep --release --test checks
+      - if: matrix.part != 2
+        run: cargo test -p ryustep --release --test reference
+      - if: matrix.part != 2
+        run: cargo test -p ryustep --release --test mass
+      - if: matrix.part != 2
+        run: cargo test -p ryustep --release --test cancel
+      - if: matrix.part != 1
+        run: cargo test -p ryucad --release --test bar -- --nocapture
+      - if: matrix.part != 1
+        run: cargo test -p ryucad --release --test fuzz_regressions -- --nocapture
+      - if: matrix.part != 1
+        run: cargo test -p ryucad --release --test sheet_metal_flat_bar -- --nocapture
+      - if: matrix.part != 1
+        run: cargo test -p ryucad --release --test drawing_bar -- --nocapture
+      - if: matrix.part != 1
+        run: cargo test -p ryucad --release --test assembly_bar -- --nocapture
+      - if: matrix.part != 1
+        run: cargo test -p ryucad --release --test motion_bar -- --nocapture
+      - if: matrix.part != 1
+        run: cargo test -p ryupdm --release --test api -- --nocapture
+      - if: matrix.part != 1
+        run: cargo test -p ryucad --release --test step_bar -- --nocapture
+      - if: matrix.part != 1
+        name: reference bar
         run: cargo test -p ryucad --release --test reference_bar -- --nocapture
-      - run: cargo test -p ryucad --release --test step
+      - if: matrix.part != 1
+        run: cargo test -p ryucad --release --test step
       # Sweeps along paths: the spring, the twisted square and the thread
       # take minutes in a debug build (plan 14.A).
-      - run: cargo test -p ryucad --release --test sweeps_along
+      - if: matrix.part != 1
+        run: cargo test -p ryucad --release --test sweeps_along
       # Lofts: the closed ring of six takes minutes in a debug build (plan
       # 14.B).
-      - run: cargo test -p ryucad --release --test lofts
+      - if: matrix.part != 1
+        run: cargo test -p ryucad --release --test lofts
       # step-hunt over the committed corpus through the real ryucad: every
       # finding must be in crates/step-hunt/known.txt (and no line there
       # fixed), and one job and four find the same; the splitter's promise.
       # Linux x64 only: the other platforms' release suites are the longest
       # jobs already (#63).
-      - if: matrix.os == 'ubuntu-latest'
+      - if: (matrix.os == 'ubuntu-latest') && matrix.part != 1
         run: cargo test -p step-hunt --release --test hunt --test split -- --nocapture
       # ryucad's corpus: three projects made through the CLI, rebuilt and
       # checked against their manifest, and made again by their scripts
       # (python3 is on every runner).
-      - run: cargo test -p ryucad --release --test corpus -- --nocapture
+      - if: matrix.part != 1
+        run: cargo test -p ryucad --release --test corpus -- --nocapture
         env:
           RYUCAD_REQUIRE_PYTHON: "1"
       # Design 192's bars over a 1,000-part benchmark project, ten times
       # looser than recorded (the 10,000-part run is by hand).
-      - run: cargo test -p ryucad --features bench --release --test scale_bar -- --ignored --nocapture
+      - if: matrix.part != 1
+        run: cargo test -p ryucad --features bench --release --test scale_bar -- --ignored --nocapture
         env:
           RYUCAD_SCALE_PARTS: "1000"
       # A whole project's rebuild answer as text, never a Value tree
       # (#533): its bytes held, counted over a 1,000-part project.
-      - run: cargo test -p ryucad --features bench --release --test answer_peak -- --nocapture
-      - run: cargo test -p ryueda --release --test bar -- --nocapture
+      - if: matrix.part != 1
+        run: cargo test -p ryucad --features bench --release --test answer_peak -- --nocapture
+      - if: matrix.part != 1
+        run: cargo test -p ryueda --release --test bar -- --nocapture
       # Design 734's bars: 100,000 items loaded, checked, imported and
       # imported again, and where-used over ten checkouts (ten times looser
       # without RYUPLM_BARS). One test at a time: each bar times one
       # operation, and ten 100,000-item tests at once on a 3-core runner
       # measure each other (#1044), as bars.yml runs them.
-      - run: cargo test -p ryuplm --release --test bar -- --nocapture --test-threads 1
-      - run: cargo test -p ryusch --release --test layout_props
+      - if: matrix.part != 1
+        run: cargo test -p ryuplm --release --test bar -- --nocapture --test-threads 1
+      - if: matrix.part != 1
+        run: cargo test -p ryusch --release --test layout_props
       # Plan 2.G: the schematic fuzz case over 400 seeded inputs (#664, #665).
-      - run: cargo test -p ryusch --release --test seeded_sweep
-      - run: cargo test -p ryueda --release --test schematic_corpus the_corpus_from_nothing
+      - if: matrix.part != 1
+        run: cargo test -p ryusch --release --test seeded_sweep
+      - if: matrix.part != 1
+        run: cargo test -p ryueda --release --test schematic_corpus the_corpus_from_nothing
       # Plan 4.D: two branches of each corpus circuit merged through Git
       # and settled by their first repairs.
-      - run: cargo test -p ryueda --release --test schematic_corpus corpus_branches
-      - run: cargo test -p ryucad-app --release --test lazy -- --nocapture
+      - if: matrix.part != 1
+        run: cargo test -p ryueda --release --test schematic_corpus corpus_branches
+      - if: matrix.part != 1
+        run: cargo test -p ryucad-app --release --test lazy -- --nocapture
       # #400: the window's open keeps its daemon within its budget.
-      - run: cargo test -p ryucad-app --release --test open_memory -- --nocapture
-      - run: cargo test -p ryudfm --release --test bar -- --nocapture
-      - run: cargo test -p ryudfm --release --test copper_corpus -- --nocapture
-      - run: cargo test -p ryu-copper --release --test index_props
-      - run: cargo test -p ryu-copper --release --test poly_props
-      - run: cargo test -p ryu-copper --release --test connect_props
-      - run: cargo bench --workspace --no-run
+      - if: matrix.part != 1
+        run: cargo test -p ryucad-app --release --test open_memory -- --nocapture
+      - if: matrix.part != 1
+        run: cargo test -p ryudfm --release --test bar -- --nocapture
+      - if: matrix.part != 1
+        run: cargo test -p ryudfm --release --test copper_corpus -- --nocapture
+      - if: matrix.part != 1
+        run: cargo test -p ryu-copper --release --test index_props
+      - if: matrix.part != 1
+        run: cargo test -p ryu-copper --release --test poly_props
+      - if: matrix.part != 1
+        run: cargo test -p ryu-copper --release --test connect_props
+      - if: matrix.part != 2
+        run: cargo bench --workspace --no-run
 
   kicad-corpus:
     # KiCad 9.0.9's whole symbol, footprint and 3D model libraries (0.7 GB
