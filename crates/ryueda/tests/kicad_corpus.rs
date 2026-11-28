@@ -161,3 +161,48 @@ fn the_pinned_kicad_libraries_import_or_are_refused_by_type() {
         assert!(n >= floor, "{k}: {n} imported, pinned.txt records {floor}");
     }
 }
+
+/// KiCad's own USB-C receptacle (ryueda 7.F's review), from the pinned
+/// corpus: it imports, and `lib check` passes with its stacked lands
+/// (A4 on B9 and A9 on B4 for VBUS, A1 on B12 and A12 on B1 for GND) as
+/// `footprint_pads_overlap` warnings, never errors. Read from the fetch,
+/// not committed: no KiCad library file is (the owner's decision of
+/// 2026-10-28, `docs/claude/ryueda.md`). The default build's
+/// `a_usb_c_receptacles_stacked_lands_dont_fail_lib_check` holds the rule
+/// on a file of our own.
+#[test]
+fn kicads_usb_c_receptacle_passes_lib_check_with_overlap_warnings() {
+    let Some(dir) = corpus() else { return };
+    let file = dir.join(
+        "kicad-footprints-9.0.9/Connector_USB.pretty/USB_C_Receptacle_GCT_USB4105-xx-A_16P_TopMnt_Horizontal.kicad_mod",
+    );
+    let (_dir, mut s) = project();
+    let opts = Options {
+        paths: vec![file],
+        ..Options::default()
+    };
+    let r = import(&mut s, &opts, None).unwrap();
+    assert_eq!(r["refused"], serde_json::json!([]), "{r}");
+    let list = ryueda::libcmd::footprint_list(s.project(), None).unwrap();
+    let id = list["footprints"][0]["id"].as_str().unwrap().to_owned();
+    let listing = ryueda::symlint::Listing {
+        summary: false,
+        codes: Vec::new(),
+    };
+    let a = ryueda::symlint::library_check(s.project(), None, None, Some(&id), &listing)
+        .unwrap()
+        .into_json()
+        .expect("lib check passes: no errors");
+    assert_eq!(a.result["errors"], 0, "{}", a.result);
+    let found: Vec<&str> = a.result["footprints"][0]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["code"].as_str().unwrap())
+        .collect();
+    let overlaps = found
+        .iter()
+        .filter(|c| **c == "footprint_pads_overlap")
+        .count();
+    assert_eq!(overlaps, 4, "the four stacked pairs: {found:?}");
+}
