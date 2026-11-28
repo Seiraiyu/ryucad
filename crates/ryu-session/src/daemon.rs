@@ -133,7 +133,7 @@ pub fn run<P: Serve>(root: &Path, idle: Duration) -> Result<()> {
     // Writes answer once renamed into place, synced behind (issue #270).
     ryu_doc::source::defer_syncs();
     let endpoint = Endpoint::<P>::for_project(root)?;
-    let listener = bind(&endpoint)?;
+    let (_claim, listener) = listen(&endpoint)?;
     log(&format!(
         "serving {} on {}",
         root.display(),
@@ -231,8 +231,43 @@ fn accept<P: Serve>(listener: &interprocess::local_socket::Listener, state: &Arc
     }
 }
 
-/// Binds the endpoint. Binding is the lock: a second daemon for the same
-/// project fails here. A socket file left by a crashed daemon is removed.
+/// Claims the project, then binds its endpoint: what a daemon starting
+/// does. The claim is held for as long as the daemon runs.
+fn listen<P>(
+    endpoint: &Endpoint<P>,
+) -> Result<(std::fs::File, interprocess::local_socket::Listener)> {
+    let claim = claim(endpoint)?;
+    Ok((claim, bind(endpoint)?))
+}
+
+/// The lock file only one daemon for a project holds, from before it binds
+/// until it exits (the system lets go of it when the process goes, however
+/// it goes). Two daemons starting at once each found the other's socket
+/// file with nothing listening on it yet, between its bind and its listen,
+/// took it for a crashed daemon's, removed it and bound their own: two
+/// daemons, a watcher subscribed to one and writes sent to the other
+/// (#1133, as ryudfm's #246). Holding the claim, a socket file nobody
+/// answers on is a dead daemon's.
+fn claim<P>(endpoint: &Endpoint<P>) -> Result<std::fs::File> {
+    let path = endpoint.log.with_extension("lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .map_err(|e| Error::io(&path, &e))?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => Err(Error::new(
+            Code::Daemon,
+            "a daemon is already running for this project",
+        )),
+        Err(std::fs::TryLockError::Error(e)) => Err(Error::io(&path, &e)),
+    }
+}
+
+/// Binds the endpoint: a second daemon for the same project fails here, as
+/// at its claim. A socket file left by a crashed daemon is removed.
 fn bind<P>(endpoint: &Endpoint<P>) -> Result<interprocess::local_socket::Listener> {
     let daemon_err = |e: std::io::Error| {
         Error::new(
@@ -833,6 +868,33 @@ mod tests {
             dir.file_name().unwrap().to_string_lossy()
         );
         address
+    }
+
+    /// #1133: while one daemon holds the project's claim (started, its
+    /// socket file made but nobody answering on it yet), a second refuses
+    /// rather than taking the file for a crashed daemon's and binding its
+    /// own. Once the first is gone, its claim goes with it, and the next
+    /// daemon takes the stale file over.
+    #[test]
+    fn a_second_daemon_refuses_while_the_first_holds_the_claim() {
+        let dir = tempfile::tempdir().unwrap();
+        let endpoint = Endpoint::<Test> {
+            address: test_address(dir.path(), "claim"),
+            log: dir.path().join("claim.log"),
+            product: std::marker::PhantomData,
+        };
+        let first = claim(&endpoint).unwrap();
+        #[cfg(unix)]
+        std::fs::write(&endpoint.address, b"").unwrap();
+        let e = listen(&endpoint).unwrap_err();
+        assert_eq!(e.code, Code::Daemon, "{}", e.message);
+        #[cfg(unix)]
+        assert!(
+            Path::new(&endpoint.address).exists(),
+            "the first daemon's socket file is left alone"
+        );
+        drop(first);
+        let (_claim, _listener) = listen(&endpoint).unwrap();
     }
 
     /// As [`serving`], with the daemon's state.
