@@ -100,24 +100,33 @@ pub fn proposed(session: &Session, writes: &Writes) -> Result<Project> {
 /// Puts `writes` on disk if they add no error to the project, and takes
 /// them in; refused with the first new fault's code otherwise.
 pub fn commit(session: &mut Session, what: &str, mut writes: Writes) -> Result<()> {
-    let mut after = proposed(session, &writes)?;
+    let mut after = {
+        let _s = crate::profile::stage("proposed");
+        proposed(session, &writes)?
+    };
     // Blocks laid out whose drawing this changes are laid out again, in
     // the same change, so no agent meets a stale sheet.
+    let keeping = crate::profile::stage("keep_current");
     let current: Vec<(String, Option<String>)> =
         crate::schemcmd::keep_current(session.project(), &after)
             .into_iter()
             .filter(|(path, _)| !writes.0.iter().any(|(p, _)| p == path))
             .collect();
+    drop(keeping);
     if !current.is_empty() {
         writes.0.extend(current);
+        let _s = crate::profile::stage("proposed");
         after = proposed(session, &writes)?;
     }
+    let judging = crate::profile::stage("faults");
     let added = added_errors(&session.project().faults(), &after.faults());
+    drop(judging);
     if !added.is_empty() {
         return Err(refused(what, &added));
     }
     let root = session.root().to_path_buf();
     let written: Vec<String> = writes.paths().into_iter().map(str::to_owned).collect();
+    let writing = crate::profile::stage("write_files");
     for (path, text) in writes.0 {
         let at = path_of(&root, &path);
         match text {
@@ -126,7 +135,9 @@ pub fn commit(session: &mut Session, what: &str, mut writes: Writes) -> Result<(
             None => {}
         }
     }
+    drop(writing);
     // The project just judged is the project on disk now.
+    let _s = crate::profile::stage("adopt");
     session.adopt(after, &written)
 }
 

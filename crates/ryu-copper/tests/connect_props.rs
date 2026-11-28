@@ -590,3 +590,158 @@ fn quiet_edits_match_a_rebuild() {
         );
     }
 }
+
+/// A layout edited into another by `apply_layout` is that layout built afresh,
+/// for seeded pairs of layouts sharing most keys (ryueda 7.E).
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release only: seeded layouts built twice")]
+fn apply_matches_a_rebuild() {
+    for seed in 0..32u64 {
+        let mut a = seeded(seed, 60, seed % 2 == 0);
+        add_holes(&mut a, seed, 6);
+        let mut b = a.clone();
+        let mut g = Lcg::new(seed ^ 0xa991);
+        let keys: Vec<u32> = b.items.keys().copied().collect();
+        for k in keys.iter().step_by(5) {
+            b.items.remove(k);
+        }
+        let donor = seeded(seed + 1000, 12, true);
+        for (i, (_, it)) in donor.items.into_iter().enumerate() {
+            b.items
+                .insert(10_000 + i as u32 + g.range(0, 3) as u32 * 100, it);
+        }
+        if let Some(k) = b.holes.keys().next().copied() {
+            b.holes.remove(&k);
+        }
+        let mut c = Copper::new(&a, BodyOptions::default());
+        let edits = c.apply_layout(&a, &b);
+        assert!(edits.items + edits.holes > 0);
+        same(&c, &b, &format!("seed {seed}"));
+    }
+}
+
+/// A point outside every box the edits since `mark_changes` marked lands
+/// on the nodes it landed on before, and those read as islands place it
+/// where a rebuild does (ryueda 7.E), over random edits of seeded layouts
+/// with negatives and holes, on a grid of points from either side and
+/// none.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "release only: booleans of seeded shapes take minutes in a debug build"
+)]
+fn landings_outside_the_marks_are_kept() {
+    use ryu_copper::layout::PointSide;
+    let sides = [Some(PointSide::Top), Some(PointSide::Bottom), None];
+    let points: Vec<(Point, Option<PointSide>)> = (0..24)
+        .flat_map(|i| (0..24).map(move |j| (i, j)))
+        .flat_map(|(i, j)| {
+            let at = Point::new(-5_000_000 + i * 434_783, -5_000_000 + j * 434_783);
+            sides.iter().map(move |s| (at, *s))
+        })
+        .collect();
+    let mut kept_total = 0usize;
+    for case in 0..CASES {
+        let mut full = seeded(0x6c61_6e64 + case, 100, false);
+        add_holes(&mut full, case + 7, 24);
+        let mut g = Lcg::new(case ^ 0x6d61_726b);
+        let mut l = Layout {
+            layers: full.layers.clone(),
+            ..Layout::default()
+        };
+        for (k, it) in &full.items {
+            if g.coin() {
+                l.items.insert(*k, it.clone());
+            }
+        }
+        for (k, h) in &full.holes {
+            if g.coin() {
+                l.holes.insert(*k, h.clone());
+            }
+        }
+        let mut c = Copper::new(&l, BodyOptions::default());
+        let mut landed: Vec<_> = points.iter().map(|(p, s)| c.land(*p, *s)).collect();
+        let items: Vec<u32> = full.items.keys().copied().collect();
+        let holes: Vec<u32> = full.holes.keys().copied().collect();
+        for step in 0..24 {
+            c.mark_changes();
+            for _ in 0..1 + g.range(0, 2) {
+                if g.range(0, 3) < 2 {
+                    let k = items[g.range(0, items.len() as i64 - 1) as usize];
+                    if l.items.remove(&k).is_some() {
+                        c.remove_item(&k);
+                    } else {
+                        l.items.insert(k, full.items[&k].clone());
+                        c.insert_item(k, full.items[&k].clone());
+                    }
+                } else {
+                    let k = holes[g.range(0, holes.len() as i64 - 1) as usize];
+                    if l.holes.remove(&k).is_some() {
+                        c.remove_hole(&k);
+                    } else {
+                        l.holes.insert(k, full.holes[&k].clone());
+                        c.insert_hole(k, full.holes[&k].clone());
+                    }
+                }
+            }
+            let marks = c.take_marks();
+            let fresh = Copper::new(&l, BodyOptions::default());
+            for (i, (p, s)) in points.iter().enumerate() {
+                let now = c.land(*p, *s);
+                if !marks.iter().any(|r| r.contains(*p)) {
+                    assert_eq!(now, landed[i], "case {case}, step {step}, point {p:?}");
+                    kept_total += 1;
+                }
+                landed[i] = now;
+                assert_eq!(
+                    c.placement_of(&landed[i]),
+                    fresh.place(*p, *s),
+                    "case {case}, step {step}, point {p:?}"
+                );
+            }
+        }
+    }
+    // The edits must leave most points where they were.
+    assert!(kept_total > 0);
+}
+
+/// `clearance_of` and `hole_clearance_of` are the whole queries filtered
+/// to the keys (ryueda 7.E), over seeded layouts with holes.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release only: seeded layouts")]
+fn clearance_of_keys_is_the_whole_query_filtered() {
+    for seed in 0..16u64 {
+        let mut l = seeded(seed, 80, true);
+        add_holes(&mut l, seed, 8);
+        let c = Copper::new(&l, BodyOptions::default());
+        let keys: std::collections::BTreeSet<u32> = l
+            .items
+            .keys()
+            .chain(l.holes.keys())
+            .copied()
+            .filter(|k| k % 3 == seed as u32 % 3)
+            .collect();
+        for layer in 0..l.layers.len() {
+            let whole: Vec<_> = c
+                .clearance(layer, 400_000)
+                .into_iter()
+                .filter(|g| keys.contains(&g.a.0) || keys.contains(&g.b.0))
+                .collect();
+            assert_eq!(
+                c.clearance_of(layer, 400_000, &keys),
+                whole,
+                "seed {seed} layer {layer}"
+            );
+            let holes: Vec<_> = c
+                .hole_clearance(layer, 400_000)
+                .into_iter()
+                .filter(|g| keys.contains(&g.hole) || keys.contains(&g.piece.0))
+                .collect();
+            assert_eq!(
+                c.hole_clearance_of(layer, 400_000, &keys),
+                holes,
+                "seed {seed} layer {layer}"
+            );
+        }
+    }
+}

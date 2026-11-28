@@ -489,6 +489,30 @@ fn fill_sections(golden: &mut Golden) {
             s.i64(i64::from(*n));
         }
     }
+    // The same asks by 3 mm tiles (ryueda 7.E).
+    for seed in 0..8 {
+        let ask = &seeded_fill::seeded(seed).ask;
+        let t = ryu_copper::fill::fill_tiled(ask, 3 * seeded_fill::MM, None);
+        let mut s = golden.section(&format!("fill.tiled.{seed}"));
+        for tile in &t.tiles {
+            s.i64(tile.at.x);
+            s.i64(tile.at.y);
+            polygons(&mut s, &tile.fill);
+            for k in &tile.dropped {
+                s.i64(*k as i64);
+            }
+            s.str("/");
+        }
+        s.i64(t.islands_removed as i64);
+        for (a, b) in &t.uncertain {
+            s.i64(*a as i64);
+            s.i64(*b as i64);
+        }
+        s.str("|");
+        for n in &t.spokes {
+            s.i64(i64::from(*n));
+        }
+    }
 }
 
 #[test]

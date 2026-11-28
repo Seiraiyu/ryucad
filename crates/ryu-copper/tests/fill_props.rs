@@ -44,7 +44,7 @@ fn fills_keep_their_clearance_exactly() {
             );
         }
         assert!(
-            poly::difference(&f.polygons, &s.ask.area).is_empty(),
+            fill::outside(&f.polygons, &s.ask.area).is_empty(),
             "seed {seed}: the fill leaves its area"
         );
     }
@@ -82,4 +82,112 @@ fn islands_touch_their_copper() {
             );
         }
     }
+}
+
+/// A tiled fill (ryueda 7.E) keeps every promise of a whole one: exactly
+/// clear of obstacles by the clearance, inside the area, simple polygons
+/// in each tile, the same spokes; one thread and eight alike; and it
+/// covers what the whole fill covers, but for the seams' bound.
+#[test]
+fn tiled_fills_keep_the_whole_fills_promises() {
+    let side = 3 * seeded_fill::MM;
+    for seed in 0..SEEDS {
+        let s = seeded(seed);
+        let whole = fill::fill(&s.ask);
+        let t = fill::fill_tiled(&s.ask, side, None);
+        let all = t.polygons();
+        for (k, o) in s.others.iter().enumerate() {
+            assert_eq!(
+                measure::closer(&all.body(), &o.body(), s.clearance),
+                Verdict::No,
+                "seed {seed}: the tiled fill within the clearance of obstacle {k}"
+            );
+        }
+        assert!(
+            poly::difference(&all, &s.ask.area).is_empty(),
+            "seed {seed}"
+        );
+        for tile in &t.tiles {
+            let faults = poly::faults(&tile.fill);
+            assert!(
+                faults.is_empty(),
+                "seed {seed} tile {:?}: {faults:?}",
+                tile.at
+            );
+        }
+        assert_eq!(t.spokes, whole.spokes, "seed {seed}");
+        let lost = poly::difference(
+            &whole.polygons,
+            &poly::grow(&all, 4 * fill::BOUND, &fill::opts()),
+        );
+        assert!(
+            lost.is_empty(),
+            "seed {seed}: the tiles lose {} polygons",
+            lost.polygons.len()
+        );
+        let more = poly::difference(
+            &all,
+            &poly::grow(&whole.polygons, 4 * fill::BOUND, &fill::opts()),
+        );
+        assert!(
+            more.is_empty(),
+            "seed {seed}: the tiles add {} polygons",
+            more.polygons.len()
+        );
+        let run = |n| {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(n)
+                .build()
+                .unwrap()
+                .install(|| fill::fill_tiled(&s.ask, side, None))
+        };
+        assert_eq!(run(1), run(8), "seed {seed}");
+    }
+}
+
+/// A refill after one obstacle grew by a micrometre (ryueda 7.E) fills
+/// only the tiles whose inputs changed, reuses the rest, and equals a
+/// tiled fill from nothing.
+#[test]
+fn a_refill_rebuilds_only_the_tiles_an_edit_reaches() {
+    let side = 3 * seeded_fill::MM;
+    let mut fewer = 0;
+    for seed in 0..16u64 {
+        let s = seeded(seed);
+        let (first, all) = fill::fill_tiled_counted(&s.ask, side, None);
+        assert_eq!(
+            all,
+            first.tiles.len(),
+            "seed {seed}: from nothing, every tile"
+        );
+        let (same, none) = fill::fill_tiled_counted(&s.ask, side, Some(&first));
+        assert_eq!((none, &same), (0, &first), "seed {seed}: nothing changed");
+        let mut ask = s.ask.clone();
+        if ask.obstacles.is_empty() {
+            continue;
+        }
+        ask.obstacles[0] = poly::grow(&ask.obstacles[0], 1_000, &fill::opts()).into();
+        let (again, built) = fill::fill_tiled_counted(&ask, side, Some(&first));
+        assert_eq!(again, fill::fill_tiled(&ask, side, None), "seed {seed}");
+        let changed = again
+            .tiles
+            .iter()
+            .filter(|t| {
+                first
+                    .tiles
+                    .iter()
+                    .find(|u| u.at == t.at)
+                    .is_none_or(|u| u.key != t.key)
+            })
+            .count();
+        assert_eq!(
+            built, changed,
+            "seed {seed}: only the changed tiles are filled"
+        );
+        fewer += usize::from(built < first.tiles.len());
+    }
+    assert!(
+        fewer >= 8,
+        "{fewer} of 16 seeds refilled fewer than every tile"
+    );
 }

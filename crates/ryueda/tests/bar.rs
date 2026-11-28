@@ -31,6 +31,18 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 /// The bar, or ten times it on a machine not set aside for measuring.
+/// A bar the owner accepted as unmet (ryueda 7.E, option (a) of
+/// 2026-11-28: the scale board's four and `Spec::bar()`'s track write): with `RYUEDA_BARS=1` a miss is printed with the issues
+/// that track it, not failed; loose, it is asserted ten times over as
+/// every bar is.
+fn accepted(got: Duration, want: Duration, issues: &str) {
+    if std::env::var("RYUEDA_BARS").is_ok_and(|v| v == "1") && got >= want {
+        println!("  unmet, accepted in ryueda 7.E: {got:?} against {want:?} ({issues})");
+    } else {
+        assert!(got < bar(want), "{got:?}");
+    }
+}
+
 fn bar(d: Duration) -> Duration {
     if std::env::var("RYUEDA_BARS").is_ok_and(|v| v == "1") {
         d
@@ -794,6 +806,7 @@ fn a_generated_board_checks_and_answers_a_write_within_its_bars() {
     let board = dir.path().join("board");
     std::fs::create_dir_all(&board).unwrap();
     board_gen::write(&board, &board_gen::Spec::bar());
+    board_gen::age(&board);
     git(&board, &["init", "-q"]);
     let id = ryueda::id::Id::parse("main", "board").unwrap();
     let t = Instant::now();
@@ -858,22 +871,147 @@ fn a_generated_board_checks_and_answers_a_write_within_its_bars() {
         worst = worst.max(took);
     }
     println!("a track write with its delta through a warm daemon: worst {worst:?}");
-    assert!(worst < bar(Duration::from_millis(250)), "{worst:?}");
+    // Design 924 (ryueda 7.E): 25 ms, edited in place (design 732's was
+    // 250). Unmet and accepted in 7.E (38.8 ms on a quiet box): the same
+    // per-write floors as the scale board's.
+    accepted(worst, Duration::from_millis(25), "#1126 to #1130");
+    ryueda(&["daemon", "stop"]);
+}
+
+/// Design 924's continuous-DRC bars (ryueda 7.E) on `Spec::scale()`:
+/// 5,000 parts, 4 layers, two inner planes and two outer pours. From
+/// nothing, loaded and checked (fills included) in 3 s; through a warm
+/// daemon, a track on the top pour (refilled) with its delta in 150 ms,
+/// and a part on the `in1` plane's net moved in 250 ms; the `in1` plane
+/// filled alone in 500 ms. The owner accepted all four as unmet in 7.E
+/// ([`accepted`]): the booleans are #1112, the per-write floors #1126 to
+/// #1130.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "release only: cargo test -p ryueda --release --test bar"
+)]
+fn a_scale_board_is_checked_and_edited_within_its_bars() {
+    let dir = tempfile::tempdir().unwrap();
+    let board = dir.path().join("board");
+    std::fs::create_dir_all(&board).unwrap();
+    let spec = board_gen::Spec::scale();
+    board_gen::write(&board, &spec);
+    board_gen::age(&board);
+    git(&board, &["init", "-q"]);
+    let id = ryueda::id::Id::parse("main", "board").unwrap();
+    let t = Instant::now();
+    let p = ryueda::project::Project::load(&board).unwrap();
+    let c = ryueda::board::drc::check(&p, &p.boards[&id]).unwrap();
+    let cold = t.elapsed();
+    println!(
+        "scale board: {} pads, {} tracks, {} pours: loaded, shaped, filled, connected and checked in {cold:?}",
+        c.shapes.pads.len(),
+        c.shapes.tracks.len(),
+        c.shapes.pours.len()
+    );
+    accepted(cold, Duration::from_secs(3), "#1112");
+    // The in1 plane alone, on shapes already built.
+    let rules = ryueda::board::rules::of(&p, &p.boards[&id]).unwrap();
+    let file = p.boards[&id].board.item.as_ref().unwrap();
+    let preset = ryueda::board::preset::resolve(&p, &file.preset).unwrap();
+    let in1: Vec<(ryueda::id::Id, ryueda::board::pour::Pour)> = p.boards[&id]
+        .pours
+        .iter()
+        .filter_map(|(k, l)| Some((k.clone(), l.item.as_ref().ok()?.clone())))
+        .filter(|(_, x)| x.layer == ryueda::board::file::CopperLayer::Inner(1))
+        .collect();
+    let t = Instant::now();
+    let f = ryueda::board::pour::fill_all(&in1, &c.shapes, &rules, &preset, &[]);
+    let plane = t.elapsed();
+    println!(
+        "scale board: the in1 plane, {} regions, filled in {plane:?}",
+        f[0].regions.len()
+    );
+    accepted(plane, Duration::from_millis(500), "#1112");
+    // Through a warm daemon.
+    let run = dir.path().join("run");
+    let ryueda = warm(&board, &run, dir.path());
+    ryueda(&["board", "drc", "main"]);
+    let pads = ryueda(&["board", "show", "main", "--pads"])["pads"].clone();
+    let pad = |occ: &str, n: &str| {
+        pads.as_array()
+            .unwrap()
+            .iter()
+            .find(|x| x["occurrence"] == occ && x["number"] == n)
+            .cloned()
+            .unwrap()
+    };
+    // Connection 1's net, on the top pour round the first row.
+    let p1 = pad(&spec.occurrence(1), "2");
+    let net = p1["net"].as_str().unwrap().to_owned();
+    let (x, y) = (p1["at"][0].as_i64().unwrap(), p1["at"][1].as_i64().unwrap());
+    let mm = |v: i64| format!("{}", v as f64 / 1e6);
+    let mut worst = Duration::ZERO;
+    for i in 0..5 {
+        let dy = (i + 1) * 100_000;
+        let t = Instant::now();
+        ryueda(&[
+            "board",
+            "track",
+            "add",
+            "main",
+            "--net",
+            &net,
+            "--layer",
+            "top",
+            "--path",
+            &format!("{},{}", mm(x), mm(y + dy)),
+            &format!("{},{}", mm(x + 300_000), mm(y + dy)),
+            "--id",
+            &format!("x{i}"),
+        ]);
+        worst = worst.max(t.elapsed());
+    }
+    println!("scale board: a top track write, its pour refilled, with its delta: worst {worst:?}");
+    accepted(worst, Duration::from_millis(150), "#1126 to #1130, #1112");
+    // Part 4, on the in1 plane's net, moved a little.
+    let occ4 = spec.occurrence(4);
+    let refdes = ryueda(&["board", "show", "main"])["occurrences"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|o| o["reference"] == occ4.as_str())
+        .and_then(|o| o["refdes"].as_str().map(str::to_owned))
+        .unwrap_or(occ4.clone());
+    let at = pad(&occ4, "1")["at"].clone();
+    let (px, py) = (at[0].as_i64().unwrap() + 500_000, at[1].as_i64().unwrap());
+    let mut worst = Duration::ZERO;
+    for i in 0..5 {
+        let t = Instant::now();
+        ryueda(&[
+            "board",
+            "place",
+            "main",
+            &refdes,
+            "--at",
+            &format!("{},{}", mm(px), mm(py + (i % 2) * 50_000)),
+        ]);
+        worst = worst.max(t.elapsed());
+    }
+    println!("scale board: a part on the in1 plane's net moved: worst {worst:?}");
+    accepted(worst, Duration::from_millis(250), "#1126 to #1130, #1112");
     ryueda(&["daemon", "stop"]);
 }
 
 /// Design 924's plane bar: the bars' generated board with a whole `top`
 /// plane of its first chain's net round every other net's pads and
 /// tracks, filled from shapes already built (the fill step alone timed)
-/// in 500 ms. It misses it (ryueda 7.D: 11.6 s on cox-worker-2, a
-/// shared Ryzen 7 9700X at load 9, four threads; the plane-sized
-/// booleans, a difference, the opening's grow and the join, take about
-/// 3.7, 3.7 and 2.2 s; #1067), so it is ignored until the booleans are
-/// faster: run it with `--ignored`. The plan said `bottom`, but the board
-/// has no copper there and no vias, so a bottom plane is one island its
-/// net never reaches.
+/// in 500 ms. 7.D missed it at 11.6 s (#1067); 7.E's 1 µm bound took it
+/// to 0.64 s on a quiet cox-worker-2, and its 8 mm tiles, filled in
+/// parallel, under the bar. The plan said
+/// `bottom`, but the board has no copper there and no vias, so a bottom
+/// plane is one island its net never reaches.
 #[test]
-#[ignore = "misses design 924's 500 ms (about 12 s, #1067): run with --ignored"]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "release only: cargo test -p ryueda --release --test bar"
+)]
 fn a_plane_fills_within_its_bar() {
     let dir = tempfile::tempdir().unwrap();
     let board = dir.path().join("board");
@@ -898,7 +1036,7 @@ fn a_plane_fills_within_its_bar() {
         ryueda::board::pour::Pour::whole(&net, ryueda::board::file::CopperLayer::Top),
     )];
     let t = Instant::now();
-    let f = ryueda::board::pour::fill_all(&pours, &s, &rules, &preset);
+    let f = ryueda::board::pour::fill_all(&pours, &s, &rules, &preset, &[]);
     let took = t.elapsed();
     println!(
         "a top plane among {} pads and {} tracks: {} regions, {} thermals, filled in {took:?}",

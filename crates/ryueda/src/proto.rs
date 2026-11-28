@@ -746,6 +746,12 @@ pub enum Request {
         size: Option<u32>,
         /// `png` or `svg`.
         format: String,
+        /// The open nets' unrouted connections drawn over the layers.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        ratsnest: bool,
+        /// Each finding's place marked.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        findings: bool,
     },
     #[serde(rename = "board.list")]
     BoardList {
@@ -1082,6 +1088,18 @@ pub enum Request {
         group: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expected_revision: Option<String>,
+    },
+    /// The unrouted connections of a board's open nets (design 924): the
+    /// nearest links that would join each net's islands.
+    #[serde(rename = "board.ratsnest")]
+    BoardRatsnest {
+        board: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        net: Option<String>,
+        /// A part (its designator or occurrence): only connections with an
+        /// end on it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reference: Option<String>,
     },
     /// The exact distance between two items of a board, per copper layer.
     #[serde(rename = "board.measure")]

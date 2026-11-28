@@ -120,7 +120,10 @@ pub fn handle_job(
     )
     .then(|| req.clone());
     let mut live = live;
-    let r = guarded(slot, root, |s| answer(s, live.as_deref_mut(), me, req, job));
+    let watch = live.is_some();
+    let r = guarded(slot, root, watch, |s| {
+        answer(s, live.as_deref_mut(), me, req, job)
+    });
     let r = match (r, merge, sessionless) {
         (Err(e), Some(req), _) if manifest_record(&e) => {
             crate::validate::unloaded(root, req).map(Answer::json)
@@ -187,11 +190,23 @@ pub fn prepare(
 fn guarded<T>(
     slot: &mut Option<Session>,
     root: &Path,
+    watch: bool,
     f: impl FnOnce(&mut Session) -> Result<T>,
 ) -> Result<T> {
     let session = match slot {
         Some(s) => s,
-        None => slot.insert(Session::open(root)?),
+        None => {
+            let mut s = Session::open(root)?;
+            // A daemon's session lives on: file events narrow its checks,
+            // its markers beside its log (ryueda 7.E).
+            if watch {
+                let markers = ryu_session::endpoint::Endpoint::<crate::Eda>::for_project(root)?
+                    .log
+                    .with_extension("watch");
+                s = s.with_watch(&markers);
+            }
+            slot.insert(s)
+        }
     };
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(session))) {
         Ok(r) => r,
@@ -218,7 +233,10 @@ pub fn answer(
     job: &ryu_session::job::Job,
 ) -> Result<Answer> {
     let refreshing = std::time::Instant::now();
-    let external = session.refresh_changes()?;
+    let external = {
+        let _s = crate::profile::stage("refresh");
+        session.refresh_changes()?
+    };
     // The freshness scan apart from the request's own work, in the
     // daemon's timings (#981: `daemon status --timings`).
     if let Some(l) = live.as_deref_mut() {
@@ -247,7 +265,10 @@ pub fn answer(
     let writes = req.mutates();
     let logs_itself = matches!(req, Request::Undo { .. } | Request::Redo { .. });
     let files_before = match (&live, req.mutates() && !logs_itself) {
-        (Some(_), true) => Some(session.files()),
+        (Some(_), true) => {
+            let _s = crate::profile::stage("files_before");
+            Some(session.files())
+        }
         _ => None,
     };
     // An import into a library project writes that project's library:
@@ -268,10 +289,14 @@ pub fn answer(
                 .map_err(|e| e.with("commit", &commit)),
             Err(e) => Err(e),
         },
-        None => working(session, live.as_deref_mut(), me, req, job),
+        None => {
+            let _s = crate::profile::stage("dispatch");
+            working(session, live.as_deref_mut(), me, req, job)
+        }
     };
     if let (Some(l), Some(files_before), true) = (live.as_deref_mut(), files_before, result.is_ok())
     {
+        let _s = crate::profile::stage("record");
         // Only this project's own files: an alias's library project comes
         // into view when it is named, and undoing that must never delete
         // it. Only an import into a library project writes another
@@ -293,10 +318,12 @@ pub fn answer(
         if writes {
             l.prune(|r| crate::refs::resolve(session.project(), r).is_ok());
         }
+        let _s = crate::profile::stage("publish");
         l.announce(&before);
         publish(l, session);
         publish_merge(l, session);
         publish_pdm(l, session);
+        publish_boards(l, session);
     }
     result
 }
@@ -333,6 +360,8 @@ fn working(
             window,
             size,
             format,
+            ratsnest,
+            findings,
         } => crate::board::cmd::render(
             session,
             &board,
@@ -342,6 +371,7 @@ fn working(
             window.as_ref(),
             size,
             &format,
+            crate::board::cmd::Marks { ratsnest, findings },
         ),
         Request::Render {
             design,
@@ -1451,6 +1481,11 @@ fn dispatch(
         Request::BoardRulesExplain { board, refs } => {
             crate::board::rulecmd::explain(session, &board, &refs)
         }
+        Request::BoardRatsnest {
+            board,
+            net,
+            reference,
+        } => crate::board::cmd::ratsnest(session, &board, net.as_deref(), reference.as_deref()),
         Request::BoardMeasure { board, a, b, layer } => {
             crate::board::cmd::measure(session, &board, &a, &b, layer.as_deref())
         }
@@ -2575,10 +2610,77 @@ pub fn publish_pdm(live: &mut Live<Eda>, session: &mut Session) {
     live.seen.pdm = Some((key, now));
 }
 
+/// `board.checked` for each board whose findings moved since its watchers
+/// were last told (ryueda 7.E): its revision, what the change added and
+/// removed, and its counts. A board first seen while watched is told
+/// whole. Nothing is checked while nobody watches `boards`.
+pub fn publish_boards(live: &mut Live<Eda>, session: &mut Session) {
+    if !live.hub.watches_topic(Topic::Boards) {
+        live.seen.boards.clear();
+        return;
+    }
+    let ids: Vec<crate::id::Id> = session.project().boards.keys().cloned().collect();
+    for id in ids {
+        let revision = session.project().boards[&id].revision.clone();
+        let board = format!("board/{id}");
+        let seen = live.seen.boards.get(id.as_str());
+        match session.board_check(&id) {
+            Ok(c) => {
+                let same = |a: &crate::board::drc::Finding, b: &crate::board::drc::Finding| {
+                    a.id == b.id && a.waived == b.waived
+                };
+                let moved = seen.is_none_or(|(_, before)| {
+                    before.len() != c.findings.len()
+                        || before.iter().zip(&c.findings).any(|(a, b)| !same(a, b))
+                });
+                if !moved {
+                    continue;
+                }
+                let before: &[crate::board::drc::Finding] = seen.map_or(&[], |(_, f)| f);
+                let added: Vec<&crate::board::drc::Finding> = c
+                    .findings
+                    .iter()
+                    .filter(|f| !before.iter().any(|b| same(b, f)))
+                    .collect();
+                let removed: Vec<&str> = before
+                    .iter()
+                    .filter(|b| !c.findings.iter().any(|f| same(b, f)))
+                    .map(|b| b.id.as_str())
+                    .collect();
+                let params = json!({
+                    "board": board,
+                    "revision": revision,
+                    "delta": {"added": added, "removed": removed},
+                    "errors": c.errors(),
+                    "warnings": c.warnings(),
+                    "waived": c.waived(),
+                });
+                live.hub.send(Topic::Boards, "board.checked", &params);
+                live.seen
+                    .boards
+                    .insert(id.to_string(), (revision, c.findings.clone()));
+            }
+            Err(e) => {
+                if seen.is_some_and(|(r, _)| *r == revision) {
+                    continue;
+                }
+                live.hub.send(
+                    Topic::Boards,
+                    "board.checked",
+                    &json!({"board": board, "revision": revision, "error": e}),
+                );
+                live.seen
+                    .boards
+                    .insert(id.to_string(), (revision, Vec::new()));
+            }
+        }
+    }
+}
+
 /// Brings the session and what subscribers know up to date with the
 /// files: before a subscription, and while anyone watches.
 pub fn settle(slot: &mut Option<Session>, live: &mut Live<Eda>, root: &Path) {
-    let _ = guarded(slot, root, |s| {
+    let _ = guarded(slot, root, true, |s| {
         let before = live.snapshot();
         let external = s.refresh_changes()?;
         if !external.is_empty() {
@@ -2589,6 +2691,7 @@ pub fn settle(slot: &mut Option<Session>, live: &mut Live<Eda>, root: &Path) {
         publish(live, s);
         publish_merge(live, s);
         publish_pdm(live, s);
+        publish_boards(live, s);
         Ok(())
     });
 }

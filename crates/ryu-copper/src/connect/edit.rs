@@ -25,7 +25,7 @@ use rayon::prelude::*;
 
 use ryu_board::model::Polarity;
 
-use super::{Copper, Entry, Found, Node, on};
+use super::{Copper, Entry, Found, Node, note, on};
 use crate::layout::{Hole, Item};
 
 /// What an edit touches on a layer.
@@ -177,7 +177,9 @@ impl<K: Ord + Hash + Clone + Send + Sync> Copper<K> {
         layers.dedup();
         let k = key.clone();
         self.edit(&layers, None, Some(&key), move |c| {
+            note(&mut c.marks, &c.drills, &k);
             c.drills.insert(k.clone(), 0, hole.shape.body());
+            note(&mut c.marks, &c.drills, &k);
             c.holes.insert(k, hole);
         });
     }
@@ -187,6 +189,7 @@ impl<K: Ord + Hash + Clone + Send + Sync> Copper<K> {
         let hole = self.holes.get(key)?.clone();
         let layers = self.copper_in(&hole);
         self.edit(&layers, None, Some(key), |c| {
+            note(&mut c.marks, &c.drills, key);
             c.drills.remove(key);
             c.holes.remove(key);
             for s in &mut c.hard {
@@ -209,7 +212,9 @@ impl<K: Ord + Hash + Clone + Send + Sync> Copper<K> {
 
     fn set_item(&mut self, key: K, item: &Item) {
         let (e, body, negs) = Entry::make(item, &self.opts);
+        note(&mut self.marks, &self.bodies, &key);
         self.bodies.insert(key.clone(), e.layer, body);
+        note(&mut self.marks, &self.bodies, &key);
         for (p, nb) in negs {
             self.negs.insert((key.clone(), p), e.layer, nb);
         }
@@ -218,6 +223,7 @@ impl<K: Ord + Hash + Clone + Send + Sync> Copper<K> {
 
     fn unset_item(&mut self, key: &K) {
         if let Some(e) = self.entries.remove(key) {
+            note(&mut self.marks, &self.bodies, key);
             self.bodies.remove(key);
             for p in e.negs {
                 self.negs.remove(&(key.clone(), p));
@@ -360,6 +366,7 @@ impl<K: Ord + Hash + Clone + Send + Sync> Copper<K> {
             for k in r {
                 if let Some(e) = self.entries.get_mut(k) {
                     e.resolved = None;
+                    note(&mut self.marks, &self.bodies, k);
                 }
             }
             for h in hs {
@@ -391,6 +398,7 @@ impl<K: Ord + Hash + Clone + Send + Sync> Copper<K> {
             for k in &extra {
                 if let Some(e) = self.entries.get_mut(k) {
                     e.resolved = None;
+                    note(&mut self.marks, &self.bodies, k);
                 }
             }
             for h in &h_now {
@@ -442,6 +450,56 @@ impl<K: Ord + Hash + Clone + Send + Sync> Copper<K> {
         }
         seeds.extend(fresh);
         self.graph.settle(&seeds);
+    }
+}
+
+/// How many items and holes a [`Copper::apply_layout`] changed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Applied {
+    pub items: usize,
+    pub holes: usize,
+}
+
+impl<K: Ord + Hash + Clone + Send + Sync> Copper<K> {
+    /// Edits the copper built from `from` into the copper of `to`: holes
+    /// and items gone or changed removed, then holes and items new or
+    /// changed inserted, by key. Afterwards it equals `Copper::new(to)`.
+    /// The layers must be the same; when they aren't, build anew.
+    pub fn apply_layout(
+        &mut self,
+        from: &crate::layout::Layout<K>,
+        to: &crate::layout::Layout<K>,
+    ) -> Applied {
+        assert_eq!(
+            from.layers, to.layers,
+            "apply across different layers: build anew"
+        );
+        let mut n = Applied::default();
+        for (k, it) in &from.items {
+            if to.items.get(k) != Some(it) {
+                self.remove_item(k);
+                n.items += 1;
+            }
+        }
+        for (k, h) in &from.holes {
+            if to.holes.get(k) != Some(h) {
+                self.remove_hole(k);
+                n.holes += 1;
+            }
+        }
+        for (k, h) in &to.holes {
+            if from.holes.get(k) != Some(h) {
+                self.insert_hole(k.clone(), h.clone());
+                n.holes += usize::from(!from.holes.contains_key(k));
+            }
+        }
+        for (k, it) in &to.items {
+            if from.items.get(k) != Some(it) {
+                self.insert_item(k.clone(), it.clone());
+                n.items += usize::from(!from.items.contains_key(k));
+            }
+        }
+        n
     }
 }
 

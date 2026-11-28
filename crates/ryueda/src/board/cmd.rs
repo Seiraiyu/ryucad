@@ -375,6 +375,74 @@ pub fn measure(
     Ok(v)
 }
 
+/// `board ratsnest` (design 924): each open net's unrouted connections,
+/// the nearest links that would join its islands, narrowed to a net or
+/// to the connections with an end on a part; and how many parts are
+/// unplaced (they have no connections).
+pub fn ratsnest(
+    session: &mut Session,
+    board: &str,
+    net: Option<&str>,
+    reference: Option<&str>,
+) -> Result<Value> {
+    let id = find(session.project(), board)?.id.clone();
+    let c = session.board_check(&id)?;
+    let p = session.project();
+    let b = &p.boards[&id];
+    let file = board_of(b)?;
+    let net = match net {
+        Some(n) => Some(super::route::net_of(
+            &super::route::nets(p, &file.design)?,
+            &file.design,
+            n,
+        )?),
+        None => None,
+    };
+    let (_, occs) = occ::occurrences(p, &file.design)?;
+    // A part by its label (`R1`) or its occurrence path (`c0/r1`): its
+    // pads' references are by label either way.
+    let prefix = match reference {
+        Some(r) => {
+            let Some(o) = occs.iter().find(|o| o.label() == r || o.reference == r) else {
+                return Err(crate::error::Error::new(
+                    crate::error::Code::NotFound,
+                    format!("board {id} has no part {r}"),
+                )
+                .with("reference", r));
+            };
+            Some(format!("{id}:{}/", o.label()))
+        }
+        None => None,
+    };
+    let mut out = Vec::new();
+    for o in &c.conn.report.opens {
+        if net.as_ref().is_some_and(|n| *n != o.net) {
+            continue;
+        }
+        for x in super::connect::connections(&c.conn, o) {
+            let mut v = super::connect::connection_json(&c.conn, &x);
+            if let Some(pre) = &prefix
+                && !(v["a"].as_str().is_some_and(|a| a.starts_with(pre.as_str()))
+                    || v["b"].as_str().is_some_and(|b| b.starts_with(pre.as_str())))
+            {
+                continue;
+            }
+            v["net"] = json!(o.net);
+            out.push(v);
+        }
+    }
+    let unplaced = occs
+        .iter()
+        .filter(|o| o.footprint_ref.is_some() && !b.placements.contains_key(&o.reference))
+        .count();
+    Ok(json!({
+        "board": format!("board/{id}"),
+        "revision": b.revision,
+        "connections": out,
+        "unplaced": unplaced,
+    }))
+}
+
 /// `board status`: placed and unplaced parts, nets routed and open, and
 /// findings by code.
 pub fn status(session: &mut Session, board: &str) -> Result<Value> {
@@ -734,6 +802,9 @@ pub fn place(
         }
         placed.push(entry);
     }
+    // The legaliser's check is let go before the write: the board's kept
+    // state edits its copper in place only when nothing else holds it.
+    drop(check);
     let before = super::drc::now(session, &id);
     commit(session, &format!("board {id} place"), w)?;
     let b = &session.project().boards[&id];
@@ -866,6 +937,42 @@ pub fn pours_json(s: &super::shapes::BoardShapes, id: &crate::id::Id) -> Value {
         .collect::<Vec<_>>())
 }
 
+/// What `board render` draws over the layers (ryueda 7.E).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Marks {
+    pub ratsnest: bool,
+    pub findings: bool,
+}
+
+type Point = ryu_board::geom::Point;
+
+/// Where a finding is: the centre of the bounds of the shapes its refs
+/// name (pads, tracks, vias, holes, pours, courtyards by owner); none
+/// when it names no shape.
+fn place_of(s: &super::shapes::BoardShapes, refs: &[String]) -> Option<Point> {
+    let mut b: Option<ryu_board::geom::Rect> = None;
+    let mut take = |r: Option<ryu_board::geom::Rect>| {
+        if let Some(r) = r {
+            b = Some(b.map_or(r, |x| x.union(r)));
+        }
+    };
+    for r in refs {
+        let r = r.split('#').next().unwrap_or(r);
+        for p in s.pads.iter().filter(|p| p.reference == r) {
+            take(p.copper.bounds());
+        }
+        for c in s.courtyards.iter().filter(|c| c.owner == r) {
+            take(c.shape.bounds());
+        }
+        for (owner, shape) in s.layers.values().flatten() {
+            if owner == r {
+                take(shape.bounds());
+            }
+        }
+    }
+    b.map(|b| Point::new((b.min.x + b.max.x) / 2, (b.min.y + b.max.y) / 2))
+}
+
 /// `board render`: the board's shapes (kept by the session) drawn.
 #[allow(clippy::too_many_arguments)]
 pub fn render(
@@ -877,6 +984,7 @@ pub fn render(
     window: Option<&[String; 4]>,
     size: Option<u32>,
     format: &str,
+    marks: Marks,
 ) -> Result<ryu_session::rpc::Answer> {
     let p = session.project();
     let unit = p.manifest.default_unit;
@@ -924,6 +1032,31 @@ pub fn render(
         }
     };
     let shapes = session.board_shapes(&id)?;
+    let (lines, points) = if marks.ratsnest || marks.findings {
+        let c = session.board_check(&id)?;
+        let lines: Vec<(Point, Point)> = if marks.ratsnest {
+            c.conn
+                .report
+                .opens
+                .iter()
+                .flat_map(|o| super::connect::connections(&c.conn, o))
+                .map(|x| (x.distance.a, x.distance.b))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let points: Vec<Point> = if marks.findings {
+            c.findings
+                .iter()
+                .filter_map(|f| place_of(&shapes, &f.refs))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        (lines, points)
+    } else {
+        (Vec::new(), Vec::new())
+    };
     let ask = super::render::Ask {
         layers,
         bottom,
@@ -931,6 +1064,8 @@ pub fn render(
         window,
         size: size.unwrap_or(super::render::DEFAULT_SIZE),
         svg,
+        ratsnest: &lines,
+        findings: &points,
     };
     let (mut v, mime, bytes) = super::render::render(id.as_str(), &shapes, &ask)?;
     v["notices"] = fault::list(&shapes.notices);

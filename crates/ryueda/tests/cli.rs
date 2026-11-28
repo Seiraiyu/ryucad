@@ -865,6 +865,7 @@ fn every_protocol_method_has_a_command() {
         ("board.rules.explain", &["board", "rules", "explain"]),
         ("board.waive", &["board", "waive"]),
         ("board.measure", &["board", "measure"]),
+        ("board.ratsnest", &["board", "ratsnest"]),
         ("board.group.list", &["board", "group", "list"]),
         ("board.keepout.add", &["board", "keepout", "add"]),
         ("board.text.add", &["board", "text", "add"]),
@@ -6497,4 +6498,171 @@ fn pours_from_the_cli() {
         1,
     );
     p.ok(&["board", "pour", "delete", id, "gnd"]);
+}
+
+/// The daemon's kept board state (ryueda 7.E) answers what a process
+/// reading the files does: after writes (`both_in` compares the two),
+/// after an undo, and after an edit from outside the session.
+#[test]
+fn a_kept_board_answers_as_a_fresh_one() {
+    let p = Pair::breakout();
+    for args in breakout_board::script() {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        p.ok(&args);
+    }
+    let id = breakout_board::BOARD;
+    let drc = ["board", "drc", id];
+    p.both_in("board", &drc);
+    p.ok(&[
+        "board", "track", "add", id, "--net", "rail:gnd", "--layer", "bottom", "--path", "22,3",
+        "24,3", "--id", "k1",
+    ]);
+    p.both_in("board", &drc);
+    // Undo, in the daemon's folder only: the daemon's answer, then a
+    // process reading that folder's files.
+    let (code, v) = p.run_in(&p.daemon, "board", &["undo"]);
+    assert_eq!(code, 0, "{v}");
+    let kept = p.run_in(&p.daemon, "board", &drc);
+    let mut fresh = p.command_in(&p.daemon, "board", &drc);
+    fresh.env("RYUEDA_NO_DAEMON", "1");
+    let fresh = parse(fresh.output().unwrap(), &p.daemon);
+    assert_eq!(kept, fresh, "after an undo");
+    // The other folder catches up by a delete, so the two match again.
+    let (code, v) = p.run_in(&p.direct, "board", &["board", "track", "delete", id, "k1"]);
+    assert_eq!(code, 0, "{v}");
+    p.both_in("board", &drc);
+    // An edit from outside: a placement file rewritten on disk, in both.
+    let dir = p.daemon.join("board/boards").join(id).join("placements");
+    let f = fs::read_dir(&dir).unwrap().flatten().next().unwrap().path();
+    let rel = f
+        .strip_prefix(&p.daemon)
+        .unwrap()
+        .to_string_lossy()
+        .replace('\\', "/");
+    let mut v: Value = serde_json::from_str(&fs::read_to_string(&f).unwrap()).unwrap();
+    v["rotation_mdeg"] = json!(90_000);
+    let text = ryueda::canonical::to_string(&v);
+    for top in [&p.direct, &p.daemon] {
+        fs::write(top.join(&rel), &text).unwrap();
+    }
+    p.both_in("board", &drc);
+}
+
+/// A board write through the daemon publishes `board.checked` to a
+/// watcher of `boards` (ryueda 7.E), with what the write added and the
+/// board's counts.
+#[test]
+fn board_writes_publish_board_checked() {
+    let p = Pair::breakout();
+    for args in breakout_board::script() {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        p.ok(&args);
+    }
+    let id = breakout_board::BOARD;
+    let watch = p.command_in(
+        &p.daemon,
+        "board",
+        &[
+            "--as",
+            "watcher",
+            "watch",
+            "--topic",
+            "boards",
+            "--count",
+            "2",
+            "--timeout",
+            "20",
+        ],
+    );
+    let waiting = std::thread::spawn(move || {
+        let mut watch = watch;
+        watch.output().unwrap()
+    });
+    let attached = || {
+        let (_, v) = p.run_in(&p.daemon, "board", &["participants"]);
+        v["result"]["participants"]
+            .as_array()
+            .is_some_and(|l| l.iter().any(|x| x["name"] == "watcher"))
+    };
+    for _ in 0..200 {
+        if attached() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    // Nothing says when the watcher has subscribed: write and undo until
+    // it has heard two changes.
+    let mut added = false;
+    while !waiting.is_finished() {
+        let args: &[&str] = if added {
+            &["undo"]
+        } else {
+            &[
+                "board", "track", "add", id, "--net", "rail:gnd", "--layer", "bottom", "--path",
+                "2,9", "3,9", "--id", "k1",
+            ]
+        };
+        let (code, v) = p.run_in(&p.daemon, "board", args);
+        assert_eq!(code, 0, "{v}");
+        added = !added;
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let out = waiting.join().unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let notes = v["result"]["notifications"].as_array().unwrap();
+    assert!(!notes.is_empty(), "{v}");
+    for n in notes {
+        assert_eq!(n["method"], "board.checked", "{v}");
+        assert_eq!(n["params"]["board"], format!("board/{id}"), "{v}");
+        assert!(n["params"]["errors"].is_u64(), "{v}");
+        assert!(n["params"]["delta"]["added"].is_array(), "{v}");
+    }
+}
+
+/// `board ratsnest` (ryueda 7.E): the breakout routed is an empty
+/// ratsnest; a track removed gives the connection it made, with its
+/// layers and points; `--net` and `--ref` narrow it.
+#[test]
+fn ratsnest_from_the_cli() {
+    let p = Pair::breakout();
+    for args in breakout_board::script() {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        p.ok(&args);
+    }
+    let id = breakout_board::BOARD;
+    let r = p.ok(&["board", "ratsnest", id]);
+    assert_eq!(r["connections"].as_array().unwrap().len(), 0, "{r}");
+    p.ok(&["board", "track", "delete", id, "sda"]);
+    let r = p.ok(&["board", "ratsnest", id]);
+    let c = &r["connections"][0];
+    assert_eq!(c["net"], "sda", "{r}");
+    assert!(c["distance_nm"].as_i64().unwrap() > 0, "{r}");
+    assert!(c["a_at"].is_array() && c["b_layer"].is_string(), "{r}");
+    let scl = p.ok(&["board", "ratsnest", id, "--net", "scl"]);
+    assert_eq!(scl["connections"].as_array().unwrap().len(), 0, "{scl}");
+    let u1 = p.ok(&["board", "ratsnest", id, "--ref", "U1"]);
+    assert!(!u1["connections"].as_array().unwrap().is_empty(), "{u1}");
+    // By its occurrence path too: the same connections (a review of 7.E
+    // found the path validated and then matched nothing).
+    let path = p.ok(&["board", "ratsnest", id, "--ref", "s1/u1"]);
+    assert_eq!(path["connections"], u1["connections"], "{path}");
+    // Drawn over the layers, with the open net's findings marked.
+    let r = p.ok(&[
+        "board",
+        "render",
+        id,
+        "--out",
+        "nest.svg",
+        "--ratsnest",
+        "--findings",
+    ]);
+    assert!(r.get("layers").is_some(), "{r}");
+    let svg = fs::read_to_string(p.daemon.join("board/nest.svg")).unwrap();
+    assert!(svg.contains("<path"), "the ratsnest and marks are drawn");
+    p.fails(&["board", "ratsnest", id, "--ref", "Z9"], "not_found", 1);
+    p.fails(
+        &["board", "ratsnest", id, "--net", "nope"],
+        "board_net_not_found",
+        1,
+    );
 }

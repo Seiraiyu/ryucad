@@ -604,7 +604,8 @@ enum Command {
     Cancel { token: String },
     /// Wait for the daemon's notifications.
     Watch {
-        /// project, participants, activity; all when none.
+        /// project, participants, activity, progress, merge, pdm, boards; all
+        /// when none.
         #[arg(long = "topic")]
         topics: Vec<String>,
         #[arg(long, default_value_t = 1)]
@@ -1760,6 +1761,12 @@ enum BoardCmd {
         /// svg or png.
         #[arg(long)]
         format: Option<String>,
+        /// Draw the open nets' unrouted connections over the layers.
+        #[arg(long)]
+        ratsnest: bool,
+        /// Mark each finding's place.
+        #[arg(long)]
+        findings: bool,
     },
     /// Remove a part's placement.
     Unplace {
@@ -1833,6 +1840,16 @@ enum BoardCmd {
         b: String,
         #[arg(long)]
         layer: Option<String>,
+    },
+    /// The unrouted connections of the board's open nets: for each, the
+    /// nearest link joining two of its islands, with each end's reference,
+    /// layer and point. --net for one net, --ref for a part's.
+    Ratsnest {
+        board: String,
+        #[arg(long)]
+        net: Option<String>,
+        #[arg(long = "ref")]
+        reference: Option<String>,
     },
     /// Waive a finding by ID with --reason (kept with its measurement as a
     /// limit: a finding that gets worse counts again), or --remove its
@@ -4343,7 +4360,11 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
             window,
             size,
             format,
+            ratsnest,
+            findings,
         }) => Request::BoardRender {
+            ratsnest: *ratsnest,
+            findings: *findings,
             board: board.clone(),
             layers: layers.clone(),
             side: side.clone(),
@@ -4459,6 +4480,15 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
         Command::Board(BoardCmd::Drc { board, codes }) => Request::BoardDrc {
             board: board.clone(),
             codes: codes.clone(),
+        },
+        Command::Board(BoardCmd::Ratsnest {
+            board,
+            net,
+            reference,
+        }) => Request::BoardRatsnest {
+            board: board.clone(),
+            net: net.clone(),
+            reference: reference.clone(),
         },
         Command::Board(BoardCmd::Measure { board, a, b, layer }) => Request::BoardMeasure {
             board: board.clone(),

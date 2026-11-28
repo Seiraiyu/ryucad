@@ -895,3 +895,144 @@ fn pours_round_trip() {
         }
     }
 }
+
+/// Seeded sequences of edits (tracks added, moved and removed; parts
+/// moved and turned; vias added and removed; a pour added and edited; a
+/// component added to the design unplaced and removed; undone by putting
+/// files back) carry one `Live` that, after every step, says what a check
+/// built from the files says, fills included (design 924's invariant).
+#[test]
+#[cfg_attr(debug_assertions, ignore = "release only: seeded edit sequences")]
+fn live_equals_a_rebuild_after_every_edit() {
+    use ryueda::board::live::{Live, Update, said};
+    let mut how = std::collections::BTreeMap::new();
+    let id = ryueda::id::Id::parse("main", "board").unwrap();
+    for seed in 0..16u64 {
+        let spec = board_gen::seeded_multilayer(seed);
+        let d = tempfile::tempdir().unwrap();
+        board_gen::write(d.path(), &spec);
+        let mut files = board_gen::files(d.path());
+        let load = |f: &std::collections::BTreeMap<String, Vec<u8>>| {
+            ryueda::project::Project::load_from(
+                d.path(),
+                f,
+                &Default::default(),
+                &ryueda::pin::NoPins,
+            )
+            .unwrap()
+        };
+        let p = load(&files);
+        let mut live = Live::build(&p, &p.boards[&id]).unwrap();
+        let mut history = vec![files.clone()];
+        let mut r = seed;
+        for step in 0..12 {
+            match board_gen::next(&mut r) % 9 {
+                8 if history.len() > 1 => {
+                    history.pop();
+                    files = history.last().unwrap().clone();
+                }
+                k => {
+                    board_gen::edit(&mut files, &spec, k.min(7), &mut r);
+                    history.push(files.clone());
+                }
+            }
+            let p = load(&files);
+            let b = &p.boards[&id];
+            *how.entry(format!("{:?}", live.update(&p, b).unwrap()))
+                .or_insert(0) += 1;
+            let fresh = ryueda::board::drc::check(&p, b).unwrap();
+            assert_eq!(said(live.check()), said(&fresh), "seed {seed} step {step}");
+        }
+    }
+    // The property is of the edit path: most steps must take it.
+    let edited = how
+        .get(&format!("{:?}", Update::Edited))
+        .copied()
+        .unwrap_or(0);
+    println!("updates: {how:?}");
+    assert!(edited * 2 > 16 * 12, "{how:?}");
+}
+
+/// Design 924's scale board (ryueda 7.E) at a tenth of its parts: its
+/// planes and pours fill, and nothing is found but starved thermals and
+/// empty fills.
+#[test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "release only: a 500-part board with planes"
+)]
+fn scale_boards_are_clean_at_a_tenth() {
+    let spec = Spec {
+        channels: 5,
+        ..Spec::scale()
+    };
+    let c = check_all(&spec);
+    assert!(
+        c.findings
+            .iter()
+            .all(|f| matches!(f.code, Code::PourThermalStarved | Code::PourEmpty)),
+        "{:?}",
+        &c.findings[..c.findings.len().min(5)]
+    );
+    assert_eq!(c.shapes.pours.len(), 4);
+    for f in &c.shapes.pours {
+        assert!(
+            !f.regions.is_empty(),
+            "pour {} on layer {} fills nothing",
+            f.id,
+            f.layer
+        );
+    }
+}
+
+/// A review of 7.E's case: a component added to the schematic, on nets
+/// the board already has, and placed nowhere, changes no board file and
+/// no piece; the kept state still finds it unplaced, as a rebuild does,
+/// and loses the finding when it goes.
+#[test]
+fn a_design_only_edit_is_judged_as_a_rebuild() {
+    use ryueda::board::live::{Live, said};
+    let id = ryueda::id::Id::parse("main", "board").unwrap();
+    let spec = board_gen::seeded(0);
+    let d = tempfile::tempdir().unwrap();
+    board_gen::write(d.path(), &spec);
+    let mut files = board_gen::files(d.path());
+    let load = |f: &std::collections::BTreeMap<String, Vec<u8>>| {
+        ryueda::project::Project::load_from(d.path(), f, &Default::default(), &ryueda::pin::NoPins)
+            .unwrap()
+    };
+    let p = load(&files);
+    let mut live = Live::build(&p, &p.boards[&id]).unwrap();
+    let unplaced = |c: &drc::BoardCheck| {
+        c.findings
+            .iter()
+            .filter(|f| f.code == Code::BoardUnplaced)
+            .count()
+    };
+    let before = unplaced(live.check());
+    let mut r = 7u64;
+    // Kind 7 adds an extra component on n1 when there is none.
+    board_gen::edit(&mut files, &spec, 7, &mut r);
+    assert!(
+        files
+            .keys()
+            .any(|k| k.starts_with("blocks/ch/components/x"))
+    );
+    let p2 = load(&files);
+    let b = &p2.boards[&id];
+    live.update(&p2, b).unwrap();
+    let fresh = drc::check(&p2, b).unwrap();
+    assert!(
+        unplaced(&fresh) > before,
+        "the rebuild finds the new part unplaced"
+    );
+    assert_eq!(unplaced(live.check()), unplaced(&fresh));
+    assert_eq!(said(live.check()), said(&fresh));
+    // And removed again.
+    board_gen::edit(&mut files, &spec, 7, &mut r);
+    let p3 = load(&files);
+    let b = &p3.boards[&id];
+    live.update(&p3, b).unwrap();
+    assert_eq!(unplaced(live.check()), before);
+    assert_eq!(said(live.check()), said(&drc::check(&p3, b).unwrap()));
+}

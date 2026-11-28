@@ -629,8 +629,13 @@ impl Project {
         let lint = src.read(LINT)?;
         let parts = src.read(PARTS)?;
         let style = src.read(STYLE)?;
+        let stage = crate::profile::stage("load.design");
         let mut conn = design::load(src)?;
+        drop(stage);
+        let stage = crate::profile::stage("load.boards");
         let (boards, mut board_faults) = crate::board::load::load(src)?;
+        drop(stage);
+        let _stage = crate::profile::stage("load.rest");
         let (presets, preset_faults) = crate::board::preset::load(src)?;
         board_faults.extend(preset_faults);
         let mut h = blake3::Hasher::new();

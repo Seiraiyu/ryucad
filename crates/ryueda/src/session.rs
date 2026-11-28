@@ -56,22 +56,81 @@ pub struct Session {
     /// What a long request's lock-free fetches got
     /// ([`crate::libdeps::prepare`]), taken by its answer.
     pub(crate) fetched: Option<crate::libdeps::Prefetched>,
-    /// The last [`BOARDS`] boards' shapes built, by the board and the
-    /// revisions they were built from, most recently used first.
-    pub(crate) boards: Vec<(String, std::sync::Arc<crate::board::shapes::BoardShapes>)>,
-    /// The last [`BOARDS`] boards' checks, by the same keys as their
-    /// shapes, most recently used first.
-    pub(crate) checks: Vec<(String, std::sync::Arc<crate::board::drc::BoardCheck>)>,
+    /// The last [`BOARDS`] boards' kept states (ryueda 7.E), most recently
+    /// used first, each with the key ([`Session::board_key`]) it was last
+    /// carried to.
+    pub(crate) lives: Vec<(crate::id::Id, String, crate::board::live::Live)>,
     /// The last [`NETLISTS`] designs flattened from the working files,
     /// most recently used first: dropped whenever the project is read
     /// again ([`Session::set_project`]).
     netlists: Vec<(crate::id::Id, std::sync::Arc<crate::netlist::Netlist>)>,
+    /// A daemon's file events (ryueda 7.E): each request checks only the
+    /// files they name, and every file every [`ryu_session::fresh::RESCAN`].
+    watching: Option<Watching>,
+}
+
+/// Whether the manifest names a library folder outside the project's,
+/// which a watch of the project's folder can't see.
+fn reads_outside(m: &Manifest) -> bool {
+    m.libraries
+        .values()
+        .any(|a| a.url.is_none() && (a.path.starts_with("..") || Path::new(&a.path).is_absolute()))
+}
+
+/// Turns a daemon's file events off: every request checks every file.
+pub const NO_WATCH_VAR: &str = "RYUEDA_NO_WATCH";
+
+struct Watching {
+    watch: std::result::Result<ryu_session::fresh::Watch, String>,
+    last_full: std::time::Instant,
+    every: std::time::Duration,
+    stats: ryu_session::fresh::WatchStats,
+}
+
+/// The tracked files at or under `rel` (relative, with `/`): `rel` itself
+/// when it is a project file, or every project file under it.
+fn listed_at(root: &Path, rel: &str) -> Vec<(PathBuf, std::fs::Metadata)> {
+    let path = path_of(root, rel);
+    let Ok(meta) = std::fs::metadata(&path) else {
+        return Vec::new();
+    };
+    if meta.is_file() {
+        return if crate::git::project_file(rel) {
+            vec![(path, meta)]
+        } else {
+            Vec::new()
+        };
+    }
+    let mut out = Vec::new();
+    let mut stack = vec![(path, rel.to_owned())];
+    while let Some((dir, at)) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let rel = if at.is_empty() {
+                name
+            } else {
+                format!("{at}/{name}")
+            };
+            let Ok(m) = std::fs::metadata(e.path()) else {
+                continue;
+            };
+            if m.is_dir() {
+                stack.push((e.path(), rel));
+            } else if crate::git::project_file(&rel) {
+                out.push((e.path(), m));
+            }
+        }
+    }
+    out
 }
 
 /// How many designs' working netlists a session keeps (#976).
 pub const NETLISTS: usize = 4;
 
-/// How many boards' shapes a session keeps.
+/// How many boards' kept states a session keeps.
 const BOARDS: usize = 4;
 
 /// The refs every same-repository pinned library's release branch is
@@ -163,9 +222,9 @@ impl Session {
             pins,
             pins_key,
             fetched: None,
-            boards: Vec::new(),
-            checks: Vec::new(),
+            lives: Vec::new(),
             netlists: Vec::new(),
+            watching: None,
         })
     }
 
@@ -190,49 +249,54 @@ impl Session {
         Ok(h.finalize().to_hex().to_string())
     }
 
-    /// The board's check, built once per the same revisions as its shapes.
+    /// The board's check: its kept state ([`crate::board::live::Live`])
+    /// carried to the board's, the project's, its libraries' and its
+    /// blocks' revisions, or built when the session keeps none.
     pub fn board_check(
         &mut self,
         board: &crate::id::Id,
     ) -> Result<std::sync::Arc<crate::board::drc::BoardCheck>> {
         let key = self.board_key(board)?;
-        if let Some(i) = self.checks.iter().position(|(k, _)| *k == key) {
-            let hit = self.checks.remove(i);
-            let c = hit.1.clone();
-            self.checks.insert(0, hit);
+        let p = &self.project;
+        let b = &p.boards[board];
+        if let Some(i) = self.lives.iter().position(|(id, _, _)| id == board) {
+            // Taken out first: an update that fails leaves no state kept.
+            let mut hit = self.lives.remove(i);
+            if hit.1 != key {
+                let _s = crate::profile::stage("live_update");
+                hit.2.update(p, b)?;
+                hit.1 = key;
+            }
+            let c = hit.2.check().clone();
+            self.lives.insert(0, hit);
             return Ok(c);
         }
-        let shapes = self.board_shapes(board)?;
-        let p = &self.project;
-        let built = std::sync::Arc::new(crate::board::drc::check_shapes(
-            p,
-            &p.boards[board],
-            shapes,
-        )?);
-        self.checks.insert(0, (key, built.clone()));
-        self.checks.truncate(BOARDS);
-        Ok(built)
+        let _s = crate::profile::stage("live_build");
+        let live = crate::board::live::Live::build(p, b)?;
+        let c = live.check().clone();
+        self.lives.insert(0, (board.clone(), key, live));
+        self.lives.truncate(BOARDS);
+        Ok(c)
     }
 
-    /// The board's shapes, built once per the board's, the project's, its
-    /// libraries' and its blocks' revisions.
+    /// The board's shapes, as its check has them; a board that can't be
+    /// checked (a design that doesn't flatten) has them built, uncached,
+    /// so their own error is what the caller sees.
     pub fn board_shapes(
         &mut self,
         board: &crate::id::Id,
     ) -> Result<std::sync::Arc<crate::board::shapes::BoardShapes>> {
-        let key = self.board_key(board)?;
-        let p = &self.project;
-        let b = &p.boards[board];
-        if let Some(i) = self.boards.iter().position(|(k, _)| *k == key) {
-            let hit = self.boards.remove(i);
-            let shapes = hit.1.clone();
-            self.boards.insert(0, hit);
-            return Ok(shapes);
+        match self.board_check(board) {
+            Ok(c) => Ok(c.shapes.clone()),
+            Err(_) => {
+                let p = &self.project;
+                let b = p.boards.get(board).ok_or_else(|| {
+                    Error::new(Code::BoardNotFound, format!("there is no board {board}"))
+                        .with("board", board)
+                })?;
+                Ok(std::sync::Arc::new(crate::board::shapes::build(p, b)?))
+            }
         }
-        let built = std::sync::Arc::new(crate::board::shapes::build(p, b)?);
-        self.boards.insert(0, (key, built.clone()));
-        self.boards.truncate(BOARDS);
-        Ok(built)
     }
 
     /// [`Session::at`], with the key it is kept by.
@@ -341,6 +405,95 @@ impl Session {
     }
 
     /// The project read again: what was derived from the old one goes.
+    /// The session, watching its folder for file events with its markers
+    /// in `markers` (outside the project): a daemon's. A folder that can't
+    /// be watched is checked whole on every request, and so is a project
+    /// while it reads a library outside its folder, which the watch can't
+    /// see.
+    pub fn with_watch(mut self, markers: &Path) -> Session {
+        let watch = if std::env::var_os(NO_WATCH_VAR).is_some() {
+            Err(format!("{NO_WATCH_VAR} is set"))
+        } else {
+            ryu_session::fresh::Watch::start(&self.root, markers, crate::git::project_file)
+        };
+        if let Err(why) = &watch {
+            eprintln!(
+                "ryueda: watch_unavailable: can't watch {} ({why}); checking every file on every request",
+                self.root.display()
+            );
+        }
+        self.watching = Some(Watching {
+            watch,
+            last_full: std::time::Instant::now(),
+            every: ryu_session::fresh::RESCAN,
+            stats: ryu_session::fresh::WatchStats::default(),
+        });
+        self
+    }
+
+    /// The files whose stamps moved: those file events named when the
+    /// session watches (every file when they can't say, and every
+    /// [`ryu_session::fresh::RESCAN`]), else every file.
+    fn scan(&mut self) -> Result<Vec<(String, &'static str)>> {
+        let root = self.root.clone();
+        // A library outside the folder: its files are only seen by a full
+        // check.
+        let outside = reads_outside(&self.project.manifest);
+        let Some(Watching {
+            watch: Ok(watch),
+            last_full,
+            every,
+            stats,
+        }) = &mut self.watching
+        else {
+            let _ = ryu_doc::source::take_written(std::slice::from_ref(&root));
+            return self.stamps.scan(&root, listed(&root));
+        };
+        if outside {
+            // The events are drained, but every file is checked.
+            let _ = watch.changes();
+            return self.stamps.scan(&root, listed(&root));
+        }
+        let named = match watch.changes() {
+            ryu_session::fresh::Changes::All(why) => {
+                stats.full += 1;
+                stats.last_full = Some(why);
+                *last_full = std::time::Instant::now();
+                return self.stamps.scan(&root, listed(&root));
+            }
+            ryu_session::fresh::Changes::Paths(p) => p,
+        };
+        stats.narrowed += 1;
+        let mut files = Vec::new();
+        let mut under = Vec::new();
+        for rel in &named {
+            files.extend(listed_at(&root, rel));
+            under.push(path_of(&root, rel));
+        }
+        let mut changes = self.stamps.scan_under(&root, files, &under)?;
+        if last_full.elapsed() >= *every {
+            *last_full = std::time::Instant::now();
+            stats.full += 1;
+            stats.last_full = Some("the time came to check every file");
+            let missed = self.stamps.scan(&root, listed(&root))?;
+            if !missed.is_empty() {
+                if stats.missed == 0 {
+                    eprintln!(
+                        "ryueda: file events missed {} change(s) in {}, first {}; a full check found them",
+                        missed.len(),
+                        root.display(),
+                        missed[0].0
+                    );
+                }
+                stats.missed += missed.len() as u64;
+                changes.extend(missed);
+                changes.sort();
+                changes.dedup();
+            }
+        }
+        Ok(changes)
+    }
+
     fn set_project(&mut self, project: Project) {
         self.project = project;
         self.netlists.clear();
@@ -349,7 +502,7 @@ impl Session {
     /// Brings the session up to date with the files, returning those that
     /// changed (relative, with `/`) and how.
     pub fn refresh_changes(&mut self) -> Result<Vec<(String, &'static str)>> {
-        let changes = self.stamps.scan(&self.root, listed(&self.root))?;
+        let changes = self.scan()?;
         if !changes.is_empty() {
             self.set_project(load(&self.root, &self.stamps, &*self.pins)?);
             self.pins_key = pins_key(&self.root, &self.project.manifest);
@@ -380,7 +533,19 @@ impl Session {
     /// `project`: the project already read over them in memory. Reads it
     /// again only if anything else changed too.
     pub fn adopt(&mut self, project: Project, written: &[String]) -> Result<()> {
-        let changes = self.stamps.scan(&self.root, listed(&self.root))?;
+        // Watched, only the files written are stamped: anything else that
+        // changed meanwhile is named by its events at the next request.
+        let outside = reads_outside(&self.project.manifest) || reads_outside(&project.manifest);
+        let changes = if !outside && matches!(&self.watching, Some(Watching { watch: Ok(_), .. })) {
+            let files: Vec<_> = written
+                .iter()
+                .flat_map(|w| listed_at(&self.root, w))
+                .collect();
+            let under: Vec<PathBuf> = written.iter().map(|w| path_of(&self.root, w)).collect();
+            self.stamps.scan_under(&self.root, files, &under)?
+        } else {
+            self.stamps.scan(&self.root, listed(&self.root))?
+        };
         if changes.iter().all(|(p, _)| written.contains(p)) {
             self.set_project(project);
         } else {
@@ -439,6 +604,43 @@ pub fn current(root: &Path) -> Result<Files> {
 
 #[cfg(test)]
 mod tests {
+    /// A watched session (ryueda 7.E) sees what changed on disk from its
+    /// file events, and takes in its own writes, as a session checking
+    /// every file does.
+    #[test]
+    fn a_watched_session_sees_outside_edits_and_its_own_writes() {
+        let (dir, _) = crate::netlist::tests::project(&[]);
+        let root = dir.path().join("board");
+        let marks = tempfile::tempdir().unwrap();
+        let mut s = Session::open(&root)
+            .unwrap()
+            .with_watch(&marks.path().join("m"));
+        assert!(
+            matches!(&s.watching, Some(Watching { watch: Ok(_), .. })),
+            "watching"
+        );
+        // The first request checks every file: the watch just started.
+        s.refresh_changes().unwrap();
+        let rail = std::fs::read_dir(root.join("rails"))
+            .unwrap()
+            .flatten()
+            .next()
+            .unwrap()
+            .path();
+        let rel = format!("rails/{}", rail.file_name().unwrap().to_string_lossy());
+        let text = std::fs::read_to_string(&rail).unwrap();
+        let mut v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        v["name"] = serde_json::json!("Renamed");
+        std::fs::write(&rail, crate::canonical::to_string(&v)).unwrap();
+        let changes = s.refresh_changes().unwrap();
+        assert_eq!(changes, vec![(rel.clone(), "modified")]);
+        assert!(s.refresh_changes().unwrap().is_empty(), "nothing more");
+        // A write of its own, taken in: the next request finds nothing new.
+        let w = crate::write::Writes(vec![(rel.clone(), Some(text.clone()))]);
+        crate::write::commit(&mut s, "a rail", w).unwrap();
+        assert!(s.refresh_changes().unwrap().is_empty(), "its own write");
+        assert_eq!(std::fs::read_to_string(&rail).unwrap(), text);
+    }
 
     #[test]
     fn a_designs_netlist_is_kept_until_the_project_is_read_again() {

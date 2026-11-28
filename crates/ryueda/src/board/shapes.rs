@@ -290,15 +290,44 @@ fn field_with(f: Option<&Field>, over: Option<&super::file::FieldPlace>) -> Opti
     Some(out)
 }
 
+/// A board object (ryueda 7.E): what one file, or one placed occurrence,
+/// adds to the board's shapes.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Obj {
+    /// By occurrence reference (`s1/u1`).
+    Placement(String),
+    Track(crate::id::Id),
+    Via(crate::id::Id),
+    Hole(crate::id::Id),
+    Keepout(crate::id::Id),
+    Drawing(crate::id::Id),
+}
+
+/// What one object adds, in the order [`build`] adds it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ObjShapes {
+    pub layers: Vec<(String, String, Shape)>,
+    pub holes: Vec<HoleInfo>,
+    pub pads: Vec<PadInfo>,
+    pub tracks: Vec<TrackInfo>,
+    pub vias: Vec<ViaInfo>,
+    pub courtyards: Vec<CourtyardInfo>,
+    pub keepouts: Vec<KeepoutInfo>,
+    pub notices: Vec<Fault>,
+}
+
 /// What one placement adds.
-#[derive(Default)]
-struct One {
-    layers: Vec<(String, String, Shape)>,
-    holes: Vec<HoleInfo>,
-    pads: Vec<PadInfo>,
-    courtyards: Vec<CourtyardInfo>,
-    keepouts: Vec<KeepoutInfo>,
-    notices: Vec<Fault>,
+type One = ObjShapes;
+
+/// A board's objects' shapes (ryueda 7.E): each with the hash of what it
+/// was built from, and the objects in [`build`]'s order.
+#[derive(Clone, Debug, Default)]
+pub struct Pieces {
+    /// What every piece depends on: the board file, its preset and its
+    /// copper count. A different `base` reuses nothing.
+    pub base: [u8; 32],
+    pub order: Vec<Obj>,
+    pub by: BTreeMap<Obj, ([u8; 32], std::sync::Arc<ObjShapes>)>,
 }
 
 fn unsupported(o: &Occ, why: &str) -> Fault {
@@ -540,6 +569,37 @@ fn note_missing(notices: &mut Vec<Fault>, o: &Occ, s: &Shape) {
 /// The board's shapes. A design that doesn't flatten refuses with its
 /// faults; a board file that doesn't read refuses with its error.
 pub fn build(p: &Project, b: &BoardFiles) -> Result<BoardShapes> {
+    assemble(p, b, &pieces(p, b, None)?, &[])
+}
+
+/// A piece's hash: BLAKE3 over its inputs, each length-prefixed.
+fn hash_of(parts: &[&[u8]]) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    h.update(b"ryueda.board-piece.1");
+    for p in parts {
+        crate::design::piece(&mut h, p);
+    }
+    *h.finalize().as_bytes()
+}
+
+/// Anything serialisable, as JSON text, through one object-safe trait.
+mod erased {
+    pub trait Json {
+        fn json(&self) -> String;
+    }
+    impl<T: serde::Serialize> Json for T {
+        fn json(&self) -> String {
+            serde_json::to_string(self).unwrap_or_default()
+        }
+    }
+}
+
+/// The board file, its preset and its copper count: what every piece is
+/// built against.
+fn base_of<'a>(
+    p: &Project,
+    b: &'a BoardFiles,
+) -> Result<(&'a Board, std::sync::Arc<preset::Preset>, usize)> {
     let file = b.board.item.as_ref().map_err(Clone::clone)?;
     let preset = preset::resolve(p, &file.preset).ok_or_else(|| {
         Error::new(
@@ -547,9 +607,42 @@ pub fn build(p: &Project, b: &BoardFiles) -> Result<BoardShapes> {
             format!("preset {} isn't known", file.preset),
         )
     })?;
+    let n = super::stackup::copper_count(file);
+    Ok((file, preset, n))
+}
+
+/// A file is left out of the shapes when it has an error fault (`check`
+/// reports them).
+fn fine(faults: &[Fault]) -> bool {
+    faults.iter().all(|f| !f.is_error())
+}
+
+/// Each object's shapes, in [`build`]'s order. Objects whose inputs hash
+/// as they did in `prev` keep `prev`'s pieces (Task 4 of ryueda 7.E).
+pub fn pieces(p: &Project, b: &BoardFiles, prev: Option<&Pieces>) -> Result<Pieces> {
+    let (file, preset, n) = base_of(p, b)?;
     let (_, occs) = occ::occurrences(p, &file.design)?;
     let board = b.id.to_string();
-    let n = super::stackup::copper_count(file);
+    let json = |v: &dyn erased::Json| v.json();
+    let base = hash_of(&[
+        b"base",
+        json(file).as_bytes(),
+        json(&*preset).as_bytes(),
+        n.to_string().as_bytes(),
+        board.as_bytes(),
+    ]);
+    let prev = prev.filter(|p| p.base == base);
+    // What an object's hash says it was built from, and its old piece
+    // when that is unchanged.
+    let kept = |k: &Obj, h: &[u8; 32]| -> Option<std::sync::Arc<ObjShapes>> {
+        let (g, piece) = prev?.by.get(k)?;
+        (g == h).then(|| piece.clone())
+    };
+    let faults_of = |f: &[Fault]| -> String {
+        f.iter()
+            .map(|x| format!("{:?}{};", x.error.code, x.is_error()))
+            .collect()
+    };
     let placed: Vec<(&Occ, Place, &super::file::PartFields)> = occs
         .iter()
         .filter_map(|o| {
@@ -566,11 +659,45 @@ pub fn build(p: &Project, b: &BoardFiles) -> Result<BoardShapes> {
             ))
         })
         .collect();
-    let mut notices = Vec::new();
-    let parts: Vec<One> = placed
+    let mut out = Pieces {
+        base,
+        ..Pieces::default()
+    };
+    // Each object: its key, its hash, and its piece (kept or built).
+    let put = |out: &mut Pieces, k: Obj, h: [u8; 32], piece: std::sync::Arc<ObjShapes>| {
+        out.order.push(k.clone());
+        out.by.insert(k, (h, piece));
+    };
+    let mut footprints: BTreeMap<String, [u8; 32]> = BTreeMap::new();
+    let hashed: Vec<[u8; 32]> = placed
+        .iter()
+        .map(|(o, _, _)| {
+            let pl = &b.placements[&o.reference];
+            let fp = match (&o.footprint, &o.footprint_error) {
+                (Some(f), _) => *footprints
+                    .entry(o.footprint_ref.clone().unwrap_or_default())
+                    .or_insert_with(|| hash_of(&[json(*f).as_bytes()])),
+                (None, e) => hash_of(&[format!("{e:?}").as_bytes()]),
+            };
+            hash_of(&[
+                b"placement",
+                &base,
+                json(pl.item.as_ref().ok().unwrap()).as_bytes(),
+                &fp,
+                o.reference.as_bytes(),
+                format!("{:?}{:?}{:?}{}", o.refdes, o.value, o.nets, o.dnp).as_bytes(),
+                o.footprint_ref.as_deref().unwrap_or_default().as_bytes(),
+            ])
+        })
+        .collect();
+    let parts: Vec<std::sync::Arc<One>> = placed
         .par_iter()
-        .map(
-            |(o, place, fields)| match (&o.footprint, &o.footprint_error) {
+        .zip(&hashed)
+        .map(|((o, place, fields), h)| {
+            if let Some(piece) = kept(&Obj::Placement(o.reference.clone()), h) {
+                return piece;
+            }
+            std::sync::Arc::new(match (&o.footprint, &o.footprint_error) {
                 (Some(f), _) => one(&board, o, f, *place, &preset, n, fields),
                 (None, e) => One {
                     notices: vec![unsupported(
@@ -584,26 +711,16 @@ pub fn build(p: &Project, b: &BoardFiles) -> Result<BoardShapes> {
                     )],
                     ..One::default()
                 },
-            },
-        )
+            })
+        })
         .collect();
-    let mut out = BoardShapes {
-        copper_layers: n,
-        ..BoardShapes::default()
-    };
-    for one in parts {
-        for (layer, owner, s) in one.layers {
-            out.layers.entry(layer).or_default().push((owner, s));
-        }
-        out.holes.extend(one.holes);
-        out.pads.extend(one.pads);
-        out.courtyards.extend(one.courtyards);
-        out.keepouts.extend(one.keepouts);
-        notices.extend(one.notices);
+    for (((o, _, _), one), h) in placed.iter().zip(parts).zip(hashed) {
+        put(&mut out, Obj::Placement(o.reference.clone()), h, one);
     }
-    // The routes; files with an error fault are left out (`check`
-    // reports them).
-    let fine = |faults: &[Fault]| faults.iter().all(|f| !f.is_error());
+    // A file's object: its hash over its kind, its file and its faults.
+    let file_hash = |kind: &[u8], j: String, f: &[Fault]| {
+        hash_of(&[kind, &base, j.as_bytes(), faults_of(f).as_bytes()])
+    };
     for (tid, t) in &b.tracks {
         let (Ok(track), true) = (&t.item, fine(&t.faults)) else {
             continue;
@@ -611,18 +728,33 @@ pub fn build(p: &Project, b: &BoardFiles) -> Result<BoardShapes> {
         if track.layer.index(n).is_none() {
             continue;
         }
+        let h = file_hash(b"track", json(track), &t.faults);
+        if let Some(piece) = kept(&Obj::Track(tid.clone()), &h) {
+            put(&mut out, Obj::Track(tid.clone()), h, piece);
+            continue;
+        }
         let shape = track_shape(track);
-        out.layers
-            .entry(track.layer.name())
-            .or_default()
-            .push((format!("{board}:track/{tid}"), shape.clone()));
-        out.tracks.push(TrackInfo {
-            id: tid.clone(),
-            net: track.net.clone(),
-            layer: track.layer,
-            width_nm: track.width_nm,
-            shape,
-        });
+        let piece = ObjShapes {
+            layers: vec![(
+                track.layer.name(),
+                format!("{board}:track/{tid}"),
+                shape.clone(),
+            )],
+            tracks: vec![TrackInfo {
+                id: tid.clone(),
+                net: track.net.clone(),
+                layer: track.layer,
+                width_nm: track.width_nm,
+                shape,
+            }],
+            ..ObjShapes::default()
+        };
+        put(
+            &mut out,
+            Obj::Track(tid.clone()),
+            h,
+            std::sync::Arc::new(piece),
+        );
     }
     for (vid, v) in &b.vias {
         let (Ok(via), true) = (&v.item, fine(&v.faults)) else {
@@ -631,15 +763,20 @@ pub fn build(p: &Project, b: &BoardFiles) -> Result<BoardShapes> {
         let Some((from, to)) = via.span(n) else {
             continue;
         };
+        let h = file_hash(b"via", json(via), &v.faults);
+        if let Some(piece) = kept(&Obj::Via(vid.clone()), &h) {
+            put(&mut out, Obj::Via(vid.clone()), h, piece);
+            continue;
+        }
         let at = Point::new(via.at[0], via.at[1]);
         let shape = disc(at, via.diameter_nm);
+        let mut piece = ObjShapes::default();
         for layer in &super::stackup::names(n)[from..=to] {
-            out.layers
-                .entry(layer.clone())
-                .or_default()
-                .push((format!("{board}:via/{vid}"), shape.clone()));
+            piece
+                .layers
+                .push((layer.clone(), format!("{board}:via/{vid}"), shape.clone()));
         }
-        out.holes.push(HoleInfo {
+        piece.holes.push(HoleInfo {
             owner: format!("{board}:via/{vid}"),
             shape: HoleShape::Round {
                 at,
@@ -649,7 +786,7 @@ pub fn build(p: &Project, b: &BoardFiles) -> Result<BoardShapes> {
             of: HoleOf::Via(vid.clone()),
             span: (from, to),
         });
-        out.vias.push(ViaInfo {
+        piece.vias.push(ViaInfo {
             id: vid.clone(),
             from,
             to,
@@ -659,21 +796,41 @@ pub fn build(p: &Project, b: &BoardFiles) -> Result<BoardShapes> {
             diameter_nm: via.diameter_nm,
             shape,
         });
+        put(
+            &mut out,
+            Obj::Via(vid.clone()),
+            h,
+            std::sync::Arc::new(piece),
+        );
     }
     for (hid, h) in &b.holes {
         let (Ok(hole), true) = (&h.item, fine(&h.faults)) else {
             continue;
         };
-        out.holes.push(HoleInfo {
-            owner: format!("{board}:hole/{hid}"),
-            shape: HoleShape::Round {
-                at: Point::new(hole.at[0], hole.at[1]),
-                d: hole.drill_nm,
-            },
-            plated: false,
-            of: HoleOf::Hole(hid.clone()),
-            span: (0, n - 1),
-        });
+        let hh = file_hash(b"hole", json(hole), &h.faults);
+        if let Some(piece) = kept(&Obj::Hole(hid.clone()), &hh) {
+            put(&mut out, Obj::Hole(hid.clone()), hh, piece);
+            continue;
+        }
+        let piece = ObjShapes {
+            holes: vec![HoleInfo {
+                owner: format!("{board}:hole/{hid}"),
+                shape: HoleShape::Round {
+                    at: Point::new(hole.at[0], hole.at[1]),
+                    d: hole.drill_nm,
+                },
+                plated: false,
+                of: HoleOf::Hole(hid.clone()),
+                span: (0, n - 1),
+            }],
+            ..ObjShapes::default()
+        };
+        put(
+            &mut out,
+            Obj::Hole(hid.clone()),
+            hh,
+            std::sync::Arc::new(piece),
+        );
     }
     for (kid, k) in &b.keepouts {
         let (Ok(ko), true) = (&k.item, fine(&k.faults)) else {
@@ -682,23 +839,43 @@ pub fn build(p: &Project, b: &BoardFiles) -> Result<BoardShapes> {
         let Ok(c) = super::outline::contour(&ko.contour) else {
             continue;
         };
-        out.keepouts.push(KeepoutInfo {
-            reference: format!("{board}:keepout/{kid}"),
-            part: None,
-            layers: ko.indices(n),
-            keeps: ko.keeps.clone(),
-            shape: Shape::regions(Polarity::Positive, [Region::solid(super::outline::ccw(c))]),
-        });
+        let h = file_hash(b"keepout", json(ko), &k.faults);
+        if let Some(piece) = kept(&Obj::Keepout(kid.clone()), &h) {
+            put(&mut out, Obj::Keepout(kid.clone()), h, piece);
+            continue;
+        }
+        let piece = ObjShapes {
+            keepouts: vec![KeepoutInfo {
+                reference: format!("{board}:keepout/{kid}"),
+                part: None,
+                layers: ko.indices(n),
+                keeps: ko.keeps.clone(),
+                shape: Shape::regions(Polarity::Positive, [Region::solid(super::outline::ccw(c))]),
+            }],
+            ..ObjShapes::default()
+        };
+        put(
+            &mut out,
+            Obj::Keepout(kid.clone()),
+            h,
+            std::sync::Arc::new(piece),
+        );
     }
     for (did, d) in &b.drawings {
         let (Ok(g), true) = (&d.item, fine(&d.faults)) else {
             continue;
         };
+        let h = file_hash(b"drawing", json(g), &d.faults);
+        if let Some(piece) = kept(&Obj::Drawing(did.clone()), &h) {
+            put(&mut out, Obj::Drawing(did.clone()), h, piece);
+            continue;
+        }
         let Some((shape, missing)) = super::drawing::shape(g) else {
             continue;
         };
+        let mut piece = ObjShapes::default();
         if !missing.is_empty() {
-            notices.push(
+            piece.notices.push(
                 Fault::warning(
                     Code::BoardTextMissingGlyph,
                     format!(
@@ -709,11 +886,53 @@ pub fn build(p: &Project, b: &BoardFiles) -> Result<BoardShapes> {
                 .with("drawing", did.as_str()),
             );
         }
-        out.layers
-            .entry(g.layer.clone())
-            .or_default()
-            .push((format!("{board}:drawing/{did}"), shape));
+        piece
+            .layers
+            .push((g.layer.clone(), format!("{board}:drawing/{did}"), shape));
+        put(
+            &mut out,
+            Obj::Drawing(did.clone()),
+            h,
+            std::sync::Arc::new(piece),
+        );
     }
+    Ok(out)
+}
+
+/// The board's shapes from its pieces, in their order, then its pours
+/// filled over them (`prev_pours`, the last fills, for Task 17's reuse)
+/// and its outline.
+pub fn assemble(
+    p: &Project,
+    b: &BoardFiles,
+    ps: &Pieces,
+    prev_pours: &[super::pour::PourInfo],
+) -> Result<BoardShapes> {
+    let (file, preset, n) = base_of(p, b)?;
+    let board = b.id.to_string();
+    let mut out = BoardShapes {
+        copper_layers: n,
+        ..BoardShapes::default()
+    };
+    let mut notices = Vec::new();
+    let concat = crate::profile::stage("assemble.concat");
+    for k in &ps.order {
+        let piece = &ps.by[k].1;
+        for (layer, owner, s) in &piece.layers {
+            out.layers
+                .entry(layer.clone())
+                .or_default()
+                .push((owner.clone(), s.clone()));
+        }
+        out.holes.extend(piece.holes.iter().cloned());
+        out.pads.extend(piece.pads.iter().cloned());
+        out.tracks.extend(piece.tracks.iter().cloned());
+        out.vias.extend(piece.vias.iter().cloned());
+        out.courtyards.extend(piece.courtyards.iter().cloned());
+        out.keepouts.extend(piece.keepouts.iter().cloned());
+        notices.extend(piece.notices.iter().cloned());
+    }
+    drop(concat);
     if !b.pours.is_empty() {
         let pours: Vec<(crate::id::Id, super::pour::Pour)> = b
             .pours
@@ -725,7 +944,9 @@ pub fn build(p: &Project, b: &BoardFiles) -> Result<BoardShapes> {
         out.outline = region;
         out.edges = edges;
         let rules = super::rules::of(p, b)?;
-        out.pours = super::pour::fill_all(&pours, &out, &rules, &preset);
+        let stage = crate::profile::stage("assemble.pours");
+        out.pours = super::pour::fill_all(&pours, &out, &rules, &preset, prev_pours);
+        drop(stage);
         for f in &out.pours {
             let name = &super::stackup::names(n)[f.layer];
             for r in &f.regions {
@@ -775,6 +996,7 @@ pub fn pads_json(s: &BoardShapes) -> Value {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use std::sync::Arc;
 
     /// The netlist fixture with a board placing every occurrence on a
     /// 5 mm grid.
@@ -1060,6 +1282,61 @@ pub(crate) mod tests {
         let b = s.outline.bounds().unwrap();
         assert_eq!((b.max.x, b.max.y), (50_000_000, 50_000_000));
         assert!(s.pads.iter().any(|p| p.net.is_some()));
+    }
+
+    #[test]
+    fn a_board_is_its_pieces_assembled() {
+        for (_d, p, id) in [placed(), placed_on(4, &[])] {
+            let b = &p.boards[&id];
+            let ps = pieces(&p, b, None).unwrap();
+            assert!(ps.order.iter().any(|k| matches!(k, Obj::Placement(_))));
+            assert_eq!(ps.order.len(), ps.by.len());
+            assert_eq!(
+                format!("{:?}", assemble(&p, b, &ps, &[]).unwrap()),
+                format!("{:?}", build(&p, b).unwrap())
+            );
+        }
+    }
+
+    #[test]
+    fn unchanged_objects_reuse_their_pieces() {
+        let (_d, p, id) = placed();
+        let b = &p.boards[&id];
+        let first = pieces(&p, b, None).unwrap();
+        let again = pieces(&p, b, Some(&first)).unwrap();
+        for (k, (h, piece)) in &again.by {
+            assert!(Arc::ptr_eq(piece, &first.by[k].1), "{k:?} built again");
+            assert_eq!(h, &first.by[k].0);
+        }
+        // One placement moved: only its piece is new.
+        let o = first
+            .order
+            .iter()
+            .find_map(|k| match k {
+                Obj::Placement(r) => Some(r.clone()),
+                _ => None,
+            })
+            .unwrap();
+        let path = format!(
+            "boards/b/placements/{}.json",
+            super::super::file::placement_name(&o)
+        );
+        let text =
+            r#"{"at":[1000000,1000000],"format":1,"kind":"ryueda.placement","rotation_mdeg":0}"#;
+        let (_d2, p2, _) = placed_with(&[(path, text.into())]);
+        let b2 = &p2.boards[&id];
+        let moved = pieces(&p2, b2, Some(&first)).unwrap();
+        let fresh: Vec<&Obj> = moved
+            .by
+            .iter()
+            .filter(|(k, (_, pc))| !Arc::ptr_eq(pc, &first.by[*k].1))
+            .map(|(k, _)| k)
+            .collect();
+        assert_eq!(fresh, vec![&Obj::Placement(o)]);
+        assert_eq!(
+            format!("{:?}", assemble(&p2, b2, &moved, &[]).unwrap()),
+            format!("{:?}", build(&p2, b2).unwrap())
+        );
     }
 
     #[test]

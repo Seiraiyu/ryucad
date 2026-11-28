@@ -7,7 +7,8 @@
 # daemon, the activity log, a board placed, routed, checked, rendered and
 # exported, made four layers with a track on in1 and exported again, a
 # part turned over to the bottom and back, a ground plane poured and
-# deleted, the daemon's status and stop, and a run in process.
+# deleted, a track deleted and undone through the ratsnest, the daemon's
+# status and stop, and a run in process.
 #
 #   scripts/smoke-ryueda.sh path/to/ryueda [path/to/kicad] [path/to/ryueda-app]
 #
@@ -204,6 +205,16 @@ run board show main --pours
 has '"reference":"main:pour/gnd"' "the plane is shown"
 run board drc main
 run board pour delete main gnd
+# Continuous DRC (ryueda 7.E): a track removed shows in the ratsnest and
+# put back by undo; the board's findings are what they were.
+run board ratsnest main
+has '"connections":[]' "a routed board has no ratsnest"
+run board track delete main t1
+run board ratsnest main
+has '"net":"out"' "the removed track's connection"
+run undo
+run board ratsnest main
+has '"connections":[]' "undo routes it again"
 if [ -n "$app" ]; then
     out=$("$app" --smoke "$work/project") || true
     case "$out" in

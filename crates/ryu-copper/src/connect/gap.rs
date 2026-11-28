@@ -38,6 +38,19 @@ impl<K: Ord + Hash + Clone + Send + Sync> Copper<K> {
             return Vec::new();
         }
         let pairs = self.bodies.pairs(layer, below);
+        self.gaps_of(layer, below, pairs)
+    }
+
+    /// [`Copper::clearance`]'s gaps with an end in `keys` (ryueda 7.E).
+    pub fn clearance_of(&self, layer: usize, below: Nm, keys: &BTreeSet<K>) -> Vec<Gap<K>> {
+        if below <= 0 || !self.layers.get(layer).is_some_and(|l| l.copper) {
+            return Vec::new();
+        }
+        let pairs = self.bodies.pairs_with(layer, below, keys);
+        self.gaps_of(layer, below, pairs)
+    }
+
+    fn gaps_of(&self, layer: usize, below: Nm, pairs: Vec<crate::index::Pair<K>>) -> Vec<Gap<K>> {
         let resolved: BTreeSet<&K> = pairs
             .iter()
             .flat_map(|p| [&p.a, &p.b])

@@ -344,4 +344,108 @@ fuzz_target!(|data: &[u8]| {
         };
         assert_eq!(run(one), run(eight), "one thread and eight");
     }
+    // Edit sequences (ryueda 7.E): up to four edits drawn from the bytes
+    // left, one `Live` carried through them, saying after each what a
+    // check built from the files says.
+    let Some(f) = p.boards.values().find(|x| x.id.as_str() == "f") else {
+        return;
+    };
+    let Ok(mut live) = ryueda::board::live::Live::build(&p, f) else {
+        return;
+    };
+    for step in 0..b.next() % 5 {
+        edit(&mut files, &mut b, nets);
+        let p = load(&files);
+        let Some(f) = p.boards.values().find(|x| x.id.as_str() == "f") else {
+            return;
+        };
+        let fresh = ryueda::board::drc::check(&p, f);
+        match (live.update(&p, f), fresh) {
+            (Ok(_), Ok(c)) => assert_eq!(
+                ryueda::board::live::said(live.check()),
+                ryueda::board::live::said(&c),
+                "step {step}"
+            ),
+            (Err(a), Err(c)) => {
+                assert_eq!(a.code, c.code, "step {step}");
+                return;
+            }
+            (a, c) => panic!("step {step}: live {:?}, a check {:?}", a.map(|_| ()), c.map(|_| ())),
+        }
+    }
 });
+
+/// A file's JSON, if it is there and reads.
+fn read(files: &BTreeMap<String, Vec<u8>>, path: &str) -> Option<Value> {
+    serde_json::from_slice(files.get(path)?).ok()
+}
+
+/// One edit to the board's files: a track added, moved or removed; a
+/// placement moved or turned; a via added or removed; a pour's
+/// `min_width_nm` changed; or the design alone edited, a component on N1
+/// added unplaced or removed.
+fn edit(files: &mut BTreeMap<String, Vec<u8>>, b: &mut Bytes, nets: &[String]) {
+    const LAYERS: [&str; 3] = ["top", "bottom", "in1"];
+    match b.next() % 5 {
+        0 => {
+            let path = format!("boards/f/tracks/t{}.json", b.next() % 9);
+            match (read(files, &path), b.next() % 3) {
+                (Some(_), 0) => {
+                    files.remove(&path);
+                }
+                (Some(mut t), _) => {
+                    let (dx, dy) = (b.coord() / 4, b.coord() / 4);
+                    if let Some(ps) = t["points"].as_array_mut() {
+                        for q in ps {
+                            let x = q[0].as_i64().unwrap_or(0).saturating_add(dx);
+                            let y = q[1].as_i64().unwrap_or(0).saturating_add(dy);
+                            *q = json!([x, y]);
+                        }
+                    }
+                    put(files, &path, "ryueda.track", t);
+                }
+                (None, _) => {
+                    let n = 2 + b.next() % 3;
+                    let points: Vec<Value> = (0..n).map(|_| json!([b.coord(), b.coord()])).collect();
+                    put(files, &path, "ryueda.track", json!({
+                        "net": nets[b.next() % nets.len()], "layer": LAYERS[b.next() % LAYERS.len()],
+                        "width_nm": b.length(), "points": points}));
+                }
+            }
+        }
+        1 => {
+            let path = format!("boards/f/placements/r{}.json", b.next() % 5);
+            if let Some(mut pl) = read(files, &path) {
+                if b.next() % 2 == 0 {
+                    pl["at"] = json!([b.coord(), b.coord()]);
+                } else {
+                    let r = pl["rotation_mdeg"].as_i64().unwrap_or(0);
+                    pl["rotation_mdeg"] = json!((r + 90_000) % 360_000);
+                }
+                put(files, &path, "ryueda.placement", pl);
+            }
+        }
+        2 => {
+            let path = format!("boards/f/vias/v{}.json", b.next() % 5);
+            if files.remove(&path).is_none() {
+                put(files, &path, "ryueda.via", json!({
+                    "net": nets[b.next() % nets.len()], "at": [b.coord(), b.coord()],
+                    "drill_nm": b.length(), "diameter_nm": b.length()}));
+            }
+        }
+        3 => {
+            let path = format!("boards/f/pours/p{}.json", b.next() % 3);
+            if let Some(mut pour) = read(files, &path) {
+                pour["min_width_nm"] = json!(b.length());
+                put(files, &path, "ryueda.pour", pour);
+            }
+        }
+        _ => {
+            let path = "blocks/top/components/x0.json";
+            if files.remove(path).is_none() {
+                put(files, path, "ryueda.component",
+                    json!({"of": {"id": "r"}, "refdes": "R9", "pins": {"1": "n1", "2": "n1"}}));
+            }
+        }
+    }
+}

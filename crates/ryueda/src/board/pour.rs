@@ -216,12 +216,81 @@ pub struct PourInfo {
     pub polygons: Polygons,
     /// Each kept polygon as a shape, in the polygons' order.
     pub regions: Vec<Shape>,
+    /// Each region's tile corner and index in its tile (ryueda 7.E).
+    pub places: Vec<(i64, i64, u32)>,
     pub islands_removed: usize,
     /// Regions (by index) whose contact with the net's copper was uncertain.
     pub uncertain: Vec<usize>,
     /// Each thermal pad's reference and its kept spokes.
     pub thermals: Vec<(String, u8)>,
+    /// The fill by tile (ryueda 7.E): the next fill reuses the tiles
+    /// whose inputs held.
+    pub tiled: fill::Tiled,
+    /// What the fill grew: the next fill reuses each obstacle whose shape
+    /// and growth held. Derived; never compared.
+    pub grown: std::sync::Arc<Grown>,
 }
+
+/// What a fill grows into an obstacle: a shape, or a hole's wall, by how
+/// far.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum Grow {
+    Shape(Shape, i64),
+    Hole(ryu_copper::layout::HoleShape, i64),
+}
+
+/// [`Grow`] borrowed: looked up without cloning the shape.
+#[derive(Clone, Copy, Debug, Hash)]
+enum GrowRef<'a> {
+    Shape(&'a Shape, i64),
+    Hole(ryu_copper::layout::HoleShape, i64),
+}
+
+impl GrowRef<'_> {
+    fn print(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        // SipHash with fixed keys: the same on every run (only ever a
+        // key into this process's cache; equal entries are compared).
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.hash(&mut h);
+        h.finish()
+    }
+
+    fn is(&self, g: &Grow) -> bool {
+        match (self, g) {
+            (GrowRef::Shape(a, d), Grow::Shape(b, e)) => d == e && *a == b,
+            (GrowRef::Hole(a, d), Grow::Hole(b, e)) => d == e && a == b,
+            _ => false,
+        }
+    }
+
+    fn owned(&self) -> Grow {
+        match self {
+            GrowRef::Shape(s, d) => Grow::Shape((*s).clone(), *d),
+            GrowRef::Hole(h, d) => Grow::Hole(*h, *d),
+        }
+    }
+}
+
+/// Obstacles grown, by what and how far (ryueda 7.E): a refill grows
+/// only the copper that changed. Keyed by a fingerprint; entries with one
+/// are told apart by what they grew.
+#[derive(Clone, Debug, Default)]
+pub struct Grown(std::collections::HashMap<u64, Vec<(Grow, std::sync::Arc<Polygons>)>>);
+
+impl Grown {
+    fn get(&self, k: &GrowRef) -> Option<&(Grow, std::sync::Arc<Polygons>)> {
+        self.0.get(&k.print())?.iter().find(|(g, _)| k.is(g))
+    }
+}
+
+impl PartialEq for Grown {
+    fn eq(&self, _: &Grown) -> bool {
+        true
+    }
+}
+
+impl Eq for Grown {}
 
 /// A shape flattened at the fill's bound.
 fn flat(shape: &Shape) -> Polygons {
@@ -252,7 +321,8 @@ fn contour_polys(c: &super::file::Contour) -> Option<Polygons> {
 
 /// How far an obstacle grows: its rule, the bound and a nanometre.
 fn reach(rule: i64) -> i64 {
-    rule + BOUND + 1
+    // The tiles' seams snap the fill's outline by a nanometre more.
+    rule + BOUND + 1 + fill::TILE_SNAP
 }
 
 /// One pour filled on its layer, after `done` (the layer's higher pours).
@@ -266,10 +336,39 @@ fn fill_one(
     preset: &Preset,
     outline: &Polygons,
     done: &[PourInfo],
+    prev: Option<&PourInfo>,
 ) -> PourInfo {
+    let made: std::sync::Mutex<Grown> = Default::default();
+    let grow = |k: GrowRef| -> std::sync::Arc<Polygons> {
+        let (key, g) = match prev.and_then(|x| x.grown.get(&k)) {
+            Some((key, g)) => (key.clone(), g.clone()),
+            None => {
+                let g = std::sync::Arc::new(match k {
+                    GrowRef::Shape(shape, d) => poly::grow(&flat(shape), d, &fill::opts()),
+                    GrowRef::Hole(h, d) => poly::grow(
+                        &poly::simplify(
+                            &poly::flatten_hole(&h, &fill::opts()),
+                            poly::FillRule::NonZero,
+                        ),
+                        d,
+                        &fill::opts(),
+                    ),
+                });
+                (k.owned(), g)
+            }
+        };
+        made.lock()
+            .unwrap()
+            .0
+            .entry(k.print())
+            .or_default()
+            .push((key, g.clone()));
+        g
+    };
     let n = s.n();
     let opts = fill::opts();
     let net = p.net.as_str();
+    let prep = crate::profile::stage("pour.prep");
     let r = rules.pour(p);
     let inner = l != 0 && l + 1 != n;
     // The area.
@@ -321,12 +420,12 @@ fn fill_one(
     let body_opts = BodyOptions::default();
     // Another net's copper grown by the pair's clearance: an obstacle,
     // and in the spokes' way.
-    let other = |shape: &Shape, their: Option<&str>| -> Polygons {
+    let other = |shape: &Shape, their: Option<&str>| -> std::sync::Arc<Polygons> {
         let need = rules
             .pair_clearance(&[net], &their.into_iter().collect::<Vec<_>>())
             .value
             .max(r.clearance.value);
-        poly::grow(&flat(shape), reach(need), &opts)
+        grow(GrowRef::Shape(shape, reach(need)))
     };
     // Other nets' copper, grown in parallel below, in this order.
     let mut others: Vec<(&Shape, Option<&str>)> = Vec::new();
@@ -342,7 +441,7 @@ fn fill_one(
             Some(ZoneConnect::ThermalThrough) if !through => Connect::Solid,
             Some(ZoneConnect::None) => {
                 let gap = pd.thermal.map_or(r.gap.value, |t| t.0);
-                obstacles.push(poly::grow(&flat(&pd.copper), reach(gap), &opts));
+                obstacles.push(grow(GrowRef::Shape(&pd.copper, reach(gap))));
                 continue;
             }
             Some(_) => Connect::Thermal,
@@ -350,12 +449,13 @@ fn fill_one(
         };
         if connect == Connect::Thermal {
             let (gap, spoke) = pd.thermal.unwrap_or((r.gap.value, r.spoke.value));
-            let copper = flat(&pd.copper);
-            obstacles.push(poly::grow(&copper, reach(gap), &opts));
+            obstacles.push(grow(GrowRef::Shape(&pd.copper, reach(gap))));
             // Only a pad the area reaches within its spokes' length has
             // thermals: another's are no starved connection.
-            let spokes_reach =
-                poly::grow(&copper, reach(gap) + spoke.max(r.min_width.value), &opts);
+            let spokes_reach = grow(GrowRef::Shape(
+                &pd.copper,
+                reach(gap) + spoke.max(r.min_width.value),
+            ));
             if poly::intersection(&spokes_reach, &area).is_empty() {
                 continue;
             }
@@ -383,7 +483,7 @@ fn fill_one(
             others.push((&v.shape, Some(&v.net)));
         }
     }
-    let grown: Vec<Polygons> = others
+    let grown: Vec<std::sync::Arc<Polygons>> = others
         .par_iter()
         .map(|(shape, their)| other(shape, *their))
         .collect();
@@ -410,15 +510,9 @@ fn fill_one(
             .hole_clearance(Some(net))
             .map_or(0, |x| x.value)
             .max(preset.hole_clearance(kind, inner));
-        let rings = poly::flatten_hole(&h.shape, &opts);
-        let g = poly::grow(
-            &poly::simplify(&rings, poly::FillRule::NonZero),
-            reach(rule),
-            &opts,
-        );
-        obstacles.push(g);
+        obstacles.push(grow(GrowRef::Hole(h.shape, reach(rule))));
     }
-    let f = fill::fill(&Ask {
+    let ask = Ask {
         area,
         obstacles,
         spoke_obstacles: blocked,
@@ -426,28 +520,52 @@ fn fill_one(
         min_width: r.min_width.value,
         own,
         keep_islands: p.islands == Islands::Keep,
-    });
-    let regions = f.polygons.polygons.iter().filter_map(region).collect();
+    };
+    drop(prep);
+    let stage = crate::profile::stage("pour.tiled");
+    let t = fill::fill_tiled(&ask, fill::TILE, prev.map(|x| &x.tiled));
+    drop(stage);
+    // Each kept piece is a region, tile by tile; an uncertain piece's
+    // region index is its place among them.
+    let pieces: Vec<(usize, usize)> = t.pieces().map(|(ti, i, _)| (ti, i)).collect();
+    let (regions, places): (Vec<Shape>, Vec<(i64, i64, u32)>) = t
+        .pieces()
+        .filter_map(|(ti, i, p)| {
+            let at = t.tiles[ti].at;
+            region(p).map(|r| (r, (at.x, at.y, i as u32)))
+        })
+        .unzip();
+    let uncertain = t
+        .uncertain
+        .iter()
+        .filter_map(|u| pieces.iter().position(|x| x == u))
+        .collect();
     PourInfo {
         id: id.clone(),
         net: p.net.clone(),
         layer: l,
         rules: r,
         regions,
-        islands_removed: f.islands_removed,
-        uncertain: f.uncertain,
-        thermals: names.into_iter().zip(f.spokes).collect(),
-        polygons: f.polygons,
+        places,
+        islands_removed: t.islands_removed,
+        uncertain,
+        thermals: names.into_iter().zip(t.spokes.iter().copied()).collect(),
+        polygons: t.polygons(),
+        tiled: t,
+        grown: std::sync::Arc::new(made.into_inner().unwrap()),
     }
 }
 
 /// Every pour filled: on each layer by priority (higher first) then ID,
 /// layers in parallel. `pours` are the board's readable, fault-free ones.
+/// `prev` are the last fills: each pour reuses its own's tiles whose
+/// inputs held (ryueda 7.E).
 pub fn fill_all(
     pours: &[(Id, Pour)],
     s: &BoardShapes,
     rules: &Rules,
     preset: &Preset,
+    prev: &[PourInfo],
 ) -> Vec<PourInfo> {
     let n = s.n();
     let outline = flat(&s.outline);
@@ -465,7 +583,8 @@ pub fn fill_all(
             list.sort_by(|a, b| b.1.priority.cmp(&a.1.priority).then_with(|| a.0.cmp(&b.0)));
             let mut done: Vec<PourInfo> = Vec::new();
             for (id, p) in list {
-                let f = fill_one(id, p, *l, s, rules, preset, &outline, &done);
+                let old = prev.iter().find(|x| &x.id == id && x.layer == *l);
+                let f = fill_one(id, p, *l, s, rules, preset, &outline, &done, old);
                 done.push(f);
             }
             done
@@ -604,7 +723,7 @@ mod tests {
         s.smd("r1", "1", (5 * MM, 5 * MM), (MM, MM), Some("gnd"))
             .smd("r1", "2", (15 * MM, 5 * MM), (MM, MM), Some("sig"));
         let pours = vec![(Id::parse("p1", "pour").unwrap(), plane("gnd"))];
-        let f = fill_all(&pours, &s, &rules(), &JLC_2L);
+        let f = fill_all(&pours, &s, &rules(), &JLC_2L, &[]);
         assert_eq!(f.len(), 1);
         let p = &f[0];
         assert!(!p.polygons.is_empty());
@@ -644,7 +763,7 @@ mod tests {
             (Id::parse("lo", "pour").unwrap(), lo),
             (Id::parse("hi", "pour").unwrap(), hi),
         ];
-        let f = fill_all(&pours, &s, &rules(), &JLC_2L);
+        let f = fill_all(&pours, &s, &rules(), &JLC_2L, &[]);
         let a = f.iter().find(|x| x.net == "a").unwrap();
         let b = f.iter().find(|x| x.net == "b").unwrap();
         assert!(a.polygons.area2() > 0);
@@ -666,7 +785,7 @@ mod tests {
                 .num_threads(n)
                 .build()
                 .unwrap()
-                .install(|| fill_all(&pours, &s, &rules(), &JLC_2L))
+                .install(|| fill_all(&pours, &s, &rules(), &JLC_2L, &[]))
         };
         assert_eq!(run(1), run(8));
     }
@@ -694,7 +813,7 @@ mod tests {
             ..plane("gnd")
         };
         let pours = vec![(Id::parse("p1", "pour").unwrap(), tiny)];
-        s.pours = fill_all(&pours, &s, &rules(), &JLC_2L);
+        s.pours = fill_all(&pours, &s, &rules(), &JLC_2L, &[]);
         let f = findings(&s, "b");
         assert_eq!(
             f.iter().map(|x| x.code).collect::<Vec<_>>(),
@@ -711,7 +830,7 @@ mod tests {
             .smd("r3", "1", (5 * MM, 66 * MM / 10), (MM, MM), Some("sig"))
             .smd("r4", "1", (5 * MM, 34 * MM / 10), (MM, MM), Some("sig"));
         let pours = vec![(Id::parse("p1", "pour").unwrap(), plane("gnd"))];
-        s.pours = fill_all(&pours, &s, &rules(), &JLC_2L);
+        s.pours = fill_all(&pours, &s, &rules(), &JLC_2L, &[]);
         let f = findings(&s, "b");
         let starved: Vec<_> = f
             .iter()
@@ -720,5 +839,38 @@ mod tests {
         assert_eq!(starved.len(), 1, "{f:?}");
         assert_eq!(starved[0].details["spokes"], 1);
         assert!(starved[0].refs.contains(&"b:r1/1".to_owned()));
+    }
+
+    #[test]
+    fn a_refill_reuses_the_tiles_an_edit_doesnt_reach() {
+        let mut s = board(40 * MM, 20 * MM);
+        s.smd("r1", "1", (5 * MM, 5 * MM), (MM, MM), Some("gnd"))
+            .smd("r1", "2", (35 * MM, 15 * MM), (MM, MM), Some("sig"));
+        let pours = vec![(Id::parse("p1", "pour").unwrap(), plane("gnd"))];
+        let first = fill_all(&pours, &s, &rules(), &JLC_2L, &[]);
+        assert!(
+            first[0].tiled.tiles.len() > 8,
+            "a 40 by 20 mm board in 8 mm tiles"
+        );
+        s.smd("r2", "1", (35 * MM, 5 * MM), (MM, MM), Some("sig"));
+        let again = fill_all(&pours, &s, &rules(), &JLC_2L, &first);
+        assert_eq!(again, fill_all(&pours, &s, &rules(), &JLC_2L, &[]));
+        let changed = again[0]
+            .tiled
+            .tiles
+            .iter()
+            .filter(|t| {
+                first[0]
+                    .tiled
+                    .tiles
+                    .iter()
+                    .find(|u| u.at == t.at)
+                    .is_none_or(|u| u.key != t.key)
+            })
+            .count();
+        assert!(
+            (1..=4).contains(&changed),
+            "{changed} tiles changed for one pad"
+        );
     }
 }
