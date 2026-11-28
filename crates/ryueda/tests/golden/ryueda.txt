@@ -149,13 +149,13 @@ schematic.ethernet.eth.s1.scene.light 4f4a0cbc9df823760e0d6ddc638a2cf8
 schematic.ethernet.eth.svg 394f79fa843f42ba3c44ee99f482711b
 schematic.ethernet.pdf b21ca79d40c73704c8422b97b279c6e7
 schematic.ethernet.status_led.dark.svg 108a45d6a002b77a5fa2c24ddc4544bb
-schematic.ethernet.status_led.describe 1a5754a644342b6eba267b3d296558df
+schematic.ethernet.status_led.describe cb569a3d2c18e3451fc7a837fad3610d
 schematic.ethernet.status_led.explain 8faeb19600b07e1986388ade7190b748
 schematic.ethernet.status_led.layout 25a1e0f3976a8b9cdcaf45124b5dac11
 schematic.ethernet.status_led.led_act.svg f661f6ff259c086b548d4ab791a2f483
 schematic.ethernet.status_led.led_lnk.svg f52bb1d3698b3b9f36b53e22dc28c8ba
-schematic.ethernet.status_led.s1.scene.dark 885eacafdae0bd991782ec103cadc668
-schematic.ethernet.status_led.s1.scene.light 646da9f43fecb0e3a5de15ca50ac2e5f
+schematic.ethernet.status_led.s1.scene.dark 153a5b671d315d998cf18e8b0f4d6bb7
+schematic.ethernet.status_led.s1.scene.light 287b91c72217ed96d6d79f12da7e36f4
 schematic.ethernet.status_led.svg f661f6ff259c086b548d4ab791a2f483
 schematic.frontend.amp.dark.svg 804ea41f5d1770b9c9def19c9a3258f3
 schematic.frontend.amp.describe 55f52c03c5d535a13e0c9caad634962b
