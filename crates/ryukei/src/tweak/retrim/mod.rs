@@ -725,6 +725,26 @@ fn attempt_adjusted(
                 seeds = fewer;
             }
         }
+        // Whole pins (design 990, plan 24.B): a narrowed build's walk
+        // still `Ambiguous` at pins walks once more with every piece of
+        // those pins seeded; where it closes, no release is asked.
+        if narrowed && let Err(WalkError::Ambiguous { piece }) = kept {
+            let at = pins_at(
+                &w.pinned,
+                pieces[piece].face.face,
+                arr.pieces[piece]
+                    .1
+                    .iter()
+                    .flat_map(|&(g, _)| table.edges[g].pcurves.keys().map(|r| r.face)),
+            );
+            let whole: Vec<usize> = (0..pieces.len())
+                .filter(|&i| at.contains(&pieces[i].face.face))
+                .collect();
+            if let Some((s, r)) = seeds::walk_whole(&arr, &tries, &whole, m) {
+                kept = r;
+                seeds = s;
+            }
+        }
         // Shells no outside face reaches take a seed each, once.
         if let Ok(k) = &kept {
             let seen: Vec<bool> = k.iter().map(Option::is_some).collect();
