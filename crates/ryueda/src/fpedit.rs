@@ -9,7 +9,7 @@
 //! ID, or `null` for the next free one (`p<n>`, `g<n>`, `k<n>`).
 
 use crate::coord;
-use crate::edit::{moved, offset, only, op_error, typed};
+use crate::edit::{moved, next_id, no_next_id, offset, only, op_error, typed};
 use crate::error::{Code, Error, Result};
 use crate::footprint::Footprint;
 use crate::id::Id;
@@ -259,16 +259,6 @@ fn fields_into(
     Ok(())
 }
 
-/// The next free `<prefix><n>` of a map's keys.
-fn next_id<T>(m: &BTreeMap<Id, T>, prefix: &str) -> Id {
-    let n = m
-        .keys()
-        .filter_map(|id| id.as_str().strip_prefix(prefix)?.parse::<u64>().ok())
-        .max()
-        .unwrap_or(0);
-    Id::parse(&format!("{prefix}{}", n + 1), "footprint object").expect("generated IDs are IDs")
-}
-
 /// The object an op names: its key and its value.
 fn object(o: &Map<String, Value>, i: usize) -> Result<(&'static str, &Value)> {
     let mut found = ["pad", "graphic", "keepout", "field", "model"]
@@ -303,7 +293,7 @@ fn existing<T>(m: &BTreeMap<Id, T>, v: &Value, i: usize, key: &str) -> Result<Id
 /// A new object's ID: the one given, which must be free, or the next.
 fn fresh<T>(m: &BTreeMap<Id, T>, v: &Value, i: usize, key: &str, prefix: &str) -> Result<Id> {
     if v.is_null() {
-        return Ok(next_id(m, prefix));
+        return next_id(m, prefix).ok_or_else(|| no_next_id(i, key, prefix));
     }
     let text = v.as_str().ok_or_else(|| {
         op_error(
@@ -871,6 +861,52 @@ pub(crate) mod tests {
                 );
                 crate::error::details::check(&e);
             }
+        }
+    }
+
+    /// Round 2 of the review: after `p18446744073709551615` there is no
+    /// next `p<n>`; an add asking for one is refused, never an overflow.
+    #[test]
+    fn no_next_free_id_is_refused() {
+        for (key, prefix, fields) in [
+            (
+                "pad",
+                "p",
+                json!({"number": "1", "kind": "smd", "shape": "rect", "at": [0, 0], "size": [1000, 1000], "layers": ["copper.top"]}),
+            ),
+            (
+                "graphic",
+                "g",
+                json!({"type": "line", "layer": "silk.top", "start": [0, 0], "end": [10, 0], "width": 100}),
+            ),
+            (
+                "keepout",
+                "k",
+                json!({"polygon": [[0, 0], [10, 0], [10, 10]], "keeps": ["tracks"], "layers": ["copper.top"]}),
+            ),
+        ] {
+            let mut last = fields.clone();
+            last["op"] = json!("add");
+            last[key] = json!(format!("{prefix}{}", u64::MAX));
+            let mut next = fields.clone();
+            next["op"] = json!("add");
+            next[key] = Value::Null;
+            let mut f = empty();
+            let e = apply(&mut f, &[last, next], Unit::Mm, &no_models).unwrap_err();
+            assert_eq!(
+                (
+                    e.code,
+                    e.details["pointer"].as_str(),
+                    e.details["reason"].as_str()
+                ),
+                (
+                    Code::InvalidParam,
+                    Some(format!("/ops/1/{key}").as_str()),
+                    Some("no_next_id")
+                ),
+                "{key}"
+            );
+            crate::error::details::check(&e);
         }
     }
 }

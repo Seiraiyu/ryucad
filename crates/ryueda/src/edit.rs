@@ -151,6 +151,33 @@ fn existing_pin(o: &Map<String, Value>, i: usize, s: &Symbol) -> Result<String> 
     Ok(n)
 }
 
+/// The next free `<prefix><n>` after a map's keys (the largest `n` plus
+/// one), or `None` when there is none to form: a key holding `u64::MAX`
+/// (7.F's review). Shared by a symbol's graphics and a footprint's pads,
+/// graphics and keepouts.
+pub(crate) fn next_id<T>(m: &std::collections::BTreeMap<Id, T>, prefix: &str) -> Option<Id> {
+    let n = m
+        .keys()
+        .filter_map(|id| id.as_str().strip_prefix(prefix)?.parse::<u64>().ok())
+        .max()
+        .unwrap_or(0)
+        .checked_add(1)?;
+    Some(Id::parse(&format!("{prefix}{n}"), "generated ID").expect("generated IDs are IDs"))
+}
+
+/// The refusal of an add asking for the next free ID when there is none.
+pub(crate) fn no_next_id(i: usize, key: &str, prefix: &str) -> Error {
+    op_error(
+        i,
+        key,
+        format!(
+            "there is no free {prefix}<n> after {prefix}{}; give the new {key} an ID",
+            u64::MAX
+        ),
+    )
+    .with("reason", "no_next_id")
+}
+
 /// `p` moved by `d`: refused, at the op's `by`, when that leaves the
 /// range of coordinates (an overflow before 7.F's review).
 pub(crate) fn moved(p: [i64; 2], d: [i64; 2], i: usize) -> Result<[i64; 2]> {
@@ -235,7 +262,9 @@ pub fn apply(s: &mut Symbol, ops: &[Value], unit: Unit) -> Result<Applied> {
                         }
                         id
                     }
-                    None => s.next_graphic(),
+                    None => s
+                        .next_graphic()
+                        .ok_or_else(|| no_next_id(i, "graphic", "g"))?,
                 };
                 let mut into = Map::new();
                 into.insert("type".into(), json!(ty));
@@ -501,5 +530,39 @@ mod tests {
             );
             assert_eq!(e.details["pointer"], "/ops/0/by");
         }
+    }
+
+    /// Round 2 of 7.F's review: no next graphic ID after
+    /// `g18446744073709551615` is refused, never an overflow; and an arc
+    /// at the ends of the range is judged without one.
+    #[test]
+    fn no_next_graphic_id_and_extreme_arcs_are_refused() {
+        let mut s = resistor();
+        let e = apply(
+            &mut s,
+            json!([
+                {"op": "add", "graphic": "rect", "id": format!("g{}", u64::MAX), "start": [0, 0], "end": [10, 10]},
+                {"op": "add", "graphic": "rect", "start": [0, 0], "end": [20, 20]}
+            ])
+            .as_array()
+            .unwrap(),
+            Unit::Mm,
+        )
+        .unwrap_err();
+        assert_eq!(
+            (e.code, e.details["reason"].as_str()),
+            (Code::InvalidParam, Some("no_next_id"))
+        );
+        assert_eq!(e.details["pointer"], "/ops/1/graphic");
+        let mut s = resistor();
+        apply(
+            &mut s,
+            json!([{"op": "add", "graphic": "arc", "start": [i64::MIN, i64::MIN], "mid": [i64::MAX, 0], "end": [0, i64::MAX]}])
+                .as_array()
+                .unwrap(),
+            Unit::Mm,
+        )
+        .unwrap();
+        assert!(s.check().iter().any(|f| f.is_error()));
     }
 }
