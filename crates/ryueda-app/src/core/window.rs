@@ -999,6 +999,7 @@ impl Window {
                         self.send(req("project.info", json!({})), Why::ProjectInfo);
                     }
                     Why::ProjectInfo => self.revisions_read(),
+                    Why::Netlist(d) => self.nav.netlist_refused(&d, &e.message),
                     _ => {}
                 }
                 return;
@@ -1078,6 +1079,9 @@ impl Window {
                         Why::Netlist(d.clone()),
                     );
                 }
+                // The roots design.list names: the tree grows even when
+                // a netlist is refused (#1103).
+                self.ask_blocks();
             }
             Why::Netlist(d) => {
                 self.nav.netlist(&d, &v);

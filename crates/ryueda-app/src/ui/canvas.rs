@@ -330,6 +330,36 @@ pub fn show(ui: &mut egui::Ui, w: &mut Window, kept: &mut Kept, now: Instant) {
             );
         }
     }
+    // A component mid-merge (#1103): its box dashed in diff_changed.
+    let unsettled = sc.paper.diff.map_or_else(
+        || {
+            crate::core::paint::on_paper(
+                ryu_app::style::color32(ryu_app::style::highlight(
+                    ryu_session::live::Style::Changed,
+                )),
+                sc.paper.colour,
+            )
+        },
+        |d| d.changed,
+    );
+    for o in sc.owners.iter().filter(|o| o.unsettled) {
+        if let Some(b) = o.boxed {
+            let r = Rect::from_two_pos(screen(b[0]), screen(b[1])).expand(2.0);
+            let ring = [
+                r.left_top(),
+                r.right_top(),
+                r.right_bottom(),
+                r.left_bottom(),
+                r.left_top(),
+            ];
+            painter.extend(egui::Shape::dashed_line(
+                &ring,
+                Stroke::new(1.5, unsettled),
+                6.0,
+                4.0,
+            ));
+        }
+    }
     for (k, c) in &m.pins {
         let at = screen(sc.pins[*k].at);
         painter.circle_stroke(at, (0.6 * zoom).max(4.0), Stroke::new(2.0, *c));

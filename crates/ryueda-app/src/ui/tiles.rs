@@ -275,6 +275,11 @@ fn navigator(ui: &mut egui::Ui, w: &mut Window, local: &mut Local) {
                 .clone()
                 .or_else(|| designs.first().cloned())
                 .unwrap_or_default();
+            if let Some(why) = w.nav.refused(&design) {
+                ui.add(egui::Label::new(
+                    egui::RichText::new(format!("The design doesn't flatten: {why}")).weak(),
+                ));
+            }
             for row in w.nav.components(&design, &local.component_filter) {
                 let text = format!("{}  {}  {}", row.refdes, row.value, row.mpn);
                 let on = w.selection.contains(&row.reference);
