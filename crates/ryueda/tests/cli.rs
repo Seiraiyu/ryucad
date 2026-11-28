@@ -6396,3 +6396,56 @@ fn text_and_drawings_from_the_cli() {
     p.ok(&["board", "drawing", "delete", id, "rev"]);
     p.fails(&["board", "drawing", "delete", id, "rev"], "not_found", 1);
 }
+
+/// #1077: `ryueda config` reads and writes this machine's preferences.
+#[test]
+fn config_gets_and_sets_a_preference() {
+    let d = tempfile::tempdir().unwrap();
+    let run = d.path().join("run");
+    let config = |args: &[&str]| {
+        parse(
+            ryueda(&run)
+                .current_dir(d.path())
+                .arg("config")
+                .args(args)
+                .output()
+                .unwrap(),
+            d.path(),
+        )
+    };
+    let (code, v) = config(&["get", "pdm.dependents"]);
+    assert_eq!(
+        (code, &v["result"]["value"], &v["result"]["default"]),
+        (0, &json!([]), &json!(true)),
+        "{v}"
+    );
+    let (code, v) = config(&["set", "pdm.dependents", r#"["../boards"]"#]);
+    assert_eq!(
+        (code, &v["result"]["value"]),
+        (0, &json!(["../boards"])),
+        "{v}"
+    );
+    let file = fs::read_to_string(d.path().join("config/preferences.json")).unwrap();
+    assert!(file.contains("\"pdm.dependents\""), "{file}");
+    let (_, v) = config(&["get"]);
+    assert!(
+        v["result"]["preferences"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["key"] == "pdm.dependents" && p["default"] == false),
+        "{v}"
+    );
+    let (code, v) = config(&["set", "pdm.dependents", "../boards"]);
+    assert_ne!(code, 0);
+    assert_eq!(v["error"]["code"], "invalid_setting", "{v}");
+    let (code, v) = config(&["get", "nope"]);
+    assert_ne!(code, 0);
+    assert_eq!(v["error"]["code"], "unknown_setting", "{v}");
+    assert_eq!(config(&["set", "pdm.dependents", "[]"]).0, 0);
+    assert_eq!(
+        config(&["get", "pdm.dependents"]).1["result"]["default"],
+        true,
+        "its default: gone"
+    );
+}
