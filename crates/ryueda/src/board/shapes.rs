@@ -576,7 +576,7 @@ pub fn footprint_alone(f: &Footprint) -> BoardShapes {
         &o,
         f,
         place,
-        &preset::JLC_2L,
+        preset::DEFAULT,
         2,
         &super::file::PartFields::default(),
     );
