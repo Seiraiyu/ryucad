@@ -192,7 +192,8 @@ pub(crate) fn released_rows(
 pub const PREFERENCE: &str = "pdm.dependents";
 
 /// The folders where-used also searches: `within` when it names any,
-/// else the preference unless `skip`; each relative one taken from `root`.
+/// else the preference unless `skip`; each relative one taken from `root`,
+/// and each canonical where it exists, as `checkout_dirs` compares them.
 pub fn folders(root: &Path, within: &[String], skip: bool) -> Vec<PathBuf> {
     let listed: Vec<String> = if !within.is_empty() {
         within.to_vec()
@@ -210,7 +211,17 @@ pub fn folders(root: &Path, within: &[String], skip: bool) -> Vec<PathBuf> {
             })
             .unwrap_or_default()
     };
-    listed.iter().map(|f| root.join(f)).collect()
+    // Canonical where they exist (#1077): one that doesn't keeps its
+    // joined path, for checkout_dirs to report.
+    listed
+        .iter()
+        .map(|f| {
+            let p = root.join(f);
+            std::fs::canonicalize(&p)
+                .map(crate::source::plain)
+                .unwrap_or(p)
+        })
+        .collect()
 }
 
 /// The projects under `folders`, each once by its canonical folder
@@ -467,6 +478,20 @@ mod tests {
             [root.join("../a")]
         );
         assert!(crate::pdm::where_used::folders(root, &[], true).is_empty());
+    }
+
+    /// #1077 (Windows): a dependents folder from the preference is canonical,
+    /// as `--in`'s are.
+    #[test]
+    fn preference_folders_are_canonical() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir(d.path().join("a")).unwrap();
+        assert_eq!(
+            folders(d.path(), &["a/../a".into()], false),
+            [crate::source::plain(
+                std::fs::canonicalize(d.path().join("a")).unwrap()
+            )]
+        );
     }
     #[test]
     fn where_used_is_a_library_projects_question() {
