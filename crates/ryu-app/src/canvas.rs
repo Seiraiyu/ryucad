@@ -157,21 +157,70 @@ pub fn meets(a: [P; 2], b: [P; 2]) -> bool {
     a[0][0] <= b[1][0] && b[0][0] <= a[1][0] && a[0][1] <= b[1][1] && b[0][1] <= a[1][1]
 }
 
-/// The wheel zooms at the pointer, the middle or right button pans: what
-/// every canvas does with its response `r` over `rect`.
+/// This frame's scroll by fingers on a trackpad: scrolls in points the
+/// platform doesn't say come from a wheel (macOS says; elsewhere a precise
+/// scroll is taken for fingers), without Cmd/Ctrl, which egui makes a
+/// zoom. Wheels scroll in lines. ryucad-app's viewport's rule (#1101).
+fn fingers(events: &[egui::Event]) -> Option<egui::Vec2> {
+    let mut d = None;
+    for e in events {
+        if let egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta,
+            source,
+            modifiers,
+            ..
+        } = e
+            && *source != egui::MouseWheelSource::Wheel
+            && !modifiers.command
+        {
+            *d.get_or_insert(egui::Vec2::ZERO) += *delta;
+        }
+    }
+    d
+}
+
+/// The wheel zooms at the pointer; on a trackpad two fingers pan, and a
+/// pinch or Cmd/Ctrl+scroll zooms at the pointer; the middle or right
+/// button pans: what every canvas does with its response `r` over `rect`.
 pub fn navigate(ui: &egui::Ui, r: &egui::Response, rect: egui::Rect, cam: &mut Camera) {
     let px = [f64::from(rect.width()), f64::from(rect.height())];
     if r.hovered() {
-        let (scroll, at) = ui.input(|i| (i.smooth_scroll_delta.y, i.pointer.hover_pos()));
-        if scroll != 0.0
-            && let Some(at) = at
-        {
-            let f = ryu_math::exp(f64::from(scroll) / 200.0);
-            cam.zoom_at(
-                f,
-                [f64::from(at.x - rect.left()), f64::from(at.y - rect.top())],
-                px,
-            );
+        let (fingers, wheel, zoom, at) = ui.input(|i| {
+            (
+                fingers(&i.raw.events),
+                i.smooth_scroll_delta.y,
+                i.zoom_delta(),
+                i.pointer.hover_pos(),
+            )
+        });
+        // Two fingers pan: the sheet follows them, as content does. egui
+        // spreads a large scroll over later frames; while the last scroll
+        // was fingers, what it spreads is theirs, never a wheel's zoom.
+        if let Some(d) = fingers {
+            cam.pan([f64::from(d.x), f64::from(d.y)]);
+        }
+        let was_fingers = r.id.with("ryu_app::canvas::fingers");
+        let scrolled = ui.input(|i| {
+            i.raw
+                .events
+                .iter()
+                .any(|e| matches!(e, egui::Event::MouseWheel { .. }))
+        });
+        let fingers_last = if scrolled {
+            fingers.is_some()
+        } else {
+            ui.data(|m| m.get_temp(was_fingers).unwrap_or(false))
+        };
+        ui.data_mut(|m| m.insert_temp(was_fingers, fingers_last));
+        if let Some(at) = at {
+            let at = [f64::from(at.x - rect.left()), f64::from(at.y - rect.top())];
+            if (zoom - 1.0).abs() > f32::EPSILON {
+                // A pinch, or Cmd+scroll (Ctrl+wheel elsewhere).
+                cam.zoom_at(f64::from(zoom), at, px);
+            } else if !fingers_last && wheel != 0.0 {
+                cam.zoom_at(ryu_math::exp(f64::from(wheel) / 200.0), at, px);
+            }
         }
     }
     if r.dragged_by(egui::PointerButton::Middle) || r.dragged_by(egui::PointerButton::Secondary) {
@@ -183,6 +232,109 @@ pub fn navigate(ui: &egui::Ui, r: &egui::Response, rect: egui::Rect, cam: &mut C
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `navigate` over a screen-filling canvas, the pointer at (200, 150):
+    /// a frame to lay it out, then one of `events`. The camera before and
+    /// after.
+    fn navigated(events: Vec<egui::Event>) -> (Camera, Camera) {
+        navigated_over(vec![events])
+    }
+
+    /// [`navigated`] over several frames of events after the first two.
+    fn navigated_over(after: Vec<Vec<egui::Event>>) -> (Camera, Camera) {
+        let ctx = egui::Context::default();
+        let start = Camera::fit([297.0, 210.0], [800.0, 600.0]);
+        let mut cam = start;
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let frames = [
+            vec![egui::Event::PointerMoved(egui::pos2(200.0, 150.0))],
+            vec![],
+        ]
+        .into_iter()
+        .chain(after);
+        for (n, events) in frames.enumerate() {
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                time: Some(n as f64 / 60.0),
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                let (rect, r) =
+                    ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+                navigate(ui, &r, rect, &mut cam);
+            });
+            out.textures_delta.clear();
+        }
+        (start, cam)
+    }
+
+    fn scroll(
+        unit: egui::MouseWheelUnit,
+        delta: egui::Vec2,
+        source: egui::MouseWheelSource,
+        modifiers: egui::Modifiers,
+    ) -> Vec<egui::Event> {
+        [
+            (egui::TouchPhase::Start, egui::Vec2::ZERO),
+            (egui::TouchPhase::Move, delta),
+        ]
+        .map(|(phase, delta)| egui::Event::MouseWheel {
+            unit,
+            delta,
+            phase,
+            source,
+            modifiers,
+        })
+        .to_vec()
+    }
+
+    /// #1101: a pinch and Cmd+scroll zoom, two fingers pan in x and y, and
+    /// a wheel's line steps still zoom.
+    #[test]
+    fn a_trackpad_pans_and_pinch_cmd_scroll_and_a_wheel_zoom() {
+        use egui::{Modifiers, MouseWheelSource as S, MouseWheelUnit as U};
+        let (a, b) = navigated(vec![egui::Event::Zoom(1.5)]);
+        assert!((b.zoom / a.zoom - 1.5).abs() < 1e-6, "pinch: {a:?} {b:?}");
+        let (a, b) = navigated(scroll(
+            U::Point,
+            egui::vec2(0.0, 40.0),
+            S::Trackpad,
+            Modifiers::COMMAND,
+        ));
+        assert!(b.zoom > a.zoom * 1.1, "cmd+scroll: {a:?} {b:?}");
+        let (a, b) = navigated(scroll(
+            U::Point,
+            egui::vec2(12.0, -8.0),
+            S::Trackpad,
+            Modifiers::NONE,
+        ));
+        assert_eq!(b.zoom, a.zoom, "fingers zoomed");
+        assert!((b.centre[0] - (a.centre[0] - 12.0 / a.zoom)).abs() < 1e-9);
+        assert!((b.centre[1] - (a.centre[1] - 8.0 / a.zoom)).abs() < 1e-9);
+        let (a, b) = navigated(vec![egui::Event::MouseWheel {
+            unit: U::Line,
+            delta: egui::vec2(0.0, 1.0),
+            phase: egui::TouchPhase::Move,
+            source: S::Wheel,
+            modifiers: Modifiers::NONE,
+        }]);
+        assert!(b.zoom > a.zoom, "wheel: {a:?} {b:?}");
+        // Fingers with no phases (Linux), a large step egui spreads over
+        // the frames after it: they pan, and what is spread never zooms.
+        let (a, b) = navigated_over(vec![
+            vec![egui::Event::MouseWheel {
+                unit: U::Point,
+                delta: egui::vec2(0.0, 30.0),
+                phase: egui::TouchPhase::Move,
+                source: S::Unknown,
+                modifiers: Modifiers::NONE,
+            }],
+            vec![],
+            vec![],
+        ]);
+        assert_eq!(b.zoom, a.zoom, "spread fingers zoomed");
+    }
 
     #[test]
     fn the_camera_fits_zooms_about_the_pointer_and_pans() {
