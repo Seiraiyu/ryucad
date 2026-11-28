@@ -122,19 +122,43 @@ pub(crate) fn working_rows(
     problems: &mut Vec<Value>,
 ) -> Vec<Value> {
     match Project::load(dir) {
-        Ok(p) => placing(&p, dir, lib, filter)
-            .into_iter()
-            .map(|mut r| {
-                r["project"] = json!(p.manifest.project);
-                r["folder"] = json!(shown);
-                r
-            })
-            .collect(),
+        Ok(p) => rows_of(&p, dir, shown, lib, filter),
         Err(e) => {
             problems.push(json!(e.with("folder", shown)));
             Vec::new()
         }
     }
+}
+
+/// [`working_rows`] of a project already loaded from `dir`.
+fn rows_of(p: &Project, dir: &Path, shown: &str, lib: &Library, filter: &Filter) -> Vec<Value> {
+    placing(p, dir, lib, filter)
+        .into_iter()
+        .map(|mut r| {
+            r["project"] = json!(p.manifest.project);
+            r["folder"] = json!(shown);
+            r
+        })
+        .collect()
+}
+
+/// A project's working and released rows from one load of it (#1010):
+/// the session's project is the working files', so the project and the
+/// libraries it places are read once, not once for each. One that doesn't
+/// open is [`working_rows`]' problem, as before.
+pub(crate) fn rows(
+    dir: &Path,
+    shown: &str,
+    lib: &Library,
+    filter: &Filter,
+    problems: &mut Vec<Value>,
+) -> (Vec<Value>, Vec<Value>) {
+    let Ok(mut s) = crate::session::Session::open(dir) else {
+        return (working_rows(dir, shown, lib, filter, problems), Vec::new());
+    };
+    let working = rows_of(s.project(), dir, shown, lib, filter);
+    let released = released_in(&mut s, dir, shown, lib, filter, problems);
+    (working, released)
 }
 
 /// A row for each official release of a design of the project at `dir`
@@ -143,6 +167,7 @@ pub(crate) fn working_rows(
 /// count, uses}`, `release` the design's label and `state` its state
 /// (`released`, `superseded`, `obsolete`), `label` the component's.
 /// None outside a repository; a release that can't be read is a problem.
+#[cfg(test)]
 pub(crate) fn released_rows(
     dir: &Path,
     shown: &str,
@@ -153,7 +178,19 @@ pub(crate) fn released_rows(
     let Ok(mut s) = crate::session::Session::open(dir) else {
         return Vec::new();
     };
-    let Ok((_, releases)) = crate::pdm::history(&mut s) else {
+    released_in(&mut s, dir, shown, lib, filter, problems)
+}
+
+/// [`released_rows`] of a session already open on `dir`.
+fn released_in(
+    s: &mut crate::session::Session,
+    dir: &Path,
+    shown: &str,
+    lib: &Library,
+    filter: &Filter,
+    problems: &mut Vec<Value>,
+) -> Vec<Value> {
+    let Ok((_, releases)) = crate::pdm::history(s) else {
         return Vec::new();
     };
     let config =
@@ -278,8 +315,7 @@ pub(crate) fn checkouts(
         .map(|dir| {
             let shown = dir.display().to_string();
             let mut problems = Vec::new();
-            let w = working_rows(dir, &shown, lib, filter, &mut problems);
-            let r = released_rows(dir, &shown, lib, filter, &mut problems);
+            let (w, r) = rows(dir, &shown, lib, filter, &mut problems);
             (w, r, problems)
         })
         .collect();
@@ -342,14 +378,9 @@ pub fn answer(session: &mut crate::session::Session, ask: &Ask) -> crate::error:
                 .strip_prefix(&top)
                 .map(|r| r.to_string_lossy().replace('\\', "/"))
                 .unwrap_or_else(|_| dir.display().to_string());
-            working.extend(working_rows(&dir, &shown, &lib, &ask.filter, &mut problems));
-            released.extend(released_rows(
-                &dir,
-                &shown,
-                &lib,
-                &ask.filter,
-                &mut problems,
-            ));
+            let (w, r) = rows(&dir, &shown, &lib, &ask.filter, &mut problems);
+            working.extend(w);
+            released.extend(r);
             seen.push(dir);
         }
     }
