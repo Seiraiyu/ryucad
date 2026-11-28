@@ -1054,6 +1054,18 @@ impl Window {
                 self.shown.block = Some(sc.block.clone());
                 self.shown.sheet = Some(sc.sheet.clone());
                 let block = sc.block.clone();
+                // The compared commit (#1106), from a compare scene or the
+                // revision's; never from a side shown mid-merge.
+                if self.peek.is_none()
+                    && let Some(c) = sc
+                        .against
+                        .as_ref()
+                        .map(|a| a.commit.clone())
+                        .filter(|c| !c.is_empty())
+                        .or_else(|| sc.commit.clone())
+                {
+                    self.blink.commit = Some(c);
+                }
                 self.scene = Some(sc);
                 self.view.due();
                 self.ask_other_sheets();

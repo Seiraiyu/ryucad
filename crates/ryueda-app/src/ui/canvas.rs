@@ -402,10 +402,14 @@ fn compare_bar(ui: &mut egui::Ui, w: &mut Window, rev: &str) {
     let against = sc.and_then(|s| s.against.clone());
     let counts = sc.and_then(|s| s.counts);
     ui.horizontal(|ui| {
-        let short: String = against
-            .as_ref()
-            .map(|a| a.commit.chars().take(7).collect())
-            .unwrap_or_default();
+        let short: String = w
+            .blink
+            .commit
+            .as_deref()
+            .unwrap_or_default()
+            .chars()
+            .take(7)
+            .collect();
         ui.label(format!("Against {rev} ({short})"));
         if let (Some(c), Some(d)) = (counts, diff) {
             ui.colored_label(d.added, format!("{} added", c.added));
