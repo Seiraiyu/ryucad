@@ -144,7 +144,23 @@ pub fn layout(
             }
             _ => Relayout::None,
         };
+        let relaid = how != Relayout::None;
         let laid = schem::lay(p, b, None, &[], how)?;
+        // Laid out again, a layout that breaks a hard rule is never
+        // written (#1093), as `place` writes none.
+        if relaid {
+            let broken = ryusch::rules::check(&laid.built.input, &laid.outcome.layout);
+            if !broken.is_empty() {
+                let again: Vec<String> = laid
+                    .outcome
+                    .layout
+                    .sheets
+                    .keys()
+                    .map(|s| format!("{}/{s}", b.id))
+                    .collect();
+                return Err(broken_rule(&broken).with("relayout", json!(again)));
+            }
+        }
         let text = schem::layout_text(&laid.outcome.layout);
         let path = schem::layout_path(&b.id);
         let now = session.snapshot().get(&path).map(|x| x.to_vec());
@@ -194,6 +210,26 @@ pub fn layout(
         v["revision"] = json!(p.conn.block(&id)?.revision);
     }
     Ok(Answer::json(json!({"blocks": out, "dry_run": dry_run})))
+}
+
+/// The refusal of a layout that breaks a hard rule: the first in the
+/// message, every one in `broken`.
+fn broken_rule(broken: &[ryusch::rules::Violation]) -> Error {
+    let first = broken.first().expect("a rule broken");
+    Error::new(
+        Code::LayoutRule,
+        format!(
+            "this layout would break a hard rule ({}): {}",
+            first.rule, first.message
+        ),
+    )
+    .with(
+        "broken",
+        json!(broken
+            .iter()
+            .map(|v| json!({"rule": v.rule, "sheet": v.sheet, "message": v.message, "refs": v.refs}))
+            .collect::<Vec<_>>()),
+    )
 }
 
 /// The fixes for a refusal of `batch`: batches that would hold.
@@ -466,21 +502,24 @@ pub fn place(
         }
         fixes.retain(|f| !f.is_empty());
         distinct(&mut fixes);
-        return Err(Error::new(
-            Code::LayoutRule,
-            format!(
-                "this layout would break a hard rule ({}): {}",
-                first.rule, first.message
-            ),
-        )
-        .with(
-            "broken",
-            json!(broken
+        // The layout on disk breaking that rule already (#1093): no batch
+        // fixes it, laying the sheet out again does.
+        let already = match &b.layout {
+            Some(Ok(l)) => ryusch::rules::check(&laid.built.input, l)
                 .iter()
-                .map(|v| json!({"rule": v.rule, "sheet": v.sheet, "message": v.message, "refs": v.refs}))
-                .collect::<Vec<_>>()),
-        )
-        .with("fixes", json!(fixes)));
+                .any(|v| v.rule == first.rule),
+            _ => false,
+        };
+        let mut e = broken_rule(&broken).with("fixes", json!(fixes));
+        if already {
+            let again = format!("{}/{}", b.id, first.sheet);
+            e.message = format!(
+                "{}; the layout on disk already breaks it: `ryueda layout --relayout {again}` lays it out again",
+                e.message
+            );
+            e = e.with("relayout", json!([again]));
+        }
+        return Err(e);
     }
     let bid = b.id.clone();
     let mut laid = laid;

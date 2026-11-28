@@ -1049,6 +1049,24 @@ pub fn schematic_warnings(p: &Project) -> Vec<Fault> {
                 .with("path", &path),
             );
         }
+        // Neither, yet the file breaks a hard rule (a pin drawn joined to
+        // nothing, laid out over itself unchanged; #1093).
+        if laid.invalid.is_none()
+            && !laid.stale
+            && let Some(Ok(l)) = &b.layout
+            && let Some(v) = ryusch::rules::check(&laid.built.input, l).first()
+        {
+            out.push(
+                Fault::warning(
+                    Code::LayoutInvalid,
+                    format!(
+                        "block {}'s layout breaks a hard rule ({}): `ryueda layout --relayout {}/{}` lays it out again",
+                        b.id, v.rule, b.id, v.sheet
+                    ),
+                )
+                .with("path", &path),
+            );
+        }
         let prefs = crate::lint::prefs(p);
         // Every fix tried by a dry run before it is offered.
         let (findings, checked, withheld) = crate::schem::checked_findings(&laid, &prefs);

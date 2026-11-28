@@ -3419,6 +3419,138 @@ fn regions_from_the_cli() {
     assert_eq!(code, 0);
 }
 
+/// #1093: a one-sheet block laid out again whole keeps every hard rule, as
+/// laid out again by its sheet does, so `place` still takes an instruction.
+#[test]
+fn a_block_laid_out_again_whole_keeps_its_stacks_labels() {
+    let p = Pair::projects();
+    let data = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/kicad");
+    for top in [&p.direct, &p.daemon] {
+        copy_tree(&data, &top.join("kicad"));
+    }
+    p.ok_in(
+        "passives",
+        &[
+            "import",
+            "kicad",
+            "../kicad/symbols/Ryu_Test.kicad_sym",
+            "../kicad/footprints/Ryu_Test.pretty",
+            "--models",
+            "../kicad/3dmodels",
+        ],
+    );
+    // Warnings (an open pin) aren't the point: code and ok only.
+    let go = |args: &[&str]| {
+        let (code, v) = p.both_in("board", args);
+        assert_eq!((code, &v["ok"]), (0, &json!(true)), "{args:?}: {v}");
+        v["result"].clone()
+    };
+    for args in [
+        &["rail", "add", "VIN", "--id", "vin", "--voltage", "5 V"][..],
+        &["rail", "add", "GND", "--id", "gnd"],
+        &["block", "create", "Divider", "--id", "div"],
+        &["block", "edit", "div", "--add-port", "IN:in"],
+        &["block", "edit", "div", "--add-port", "OUT:out"],
+        &[
+            "component",
+            "add",
+            "div",
+            "--of",
+            "lib/passives/libcomp/ryu_test_r",
+            "--id",
+            "r1",
+            "--value",
+            "4k7",
+        ],
+        &[
+            "component",
+            "add",
+            "div",
+            "--of",
+            "lib/passives/libcomp/ryu_test_r_10k",
+            "--id",
+            "r2",
+        ],
+        &["connect", "div/r1/1", "port:IN"],
+        &["connect", "div/r1/2", "port:OUT"],
+        &["connect", "div/r2/1", "port:OUT"],
+        &["connect", "div/r2/2", "rail:GND"],
+        &["block", "create", "Top", "--id", "top"],
+        &["net", "add", "top", "SENSE_A", "--id", "sense_a"],
+        &["net", "add", "top", "SENSE_B", "--id", "sense_b"],
+        &[
+            "instance",
+            "add",
+            "top",
+            "--of",
+            "div",
+            "--id",
+            "a",
+            "--port",
+            "IN=rail:VIN",
+            "--port",
+            "OUT=SENSE_A",
+            "--suffix",
+            "_A",
+        ],
+        &[
+            "instance",
+            "add",
+            "top",
+            "--of",
+            "div",
+            "--id",
+            "b",
+            "--port",
+            "IN=rail:VIN",
+            "--port",
+            "OUT=SENSE_B",
+            "--suffix",
+            "_B",
+        ],
+        &[
+            "component",
+            "add",
+            "top",
+            "--of",
+            "lib/passives/libcomp/ryu_test_r",
+            "--id",
+            "r9",
+            "--value",
+            "100k",
+            "--refdes",
+            "R9",
+        ],
+        &["connect", "top/r9/1", "rail:VIN"],
+        &["connect", "top/r9/2", "SENSE_A"],
+        &[
+            "component",
+            "add",
+            "top",
+            "--of",
+            "lib/passives/libcomp/ryu_test_r",
+            "--id",
+            "r8",
+            "--value",
+            "1k",
+            "--refdes",
+            "R8",
+        ],
+        &["connect", "top/r8/1", "SENSE_B"],
+        &["design", "create", "Board", "--root", "top", "--id", "d"],
+        &["layout"],
+        &["place", "top", "beside R8 R9 below", "region Sensing R9 R8"],
+    ] {
+        go(args);
+    }
+    for whole in ["top", "top/s1", "top"] {
+        go(&["layout", "--relayout", whole]);
+        go(&["place", "top", "orient R8 90", "--dry-run"]);
+        let c = go(&["check"]);
+        assert!(!c.to_string().contains("\"connected\""), "{whole}: {c}");
+    }
+}
+
 /// Plan 2.A's paper fit: a small block takes A4, drawn and paged so.
 #[test]
 fn each_sheet_is_drawn_and_paged_at_its_own_paper() {

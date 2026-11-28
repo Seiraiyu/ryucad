@@ -279,6 +279,25 @@ pub fn lay_out(block: &Block) -> Result<Outcome, instr::Refusal> {
                 out = again;
             }
         }
+        // A part whose label found no place where flow put it is placed
+        // again over that drawing, as over any previous layout (#1093).
+        if !out.crowded.is_empty() && !crate::rules::check(block, &out.layout).is_empty() {
+            let mut over = block.clone();
+            over.previous = Some(out.layout.clone());
+            over.relayout = Relayout::None;
+            if let Ok(r2) = instr::resolve(&over) {
+                let again: BTreeSet<usize> = out
+                    .crowded
+                    .iter()
+                    .copied()
+                    .filter(|p| !r2.moved.contains(p))
+                    .collect();
+                let tried = attempt(&over, &r2, 0, &again);
+                if crate::rules::check(block, &tried.layout).is_empty() {
+                    out = tried;
+                }
+            }
+        }
     } else {
         // A part a move put where it stands is held there: never placed
         // again for its labels (a shift that leaves one without room is
@@ -5437,8 +5456,10 @@ fn place_labels_in(
             .or_else(|| {
                 // No room for a label: a wire to the net's own, if any; a
                 // rail's only nearby, since further off a port of its own
-                // reads better than a long wire.
-                if !wired {
+                // reads better than a long wire. Never a stacked pin's: a
+                // wire names one layer's net, its label every layer's, so
+                // it is left with no place and placed again (#1093).
+                if !wired && !part.pins[k].stacked() {
                     let reach = if kind.signal() { Nm::MAX } else { RAIL_REACH };
                     wired = wire_own(
                         field, routes, labels, n, sid, pin.end, pin.side, reach, kept, &held,
