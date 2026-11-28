@@ -704,6 +704,7 @@ fn watchers_hear_of_library_changes() {
     // sleep before the write was a guess a busy machine broke, as it
     // once did ryucad's.)
     let mut named = false;
+    let mut writes = 0;
     while !waiting.is_finished() {
         let args: &[&str] = match named {
             false => &["lib", "add", "passives", "../passives"],
@@ -711,11 +712,19 @@ fn watchers_hear_of_library_changes() {
         };
         assert_eq!(p.run_in(&p.daemon, "board", args).0, 0, "{args:?}");
         named = !named;
+        writes += 1;
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
     let (code, v) = parse(waiting.join().unwrap(), &p.daemon);
     assert_eq!(code, 0, "{v}");
     let notes = v["result"]["notifications"].as_array().unwrap();
+    // Two daemons started at once (#1133): the watcher on one, the writes
+    // on the other. Say what was heard and who serves the project.
+    let (_, status) = p.run_in(&p.daemon, "board", &["daemon", "status"]);
+    assert!(
+        !notes.is_empty(),
+        "the watcher heard nothing in 20 s of {writes} writes: {v}; daemon: {status}"
+    );
     assert_eq!(notes[0]["method"], "project.changed", "{v}");
     let changed = &notes[0]["params"]["changed"];
     assert_eq!(changed, &json!(["lib/passives", "project"]));
