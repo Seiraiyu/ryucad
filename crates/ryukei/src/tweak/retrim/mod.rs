@@ -703,28 +703,37 @@ fn attempt_adjusted(
                 break;
             }
         }
-        // Slits and seeds (design 683, plan 21.C, question 983): every
-        // seed set failed. The first set whose seeds alone over-use an
-        // edge walks once more without the shortcut's seeds there that
-        // are slit pieces (design 724, plan 22.C) or don't hold their old
-        // face; its answer stands only if it closes (or halts), else the
-        // first try's failure is reported.
-        if !shortcut.is_empty()
-            && matches!(
-                kept,
-                Err(WalkError::Open { .. }
-                    | WalkError::Ambiguous { .. }
-                    | WalkError::Clipped { .. })
-            )
-        {
-            let ops = [w.body.clone()];
-            let mut holds =
-                |i: usize| seeds::inside_old(body, changes, &w, &ops, table, &pieces[i]);
-            if let Some((fewer, r)) = seeds::walk_again(&arr, &tries, &shortcut, &mut holds, m) {
-                kept = r;
-                seeds = fewer;
-            }
-        }
+        // Slits and seeds (design 683, plan 21.C, question 983), then
+        // whole pins (design 990, plan 24.B): `seeds::retried`.
+        let ops = std::cell::OnceCell::new();
+        let mut holds = |i: usize| {
+            let ops = ops.get_or_init(|| [w.body.clone()]);
+            seeds::inside_old(body, changes, &w, ops, table, &pieces[i])
+        };
+        let whole_at = |piece: usize| -> Vec<usize> {
+            let at = pins_at(
+                &w.pinned,
+                pieces[piece].face.face,
+                arr.pieces[piece]
+                    .1
+                    .iter()
+                    .flat_map(|&(g, _)| table.edges[g].pcurves.keys().map(|r| r.face)),
+            );
+            (0..pieces.len())
+                .filter(|&i| at.contains(&pieces[i].face.face))
+                .collect()
+        };
+        (kept, seeds) = seeds::retried(
+            &arr,
+            &tries,
+            &shortcut,
+            &mut holds,
+            holds_pins_whole(which, adjusts),
+            &whole_at,
+            kept,
+            seeds,
+            m,
+        );
         // Shells no outside face reaches take a seed each, once.
         if let Ok(k) = &kept {
             let seen: Vec<bool> = k.iter().map(Option::is_some).collect();
@@ -1070,6 +1079,14 @@ fn ask_room(
         return None;
     }
     room(&clipped)
+}
+
+/// Whether a build's walk may hold pins whole (design 990, plan 24.B):
+/// a narrowed build that releases nothing. A first build has no pins,
+/// and a released build still `Ambiguous` refuses as before (Decision
+/// 8, "Released faces").
+fn holds_pins_whole(which: Build, adjusts: &near::Adjusts) -> bool {
+    which.narrowed() && near::released(adjusts).is_empty()
 }
 
 /// The pins a walk's failure lies at (design 919, plan 23.A), as
