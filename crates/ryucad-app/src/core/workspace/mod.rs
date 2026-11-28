@@ -1143,6 +1143,22 @@ impl Workspace {
         self.pending.is_empty()
     }
 
+    /// What the window still waits for, for a test's failure to name: each
+    /// request without its answer (oldest ticket first) and the doctor's
+    /// deferred report (#849), as text.
+    pub fn waiting_on(&self) -> String {
+        let mut asked: Vec<(&u64, &Route)> = self.pending.iter().collect();
+        asked.sort_by_key(|(t, _)| **t);
+        let due = self
+            .session
+            .doctor_due
+            .map(|d| d.saturating_duration_since(Instant::now()));
+        format!(
+            "pending {asked:?}; doctor due in {due:?}, waiting {}, again {}",
+            self.session.doctor_waiting, self.session.doctor_again
+        )
+    }
+
     fn handle(&mut self, e: Event) {
         match e {
             Event::Note { .. } if self.deaf => {}
