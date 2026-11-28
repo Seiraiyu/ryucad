@@ -880,6 +880,81 @@ enum FootprintCmd {
         #[arg(long)]
         library: Option<String>,
     },
+    /// A footprint in this project's library, its ID made from its name
+    /// unless given, with --ops applied (ryueda 7.F): {"op": "add",
+    /// "pad": null, "number": "1", "kind": "smd", "shape": "rect", "at":
+    /// [0, 0], "size": ["1 mm", "1 mm"], "layers": ["copper.top"]},
+    /// {"op": "add", "graphic": null, "type": "rect", "layer":
+    /// "courtyard.top", ...}, {"op": "add", "field": "reference", ...}.
+    Create {
+        name: String,
+        #[arg(long)]
+        id: Option<String>,
+        /// smd, through or unspecified.
+        #[arg(long)]
+        mount: Option<String>,
+        #[arg(long, value_parser = ops, default_value = "[]")]
+        ops: Ops,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Apply a batch of ops (add, remove, set, move on pads, graphics,
+    /// keepouts, fields and models) all or nothing, and set its fields.
+    /// The answer gives each board placing it its DRC delta.
+    Edit {
+        footprint: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+        /// A tag; repeat for more (the whole list).
+        #[arg(long = "tag")]
+        tags: Vec<String>,
+        /// No tags.
+        #[arg(long)]
+        no_tags: bool,
+        /// smd, through or unspecified.
+        #[arg(long)]
+        mount: Option<String>,
+        /// board_only, exclude_from_pos, exclude_from_bom,
+        /// allow_missing_courtyard, allow_soldermask_bridges, dnp; repeat
+        /// for more (the whole list).
+        #[arg(long = "flag")]
+        flags: Vec<String>,
+        /// No flags.
+        #[arg(long)]
+        no_flags: bool,
+        #[arg(long, value_parser = ops, default_value = "[]")]
+        ops: Ops,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// Delete a footprint; refused while a library component lists it.
+    Delete {
+        footprint: String,
+        #[command(flatten)]
+        expect: Expect,
+    },
+    /// A footprint alone as PNG or SVG (by --out's extension, or --format).
+    Render {
+        footprint: String,
+        #[arg(long)]
+        out: PathBuf,
+        /// Layers bottom first: copper.top, mask.top, paste.top, silk.top,
+        /// fab.top, courtyard.top, their .bottom, keepout, drill, and any
+        /// layer the footprint draws on.
+        #[arg(long = "layer")]
+        layers: Vec<String>,
+        /// top (the default) or bottom, seen from below.
+        #[arg(long)]
+        side: Option<String>,
+        /// The long side in pixels (1600 by default).
+        #[arg(long)]
+        size: Option<u32>,
+        /// svg or png.
+        #[arg(long)]
+        format: Option<String>,
+    },
 }
 
 /// A library component's fields; an edit keeps those left out.
@@ -3274,6 +3349,51 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
         Command::Footprint(FootprintCmd::Show { footprint }) => Request::FootprintShow {
             footprint: footprint.clone(),
         },
+        Command::Footprint(FootprintCmd::Create { name, id, mount, ops, expect }) => {
+            Request::FootprintCreate {
+                name: name.clone(),
+                id: id.clone(),
+                mount: mount.clone(),
+                ops: ops.0.clone(),
+                expected_revision: expect.expect.clone(),
+            }
+        }
+        Command::Footprint(FootprintCmd::Edit {
+            footprint, name, description, tags, no_tags, mount, flags, no_flags, ops, expect,
+        }) => {
+            let list = |none: bool, v: &Vec<String>| match (none, v.is_empty()) {
+                (true, _) => Some(Vec::new()),
+                (false, true) => None,
+                (false, false) => Some(v.clone()),
+            };
+            Request::FootprintEdit {
+                footprint: footprint.clone(),
+                name: name.clone(),
+                description: description.clone(),
+                tags: list(*no_tags, tags),
+                mount: mount.clone(),
+                flags: list(*no_flags, flags),
+                ops: ops.0.clone(),
+                expected_revision: expect.expect.clone(),
+            }
+        }
+        Command::Footprint(FootprintCmd::Delete { footprint, expect }) => Request::FootprintDelete {
+            footprint: footprint.clone(),
+            expected_revision: expect.expect.clone(),
+        },
+        Command::Footprint(FootprintCmd::Render { footprint, out, layers, side, size, format }) => {
+            Request::FootprintRender {
+                footprint: footprint.clone(),
+                layers: layers.clone(),
+                side: side.clone(),
+                size: *size,
+                format: match picture_format(format.as_deref(), out)? {
+                    ryueda::schemcmd::Format::Png => "png",
+                    ryueda::schemcmd::Format::Svg => "svg",
+                }
+                .to_owned(),
+            }
+        }
         Command::Footprint(FootprintCmd::List { library }) => Request::FootprintList {
             library: library.clone(),
         },
@@ -5066,6 +5186,7 @@ fn deliver(cmd: &Command, here: &std::path::Path, a: Answer) -> Result<Value> {
     };
     let (Command::Render { out, .. }
     | Command::Board(BoardCmd::Render { out, .. })
+    | Command::Footprint(FootprintCmd::Render { out, .. })
     | Command::Output { out, .. }
     | Command::Place {
         render: Some(out), ..

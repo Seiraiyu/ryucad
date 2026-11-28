@@ -809,6 +809,10 @@ fn every_protocol_method_has_a_command() {
         ("symbol.delete", &["symbol", "delete"]),
         ("footprint.show", &["footprint", "show"]),
         ("footprint.list", &["footprint", "list"]),
+        ("footprint.create", &["footprint", "create"]),
+        ("footprint.edit", &["footprint", "edit"]),
+        ("footprint.delete", &["footprint", "delete"]),
+        ("footprint.render", &["footprint", "render"]),
         ("libcomp.create", &["libcomp", "create"]),
         ("libcomp.edit", &["libcomp", "edit"]),
         ("libcomp.show", &["libcomp", "show"]),
@@ -6664,5 +6668,147 @@ fn ratsnest_from_the_cli() {
         &["board", "ratsnest", id, "--net", "nope"],
         "board_net_not_found",
         1,
+    );
+}
+
+/// A footprint by ops (ryueda 7.F): one pad, a courtyard, a reference.
+const PAD_FP: &str = r#"[
+    {"op": "add", "pad": null, "number": "1", "kind": "smd", "shape": "rect", "at": [0, 0], "size": ["1", "1"], "layers": ["copper.top", "mask.top"]},
+    {"op": "add", "graphic": null, "type": "rect", "layer": "courtyard.top", "start": ["-1", "1"], "end": ["1", "-1"], "width": "0.05"},
+    {"op": "add", "field": "reference", "layer": "silk.top", "at": [0, "1.5"], "size": ["1", "1"], "thickness": "0.15"}
+]"#;
+
+#[test]
+fn a_footprint_is_created_from_the_cli() {
+    let p = Pair::projects();
+    let made = p.ok(&[
+        "footprint",
+        "create",
+        "Test_Pad",
+        "--mount",
+        "smd",
+        "--ops",
+        PAD_FP,
+    ]);
+    assert_eq!(made["reference"], "lib/self/footprint/test_pad", "{made}");
+    assert_eq!(made["path"], "library/footprints/test_pad.json");
+    assert_eq!(made["added"], json!(["p1", "g1"]));
+    assert_eq!(
+        made["footprint"]["pads"]["p1"]["size"],
+        json!([1_000_000, 1_000_000])
+    );
+    assert_eq!(made["footprint"]["mount"], "smd");
+    assert_eq!(made["faults"], json!([]));
+    let again = p.ok(&["footprint", "create", "Test_Pad"]);
+    assert_eq!(again["reference"], "lib/self/footprint/test_pad-2");
+    p.fails(
+        &["footprint", "create", "X", "--id", "test_pad"],
+        "duplicate_id",
+        1,
+    );
+    p.fails(
+        &["footprint", "create", "X", "--mount", "glued"],
+        "invalid_param",
+        1,
+    );
+    // A write that would leave a fault is refused, with every fault.
+    let e = p.fails(
+        &["footprint", "create", "Bad", "--ops", r#"[{"op": "add", "pad": null, "kind": "smd", "shape": "rect", "at": [0, 0], "size": [0, 1], "layers": ["copper.top"]}]"#],
+        "library_pad_invalid",
+        1,
+    );
+    assert_eq!(e["details"]["faults"][0]["details"]["pointer"], "/pads/p1");
+    let gone = p.ok(&["footprint", "delete", "test_pad-2"]);
+    assert_eq!(gone["deleted"], "lib/self/footprint/test_pad-2");
+    p.fails(&["footprint", "delete", "test_pad-2"], "not_found", 1);
+    let r = p.ok(&["footprint", "render", "test_pad", "--out", "fp.svg"]);
+    assert_eq!(r["footprint"], "lib/self/footprint/test_pad", "{r}");
+    assert!(r.get("board").is_none(), "{r}");
+    let svg = fs::read_to_string(p.daemon.join("board/fp.svg")).unwrap();
+    assert!(svg.contains("<path"), "the footprint is drawn");
+    let r = p.ok(&[
+        "footprint",
+        "render",
+        "test_pad",
+        "--out",
+        "fp.png",
+        "--layer",
+        "copper.top",
+        "--size",
+        "200",
+    ]);
+    assert_eq!(
+        (r["width"].as_u64(), r["layers"].clone()),
+        (Some(200), json!(["copper.top"]))
+    );
+    p.fails(
+        &[
+            "footprint",
+            "render",
+            "test_pad",
+            "--out",
+            "x.svg",
+            "--layer",
+            "copper.in9",
+        ],
+        "invalid_param",
+        1,
+    );
+}
+
+#[test]
+fn a_footprint_is_edited_and_its_boards_are_checked_again() {
+    let p = Pair::breakout();
+    for args in breakout_board::script() {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        p.ok(&args);
+    }
+    let shown = p.ok(&["footprint", "show", "r_0402"]);
+    let rev = shown["revision"].as_str().unwrap().to_owned();
+    // Pads grown into each other: the boards placing R_0402 hear of it.
+    let e = p.ok(&[
+        "footprint", "edit", "r_0402", "--expect", &rev, "--description", "grown",
+        "--tag", "resistor", "--tag", "0402", "--flag", "exclude_from_bom",
+        "--ops", r#"[{"op": "set", "pad": "p1", "size": ["1.2", "0.62"]}, {"op": "set", "pad": "p2", "size": ["1.2", "0.62"]}]"#,
+    ]);
+    assert_eq!(e["footprint"]["description"], "grown", "{e}");
+    assert_eq!(e["footprint"]["tags"], json!(["resistor", "0402"]));
+    assert_eq!(e["footprint"]["flags"], json!(["exclude_from_bom"]));
+    let boards = e["boards"].as_array().unwrap();
+    assert_eq!(boards.len(), 1, "{e}");
+    assert_eq!(
+        boards[0]["board"],
+        format!("board/{}", breakout_board::BOARD)
+    );
+    assert!(boards[0]["drc"]["errors"].as_u64().unwrap() > 0, "{e}");
+    // Taking pad 2 away while R_0402's component maps it is refused.
+    let e = p.fails(
+        &[
+            "footprint",
+            "edit",
+            "r_0402",
+            "--ops",
+            r#"[{"op": "remove", "pad": "p2"}]"#,
+        ],
+        "has_dependents",
+        1,
+    );
+    assert_eq!(e["details"]["pads"], json!(["2"]), "{e}");
+    p.fails(
+        &["footprint", "edit", "r_0402", "--expect", &rev],
+        "conflict",
+        1,
+    );
+    p.fails(&["footprint", "edit", "nope"], "not_found", 1);
+    let e = p.ok(&["footprint", "edit", "r_0402", "--no-flags", "--no-tags"]);
+    assert_eq!(
+        (e["footprint"].get("flags"), e["footprint"].get("tags")),
+        (None, None),
+        "{e}"
+    );
+    let e = p.fails(&["footprint", "delete", "r_0402"], "has_dependents", 1);
+    assert!(
+        !e["details"]["dependents"].as_array().unwrap().is_empty(),
+        "{e}"
     );
 }

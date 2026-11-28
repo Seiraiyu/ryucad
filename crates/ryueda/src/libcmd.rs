@@ -480,6 +480,305 @@ pub fn footprint_list(p: &Project, library: Option<&str>) -> Result<Value> {
     Ok(json!({"library": lib.alias, "revision": lib.revision, "footprints": list}))
 }
 
+/// A footprint's mount as a request names it.
+fn mount_param(text: &str) -> Result<crate::footprint::Mount> {
+    serde_json::from_value(json!(text)).map_err(|_| {
+        Error::new(
+            Code::InvalidParam,
+            format!("{text} isn't a mount: smd, through or unspecified"),
+        )
+        .with("param", "mount")
+    })
+}
+
+/// A model file's BLAKE3, by its path in the project at `root`.
+fn model_hash(root: &std::path::Path, path: &str) -> Result<String> {
+    let full = path_of(root, path);
+    let bytes = std::fs::read(&full).map_err(|_| {
+        Error::new(Code::NotFound, format!("there is no model file {path}")).with("path", path)
+    })?;
+    Ok(blake3::hash(&bytes).to_hex().to_string())
+}
+
+/// `footprint.create` (ryueda 7.F): a footprint called `name` in this
+/// project's library, mounted `mount`, with the batch `ops` applied.
+pub fn footprint_create(
+    session: &mut Session,
+    name: &str,
+    id: Option<&str>,
+    mount: Option<&str>,
+    ops: &[Value],
+    expected: Option<&str>,
+) -> Result<Value> {
+    let p = session.project();
+    let lib = writable(p, SELF)?;
+    check_revision("library self", &lib.revision, expected)?;
+    let id = match id {
+        Some(t) => {
+            let id = Id::parse(t, "footprint")?;
+            if lib.has(ObjKind::Footprint, id.as_str()) {
+                return Err(Error::new(
+                    Code::DuplicateId,
+                    format!("the library already has footprint {id}"),
+                )
+                .with("reference", ref_text(SELF, ObjKind::Footprint, &id)));
+            }
+            id
+        }
+        None => name::free(name, |s| lib.has(ObjKind::Footprint, s)),
+    };
+    let mut f: crate::footprint::Footprint =
+        serde_json::from_value(json!({"name": name})).expect("a name is a footprint");
+    if let Some(m) = mount {
+        f.mount = mount_param(m)?;
+    }
+    let root = session.root().to_path_buf();
+    let applied = crate::fpedit::apply(&mut f, ops, p.manifest.default_unit, &|path| {
+        model_hash(&root, path)
+    })?;
+    let errors = added_errors(&[], &f.check());
+    if !errors.is_empty() {
+        return Err(refused(&format!("footprint {id}"), &errors));
+    }
+    let path = lib.path(ObjKind::Footprint, &id);
+    save(
+        session,
+        &path,
+        &f,
+        crate::footprint::KIND,
+        crate::footprint::FORMAT,
+    )?;
+    let mut v = footprint_json(session.project().library(SELF)?, &id)?;
+    v["added"] = json!(applied.added);
+    Ok(v)
+}
+
+/// The components of this project's library that list footprint `id` of
+/// it, by reference.
+fn footprint_users(lib: &Library, id: &Id) -> Vec<String> {
+    lib.components
+        .iter()
+        .filter(|(_, c)| {
+            c.item.as_ref().is_ok_and(|c| {
+                c.footprints.iter().any(|u| {
+                    u.footprint.id == *id
+                        && u.footprint
+                            .library
+                            .as_ref()
+                            .is_none_or(|l| l.as_str() == SELF)
+                })
+            })
+        })
+        .map(|(cid, _)| ref_text(SELF, ObjKind::Libcomp, cid))
+        .collect()
+}
+
+/// The boards that place a footprint (`lib/<alias>/footprint/<id>`).
+fn boards_placing(p: &Project, footprint: &str) -> Vec<Id> {
+    p.boards
+        .iter()
+        .filter(|(_, b)| {
+            b.board.item.as_ref().ok().is_some_and(|file| {
+                crate::board::occ::occurrences(p, &file.design).is_ok_and(|(_, occs)| {
+                    occs.iter()
+                        .any(|o| o.footprint_ref.as_deref() == Some(footprint))
+                })
+            })
+        })
+        .map(|(id, _)| id.clone())
+        .collect()
+}
+
+/// What `footprint.edit` changes besides its ops; each left out keeps
+/// what the file has.
+#[derive(Clone, Debug, Default)]
+pub struct FootprintFields {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub tags: Option<Vec<String>>,
+    pub mount: Option<String>,
+    pub flags: Option<Vec<String>>,
+}
+
+/// `footprint.edit` (ryueda 7.F): its fields and a batch of ops, all or
+/// nothing. Refused while it would leave no pad of a number a component
+/// of this library maps. The answer says what the edit did to each
+/// board that places it.
+pub fn footprint_edit(
+    session: &mut Session,
+    target: &str,
+    e: &FootprintFields,
+    ops: &[Value],
+    expected: Option<&str>,
+) -> Result<Value> {
+    let p = session.project();
+    let (alias, id) = self::target(target, ObjKind::Footprint)?;
+    let lib = writable(p, &alias)?;
+    check_revision("library self", &lib.revision, expected)?;
+    let at = ref_text(SELF, ObjKind::Footprint, &id);
+    let loaded = lib.footprints.get(&id).ok_or_else(|| {
+        Error::new(Code::NotFound, format!("{at} isn't in the library")).with("reference", &at)
+    })?;
+    let mut f = loaded.item.clone().map_err(|e| e.with("reference", &at))?;
+    if let Some(n) = &e.name {
+        f.name = n.clone();
+    }
+    if let Some(d) = &e.description {
+        f.description = d.clone();
+    }
+    if let Some(t) = &e.tags {
+        f.tags = t.clone();
+    }
+    if let Some(m) = &e.mount {
+        f.mount = mount_param(m)?;
+    }
+    if let Some(list) = &e.flags {
+        f.flags = list
+            .iter()
+            .map(|x| {
+                serde_json::from_value(json!(x)).map_err(|_| {
+                    Error::new(Code::InvalidParam, format!("{x} isn't a footprint flag"))
+                        .with("param", "flag")
+                })
+            })
+            .collect::<Result<_>>()?;
+    }
+    let before: std::collections::BTreeSet<String> =
+        f.numbers().into_iter().map(str::to_owned).collect();
+    let root = session.root().to_path_buf();
+    let applied = crate::fpedit::apply(&mut f, ops, p.manifest.default_unit, &|path| {
+        model_hash(&root, path)
+    })?;
+    let after: std::collections::BTreeSet<&str> = f.numbers();
+    let gone: Vec<String> = before
+        .iter()
+        .filter(|n| !after.contains(n.as_str()))
+        .cloned()
+        .collect();
+    let users = footprint_users(lib, &id);
+    if !gone.is_empty() && !users.is_empty() {
+        return Err(Error::new(
+            Code::HasDependents,
+            format!(
+                "pad {} is mapped by {}; map the component's pins first, or remove it",
+                gone.join(", "),
+                users.join(", ")
+            ),
+        )
+        .with("pads", &gone)
+        .with("dependents", &users));
+    }
+    let errors = added_errors(&loaded.faults, &f.check());
+    if !errors.is_empty() {
+        return Err(refused(&format!("footprint {id}"), &errors));
+    }
+    let path = lib.path(ObjKind::Footprint, &id);
+    let boards = boards_placing(p, &at);
+    let was: Vec<(Id, Option<Vec<crate::board::drc::Finding>>)> = boards
+        .into_iter()
+        .map(|b| {
+            let f = crate::board::drc::now(session, &b);
+            (b, f)
+        })
+        .collect();
+    save(
+        session,
+        &path,
+        &f,
+        crate::footprint::KIND,
+        crate::footprint::FORMAT,
+    )?;
+    let mut v = footprint_json(session.project().library(SELF)?, &id)?;
+    v["added"] = json!(applied.added);
+    v["components"] = faults_of(session.project(), &users);
+    v["boards"] = Value::Array(
+        was.into_iter()
+            .map(|(b, before)| {
+                let revision = session.project().boards.get(&b).map(|x| x.revision.clone());
+                json!({
+                    "board": format!("board/{b}"),
+                    "revision": revision,
+                    "drc": crate::board::drc::delta(session, &b, before),
+                })
+            })
+            .collect(),
+    );
+    Ok(v)
+}
+
+/// `footprint.delete` (ryueda 7.F): refused while a library component
+/// lists it.
+pub fn footprint_delete(
+    session: &mut Session,
+    target: &str,
+    expected: Option<&str>,
+) -> Result<Value> {
+    let p = session.project();
+    let (alias, id) = self::target(target, ObjKind::Footprint)?;
+    let lib = writable(p, &alias)?;
+    check_revision("library self", &lib.revision, expected)?;
+    let at = ref_text(SELF, ObjKind::Footprint, &id);
+    if !lib.footprints.contains_key(&id) {
+        return Err(
+            Error::new(Code::NotFound, format!("{at} isn't in the library")).with("reference", &at),
+        );
+    }
+    let users = footprint_users(lib, &id);
+    if !users.is_empty() {
+        return Err(Error::new(
+            Code::HasDependents,
+            format!("{} list {at}; take it off them first", users.join(", ")),
+        )
+        .with("dependents", &users));
+    }
+    let path = path_of(session.root(), &lib.path(ObjKind::Footprint, &id));
+    std::fs::remove_file(&path).map_err(|e| Error::io(&path, &e))?;
+    session.reload()?;
+    Ok(json!({"deleted": at, "revision": session.project().library(SELF)?.revision}))
+}
+
+/// `footprint.render` (ryueda 7.F): a footprint of any library alone,
+/// through the board's shapes and renderer, as PNG or SVG.
+pub fn footprint_render(
+    p: &Project,
+    target: &str,
+    layers: &[String],
+    side: Option<&str>,
+    size: Option<u32>,
+    format: &str,
+) -> Result<ryu_session::rpc::Answer> {
+    let (alias, id) = self::target(target, ObjKind::Footprint)?;
+    let lib = p.library(&alias)?;
+    let at = ref_text(&alias, ObjKind::Footprint, &id);
+    let l = lib.footprints.get(&id).ok_or_else(|| {
+        Error::new(Code::NotFound, format!("{at} isn't in the library")).with("reference", &at)
+    })?;
+    let f = l
+        .item
+        .as_ref()
+        .map_err(|e| e.clone().with("reference", &at))?;
+    let s = crate::board::shapes::footprint_alone(f);
+    let ask = crate::board::render::Ask {
+        layers,
+        bottom: crate::board::cmd::side_param(side)?,
+        net: None,
+        window: None,
+        size: size.unwrap_or(crate::board::render::DEFAULT_SIZE),
+        svg: crate::board::cmd::svg_param(format)?,
+        ratsnest: &[],
+        findings: &[],
+    };
+    let (mut v, mime, bytes) = crate::board::render::render("footprint", &s, &ask)?;
+    if let Some(o) = v.as_object_mut() {
+        o.remove("board");
+        o.remove("net");
+    }
+    v["footprint"] = json!(at);
+    v["notices"] = fault::list(&s.notices);
+    v["revision"] = json!(lib.revision);
+    Ok(ryu_session::rpc::Answer::bytes(v, mime, bytes))
+}
+
 /// What a request gives of a library component: every field may be
 /// left out (an edit keeps what it doesn't give).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, serde::Deserialize)]

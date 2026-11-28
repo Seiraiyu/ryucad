@@ -973,6 +973,32 @@ fn place_of(s: &super::shapes::BoardShapes, refs: &[String]) -> Option<Point> {
     b.map(|b| Point::new((b.min.x + b.max.x) / 2, (b.min.y + b.max.y) / 2))
 }
 
+/// `--side`: top (the default) or bottom.
+pub(crate) fn side_param(side: Option<&str>) -> Result<bool> {
+    match side {
+        None | Some("top") => Ok(false),
+        Some("bottom") => Ok(true),
+        Some(o) => Err(Error::new(
+            Code::InvalidParam,
+            format!("--side is top or bottom, not {o}"),
+        )
+        .with("param", "side")),
+    }
+}
+
+/// A picture's format: png or svg (true).
+pub(crate) fn svg_param(format: &str) -> Result<bool> {
+    match format {
+        "png" => Ok(false),
+        "svg" => Ok(true),
+        o => Err(Error::new(
+            Code::InvalidParam,
+            format!("{o} isn't a format: png or svg"),
+        )
+        .with("param", "format")),
+    }
+}
+
 /// `board render`: the board's shapes (kept by the session) drawn.
 #[allow(clippy::too_many_arguments)]
 pub fn render(
@@ -989,28 +1015,8 @@ pub fn render(
     let p = session.project();
     let unit = p.manifest.default_unit;
     let id = find(p, board)?.id.clone();
-    let bottom = match side {
-        None | Some("top") => false,
-        Some("bottom") => true,
-        Some(o) => {
-            return Err(Error::new(
-                Code::InvalidParam,
-                format!("--side is top or bottom, not {o}"),
-            )
-            .with("param", "side"));
-        }
-    };
-    let svg = match format {
-        "png" => false,
-        "svg" => true,
-        o => {
-            return Err(Error::new(
-                Code::InvalidParam,
-                format!("{o} isn't a format: png or svg"),
-            )
-            .with("param", "format"));
-        }
-    };
+    let bottom = side_param(side)?;
+    let svg = svg_param(format)?;
     let window = match window {
         None => None,
         Some(w) => {
