@@ -122,6 +122,25 @@ fn b_flips_to_the_revision_and_back() {
     frames(&mut h, |a| shown(a).is_some());
     agent(&root, "compare.set", json!({"rev": "HEAD"}));
     frames(&mut h, comparing);
+    // #1106: the bar names the commit on every side.
+    let short: String = h
+        .state()
+        .opened()
+        .unwrap()
+        .scene
+        .as_ref()
+        .unwrap()
+        .against
+        .as_ref()
+        .unwrap()
+        .commit
+        .chars()
+        .take(7)
+        .collect();
+    assert_eq!(short.chars().count(), 7);
+    let bar = format!("Against HEAD ({short})");
+    h.step();
+    assert!(h.query_by_label(&bar).is_some(), "Both: {bar}");
     let canvas = h.get_by_label("Schematic sheet").rect().center();
     h.event(egui::Event::PointerMoved(canvas));
     h.key_press(egui::Key::B);
@@ -131,12 +150,19 @@ fn b_flips_to_the_revision_and_back() {
             .is_some_and(|s| s.read_only() && s.owner("breakout/c3").is_some())
     });
     assert_eq!(h.state().opened().unwrap().blink.side, Side::Rev);
+    h.step();
+    assert!(
+        h.query_by_label(&bar).is_some(),
+        "the revision's side: {bar}"
+    );
     h.key_press(egui::Key::B);
     frames(&mut h, |a| {
         a.opened().and_then(|w| w.scene.as_ref()).is_some_and(|s| {
             !s.read_only() && s.against.is_none() && s.owner("breakout/c3").is_none()
         })
     });
+    h.step();
+    assert!(h.query_by_label(&bar).is_some(), "the working side: {bar}");
 }
 
 #[test]

@@ -620,7 +620,7 @@ pub fn build(p: &Project, b: &BlockFiles) -> Result<Built> {
         });
     }
     let mut rails: Vec<Id> = Vec::new();
-    for c in b.components.values().filter_map(|c| c.item.as_ref().ok()) {
+    for (_, c) in b.drawn_components() {
         rails.extend(c.pins.values().filter_map(|n| match n {
             Node::Rail(r) => Some(r.clone()),
             _ => None,
@@ -716,8 +716,7 @@ pub fn build(p: &Project, b: &BlockFiles) -> Result<Built> {
     };
     let mut parts = Vec::new();
     let mut of = Vec::new();
-    for (cid, c) in &b.components {
-        let Ok(c) = &c.item else { continue };
+    for (cid, c) in b.drawn_components() {
         let lib = crate::partcmd::placed(p, &c.of).ok();
         let value = c
             .value

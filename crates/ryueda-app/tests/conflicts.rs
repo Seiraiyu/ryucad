@@ -448,3 +448,84 @@ fn a_manifest_record_opens_conflicts_alone() {
         serde_json::from_slice(&std::fs::read(board.join("ryueda.json")).unwrap()).unwrap();
     assert_eq!(m["properties"]["rev"], "theirs", "{m}");
 }
+
+/// #1103: the part a value conflict is in is drawn, at the value its file
+/// holds, and Show frames it; the navigator keeps its tree.
+#[test]
+fn a_conflicted_part_is_drawn_and_show_frames_it() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let (_top, board) = merging(
+        "cf-value",
+        &[&["component", "edit", "breakout/r1", "--value", "5k6"]],
+        &[&["component", "edit", "breakout/r1", "--value", "6k8"]],
+    );
+    let mut h = window(&board);
+    frames(&mut h, |a| {
+        kinds(a).iter().any(|k| k == "value") && quiet(a)
+    });
+    frames(&mut h, |a| {
+        a.opened().is_some_and(|w| {
+            w.nav.design_ids().any(|d| {
+                let t = w.nav.tree(d);
+                t.block == "breakout" && !t.children.is_empty()
+            })
+        })
+    });
+    let row = row_of(h.state(), "value");
+    assert!(
+        row.refs.iter().any(|r| r == "breakout/r1"),
+        "{:?}",
+        row.refs
+    );
+    h.state_mut().opened_mut().unwrap().frame = None;
+    h.state_mut().opened_mut().unwrap().show_conflict(&row);
+    frames(&mut h, |a| {
+        a.opened()
+            .is_some_and(|w| w.selection == row.refs && w.frame.is_some())
+    });
+    let sc = h.state().opened().unwrap().scene.as_ref().unwrap();
+    let r1 = sc.owner("breakout/r1").expect("R1 drawn while unsettled");
+    assert!(sc.owners[r1].unsettled, "R1 marked unsettled");
+}
+
+/// #1104: the typed-value command wraps inside the Conflicts tile, its
+/// start never left of the row it belongs to.
+#[test]
+fn a_typed_values_command_stays_inside_its_tile() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let (_top, board) = merging(
+        "cf-typed",
+        &[&["component", "edit", "breakout/r1", "--value", "5k6"]],
+        &[&["component", "edit", "breakout/r1", "--value", "6k8"]],
+    );
+    let root = board.clone();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1280.0, 832.0))
+        .wgpu()
+        .build_eframe(move |cc| App::open(&cc.egui_ctx, &root, daemon()));
+    frames(&mut h, |a| {
+        kinds(a).iter().any(|k| k == "value") && quiet(a)
+    });
+    for _ in 0..3 {
+        h.step();
+    }
+    let lead = h
+        .query_by_label("A value of your own:")
+        .expect("the row")
+        .rect();
+    let cmd = h
+        .query_by_label_contains("ryueda merge resolve")
+        .expect("the command")
+        .rect();
+    assert!(
+        cmd.min.x >= lead.min.x - 0.5,
+        "clipped left: {cmd:?} vs {lead:?}"
+    );
+    assert!(cmd.max.x <= 1280.0, "{cmd:?}");
+}

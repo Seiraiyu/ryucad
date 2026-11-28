@@ -26,9 +26,10 @@ fn bar(d: Duration) -> Duration {
     if strict() { d } else { d * 10 }
 }
 
-/// One channel of 500 resistors, laid out: block `ch`.
-fn five_hundred() -> PathBuf {
-    let root = common::shared().join("five-hundred");
+/// One channel of 500 resistors, laid out: block `ch`, in a folder of the
+/// caller's own (#1097: the two bars ran in parallel on one).
+fn five_hundred(name: &str) -> PathBuf {
+    let root = common::shared().join(name);
     let _ = std::fs::remove_dir_all(&root);
     generated::write(&root, 1, 500);
     let root = std::fs::canonicalize(root).unwrap();
@@ -61,6 +62,7 @@ fn loaded(h: &mut Harness<'static, App>, block: &str, within: Duration) -> Durat
 #[test]
 #[ignore = "release, hardware adapters: cargo test -p ryueda-app --release --test frames -- --ignored --nocapture"]
 fn a_five_hundred_part_sheet_pans_at_60_frames_a_second() {
+    let _one = common::one_at_a_time();
     let Some((adapter, _, _)) = ryueda_app::ui::smoke::headless() else {
         assert!(!strict(), "no adapter");
         return;
@@ -74,7 +76,7 @@ fn a_five_hundred_part_sheet_pans_at_60_frames_a_second() {
             info.name
         );
     }
-    let root = five_hundred();
+    let root = five_hundred("five-hundred-plain");
     let mut h = window(&root, egui::vec2(1280.0, 800.0));
     h.state_mut()
         .opened_mut()
@@ -121,6 +123,7 @@ fn a_five_hundred_part_sheet_pans_at_60_frames_a_second() {
 #[test]
 #[ignore = "release: cargo test -p ryueda-app --release --test frames -- --ignored --nocapture"]
 fn a_pick_is_seen_by_another_window_and_the_agent_within_200_ms() {
+    let _one = common::one_at_a_time();
     if !gpu() {
         return;
     }
@@ -165,6 +168,7 @@ fn a_pick_is_seen_by_another_window_and_the_agent_within_200_ms() {
 #[test]
 #[ignore = "release: cargo test -p ryueda-app --release --test frames -- --ignored --nocapture"]
 fn the_app_is_no_larger_than_ryucad_s_and_draws_within_two_seconds() {
+    let _one = common::one_at_a_time();
     if !gpu() {
         return;
     }
@@ -195,6 +199,7 @@ fn the_app_is_no_larger_than_ryucad_s_and_draws_within_two_seconds() {
 #[ignore = "release, hardware adapters: cargo test -p ryueda-app --release --test frames -- --ignored --nocapture"]
 fn a_marked_five_hundred_part_sheet_pans_at_60_frames_a_second() {
     use ryueda_app::core::scene::{Diff, DiffColours, Ghost, Item};
+    let _one = common::one_at_a_time();
     let Some((adapter, _, _)) = ryueda_app::ui::smoke::headless() else {
         assert!(!strict(), "no adapter");
         return;
@@ -208,7 +213,7 @@ fn a_marked_five_hundred_part_sheet_pans_at_60_frames_a_second() {
             info.name
         );
     }
-    let root = five_hundred();
+    let root = five_hundred("five-hundred-marked");
     let mut h = window(&root, egui::vec2(1280.0, 800.0));
     h.state_mut()
         .opened_mut()
@@ -288,6 +293,7 @@ fn load() -> String {
 #[test]
 #[ignore = "release: cargo test -p ryueda-app --release --test frames -- --ignored --nocapture"]
 fn the_conflict_panel_draws_within_2_s_and_a_resolve_within_1_s() {
+    let _one = common::one_at_a_time();
     if !gpu() {
         return;
     }

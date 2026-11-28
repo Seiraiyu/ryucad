@@ -376,7 +376,21 @@ pub fn design_delete(session: &mut Session, design: &str, expected: Option<&str>
 }
 
 pub fn design_list(p: &Project) -> Value {
-    top_list(p, "design", "designs", &p.conn.designs, |d| &d.name)
+    let mut v = top_list(p, "design", "designs", &p.conn.designs, |d| &d.name);
+    // Each readable design's root block: the window's navigator learns
+    // its tree from it when the netlist is refused (#1103).
+    for d in v["designs"].as_array_mut().into_iter().flatten() {
+        let root = d["id"]
+            .as_str()
+            .and_then(|i| Id::parse(i, "design").ok())
+            .and_then(|i| p.conn.designs.get(&i))
+            .and_then(|l| l.item.as_ref().ok())
+            .map(|x| x.root.to_string());
+        if let Some(r) = root {
+            d["root"] = json!(r);
+        }
+    }
+    v
 }
 
 /// A port op of `block.edit`.

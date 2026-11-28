@@ -275,6 +275,11 @@ fn navigator(ui: &mut egui::Ui, w: &mut Window, local: &mut Local) {
                 .clone()
                 .or_else(|| designs.first().cloned())
                 .unwrap_or_default();
+            if let Some(why) = w.nav.refused(&design) {
+                ui.add(egui::Label::new(
+                    egui::RichText::new(format!("The design doesn't flatten: {why}")).weak(),
+                ));
+            }
             for row in w.nav.components(&design, &local.component_filter) {
                 let text = format!("{}  {}  {}", row.refdes, row.value, row.mpn);
                 let on = w.selection.contains(&row.reference);
@@ -739,13 +744,16 @@ fn conflict_row(
                 }
             }
             if let Some(t) = &r.typed {
-                ui.horizontal_wrapped(|ui| {
+                // The command on a wrapped line of its own: a long token
+                // after the lead in a wrapped row is laid out left of the
+                // tile (#1104).
+                ui.horizontal(|ui| {
                     ui.weak("A value of your own:");
-                    ui.monospace(t);
                     if ui.small_button("Copy").clicked() {
                         *copy = Some(t.clone());
                     }
                 });
+                ui.add(egui::Label::new(egui::RichText::new(t).monospace()).wrap());
             }
             if let Some(h) = &r.hint {
                 ui.weak(h);
@@ -796,18 +804,24 @@ fn finish(ui: &mut egui::Ui, m: &crate::core::merge::Merge, copy: &mut Option<St
     ui.weak("ryueda never stages or commits. Once everything is settled, in the project folder:");
     let mut add: Vec<&str> = settled;
     add.extend(untracked);
-    let cmds = [
-        (!add.is_empty()).then(|| format!("git add {}", add.join(" "))),
-        Some("git commit".to_owned()),
-    ];
-    for c in cmds.into_iter().flatten() {
-        ui.horizontal_wrapped(|ui| {
-            ui.monospace(&c);
+    if !add.is_empty() {
+        // As a typed value's command: its own wrapped line (#1104).
+        let c = format!("git add {}", add.join(" "));
+        ui.horizontal(|ui| {
+            ui.weak("Stage them:");
             if ui.small_button("Copy").clicked() {
                 *copy = Some(c.clone());
             }
         });
+        ui.add(egui::Label::new(egui::RichText::new(&c).monospace()).wrap());
     }
+    let c = "git commit";
+    ui.horizontal_wrapped(|ui| {
+        ui.monospace(c);
+        if ui.small_button("Copy").clicked() {
+            *copy = Some(c.to_owned());
+        }
+    });
 }
 
 #[cfg(test)]

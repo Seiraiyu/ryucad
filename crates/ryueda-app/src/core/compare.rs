@@ -30,6 +30,9 @@ pub enum Ask {
 pub struct Blink {
     pub of: Option<String>,
     pub side: Side,
+    /// The compared commit, from the last compare or revision scene
+    /// (#1106): the bar names it on every side.
+    pub commit: Option<String>,
 }
 
 impl Blink {
@@ -42,6 +45,7 @@ impl Blink {
         *self = Blink {
             of: rev.map(str::to_owned),
             side: Side::Both,
+            commit: None,
         };
         true
     }

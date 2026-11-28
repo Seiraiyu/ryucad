@@ -298,7 +298,9 @@ pub struct Owned {
 /// with their owners by reference path (`schem::ref_path`). `parts` are
 /// the components' part keys. An owner's hash is BLAKE3 over its items'
 /// JSON without their owner index, so no other owner moves it. With a
-/// compare's `marks` (by layout key), an owner carries its `mark`.
+/// compare's `marks` (by layout key), an owner carries its `mark`; an
+/// owner whose reference is in `unsettled` (a component mid-merge, drawn
+/// at the value its file holds: #1103) carries `"unsettled": true`.
 pub fn owned(
     block: &Id,
     under: &[Item],
@@ -306,6 +308,7 @@ pub fn owned(
     painted: &Painted,
     parts: &BTreeSet<&str>,
     marks: Option<&BTreeMap<String, ryusch::paint::Mark>>,
+    unsettled: &BTreeSet<String>,
 ) -> Owned {
     let mut index: BTreeMap<String, usize> = BTreeMap::new();
     let mut owners: Vec<Owner> = Vec::new();
@@ -366,7 +369,7 @@ pub fn owned(
         .iter()
         .map(|o| {
             format!(
-                r#"{{"ref":{},"kind":"{}","net":{},"box":{},"hash":"{}"{}}}"#,
+                r#"{{"ref":{},"kind":"{}","net":{},"box":{},"hash":"{}"{}{}}}"#,
                 serde_json::to_string(&o.reference).expect("a string"),
                 o.kind,
                 o.net.as_ref().map_or_else(
@@ -377,7 +380,12 @@ pub fn owned(
                     .map_or_else(|| "null".to_owned(), |b| rect_text(b, [0, 0])),
                 &o.hash.finalize().to_hex()[..32],
                 o.mark
-                    .map_or_else(String::new, |m| format!(r#","mark":"{m}""#))
+                    .map_or_else(String::new, |m| format!(r#","mark":"{m}""#)),
+                if unsettled.contains(&o.reference) {
+                    r#","unsettled":true"#
+                } else {
+                    ""
+                }
             )
         })
         .collect();
@@ -756,6 +764,10 @@ pub fn scene_with(p: &Project, ask: &Ask, against: Option<&Against>) -> Result<S
         &painted,
         &parts,
         compared.as_ref().map(|c| &c.here.marks),
+        &b.unsettled
+            .keys()
+            .map(|id| schem::ref_path(&b.id, id.as_str()))
+            .collect(),
     );
     let (found, scores) =
         ryusch::lint::lint_with(&laid.built.input, &laid.outcome, &crate::lint::prefs(p));
@@ -1243,7 +1255,15 @@ mod tests {
         let block = Id::parse("top", "block").unwrap();
         let parts: BTreeSet<&str> = ["u1:1", "u1:2"].into();
         let under = [line(-5)];
-        let o = owned(&block, &under, [10, 20], &painted(line(3)), &parts, None);
+        let o = owned(
+            &block,
+            &under,
+            [10, 20],
+            &painted(line(3)),
+            &parts,
+            None,
+            &BTreeSet::new(),
+        );
         let items: Value = serde_json::from_str(&o.items).unwrap();
         let owners: Value = serde_json::from_str(&o.owners).unwrap();
         let of: Vec<Value> = items
@@ -1291,7 +1311,15 @@ mod tests {
         );
         assert_eq!(o.index["top/u1"], 1);
         // Another line for sda moves sda's hash alone.
-        let again = owned(&block, &under, [10, 20], &painted(line(4)), &parts, None);
+        let again = owned(
+            &block,
+            &under,
+            [10, 20],
+            &painted(line(4)),
+            &parts,
+            None,
+            &BTreeSet::new(),
+        );
         let after: Value = serde_json::from_str(&again.owners).unwrap();
         for i in 0..2 {
             assert_eq!(after[i]["hash"], owners[i]["hash"], "{i}");
@@ -1317,7 +1345,15 @@ mod tests {
             owners: vec![Some("label:sda@u1:2/5".into())],
             ..Painted::default()
         };
-        let o = owned(&block, &[], [0, 0], &p, &BTreeSet::new(), None);
+        let o = owned(
+            &block,
+            &[],
+            [0, 0],
+            &p,
+            &BTreeSet::new(),
+            None,
+            &BTreeSet::new(),
+        );
         let owners: Value = serde_json::from_str(&o.owners).unwrap();
         assert_eq!(owners[0]["ref"], "top/label:sda@u1/5");
         assert_eq!(owners[0]["kind"], "label");
