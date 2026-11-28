@@ -79,9 +79,15 @@ fn touch(a: &Copper, b: &Copper) -> Verdict {
     measure::touches(&a.body, &b.body)
 }
 
-/// Every finding of `f`, in a fixed order: overlaps by pad ID, repeated
+/// Every finding of `f` (none while it fails its own checks), in a fixed order: overlaps by pad ID, repeated
 /// numbers by number, then the courtyard and the fields.
 pub fn lint(f: &Footprint) -> Vec<Fault> {
+    // Only a footprint that passes its own checks: one that fails them
+    // (a coordinate past a metre, a pad that can't be made) is judged by
+    // its faults first, and its shapes may not even be bounded.
+    if f.check().iter().any(Fault::is_error) {
+        return Vec::new();
+    }
     let c = copper(f);
     let mut out = Vec::new();
     overlaps(&c, &mut out);
@@ -312,5 +318,25 @@ mod tests {
         // (The line took the freed ID g1.)
         ok(&mut f, json!([{"op": "remove", "graphic": "g1"}]));
         assert_eq!(codes(&f), [Code::FootprintNoReference]);
+    }
+
+    /// The fuzzer's find: a courtyard arc through a point a kilometre out
+    /// overflowed its bounds. A footprint that fails its own checks
+    /// (`library_out_of_range` here) isn't linted: its faults say what is
+    /// wrong first.
+    #[test]
+    fn a_footprint_failing_its_own_checks_is_not_linted() {
+        let mut f = empty();
+        ok(
+            &mut f,
+            json!([{"op": "add", "graphic": null, "type": "arc", "layer": "courtyard.top",
+            "start": [0, 0], "mid": [80_000, 1_099_511_627_776i64], "end": [0, 360_000], "width": 640_000}]),
+        );
+        assert!(
+            f.check()
+                .iter()
+                .any(|x| x.error.code == Code::LibraryOutOfRange)
+        );
+        assert!(lint(&f).is_empty());
     }
 }

@@ -98,9 +98,13 @@ fuzz_target!(|data: &[u8]| {
     };
     match ryueda::fpedit::apply(&mut f, &ops, ryueda::units::Unit::Mm, &no) {
         Ok(_) => {
-            let _ = f.check();
+            // As ryueda does: a footprint failing its own checks is never
+            // drawn or linted (the lint returns nothing for it).
+            let faulty = f.check().iter().any(|x| x.is_error());
             let _ = ryueda::fplint::lint(&f);
-            let _ = ryueda::board::shapes::footprint_alone(&f);
+            if !faulty {
+                let _ = ryueda::board::shapes::footprint_alone(&f);
+            }
             let back: ryueda::footprint::Footprint =
                 serde_json::from_value(serde_json::to_value(&f).unwrap()).unwrap();
             assert_eq!(back, f, "a footprint writes back the same");

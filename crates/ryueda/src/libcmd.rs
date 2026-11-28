@@ -759,6 +759,11 @@ pub fn footprint_render(
         .item
         .as_ref()
         .map_err(|e| e.clone().with("reference", &at))?;
+    // A footprint that fails its own checks isn't drawn: its faults first.
+    let errors: Vec<Fault> = l.faults.iter().filter(|x| x.is_error()).cloned().collect();
+    if !errors.is_empty() {
+        return Err(refused(&format!("footprint {id}"), &errors));
+    }
     let s = crate::board::shapes::footprint_alone(f);
     let ask = crate::board::render::Ask {
         layers,

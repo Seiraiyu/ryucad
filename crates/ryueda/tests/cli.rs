@@ -6788,6 +6788,17 @@ fn a_footprint_is_created_from_the_cli() {
         "invalid_param",
         1,
     );
+    // A footprint failing its own checks (written by hand: no command
+    // makes one) isn't drawn; its faults say why.
+    p.write(
+        "board/library/footprints/far.json",
+        r#"{"format":1,"kind":"ryueda.footprint","name":"Far","graphics":{"g1":{"layer":"courtyard.top","type":"arc","start":[0,0],"mid":[80000,1099511627776],"end":[0,360000],"width_nm":640000}}}"#,
+    );
+    p.fails(
+        &["footprint", "render", "far", "--out", "far.svg"],
+        "library_out_of_range",
+        1,
+    );
     let bad = p.ok(&["footprint", "create", "Short", "--ops", r#"[
         {"op": "add", "pad": null, "number": "1", "kind": "smd", "shape": "rect", "at": ["-0.4", 0], "size": ["1", "1"], "layers": ["copper.top"]},
         {"op": "add", "pad": null, "number": "2", "kind": "smd", "shape": "rect", "at": ["0.4", 0], "size": ["1", "1"], "layers": ["copper.top"]}
