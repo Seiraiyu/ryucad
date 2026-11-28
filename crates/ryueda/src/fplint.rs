@@ -91,8 +91,12 @@ pub fn lint(f: &Footprint) -> Vec<Fault> {
     out
 }
 
-/// Two numbered pads of different numbers whose copper touches: an error
-/// (a short on every board); uncertain verdicts are findings too.
+/// Two numbered pads of different numbers whose copper touches: a
+/// warning, uncertain verdicts too. Not an error (a departure from plan
+/// 1015, by the census of KiCad 9.0.9's footprints): KiCad stacks lands of
+/// different numbers on purpose (USB-C's A4/B9 VBUS and A1/B12 GND,
+/// QFNs' several exposed pads, RF land patterns), and a real short shows
+/// on a board, where DRC judges pads of different nets.
 fn overlaps(c: &[Copper], out: &mut Vec<Fault>) {
     for i in 0..c.len() {
         for j in i + 1..c.len() {
@@ -108,7 +112,7 @@ fn overlaps(c: &[Copper], out: &mut Vec<Fault>) {
                 continue;
             }
             out.push(
-                Fault::error(
+                Fault::warning(
                     Code::FootprintPadsOverlap,
                     format!("pads {} ({na}) and {} ({nb}) touch", a.id, b.id),
                 )
@@ -265,7 +269,8 @@ mod tests {
         );
         assert_eq!(codes(&f), Vec::<Code>::new());
         let found = lint(&two(json!("1.2"), "1", "2", json!(["copper.top"])));
-        assert!(found[0].is_error());
+        // A warning (KiCad stacks lands on purpose); a board's DRC judges shorts.
+        assert!(!found[0].is_error());
         assert_eq!(found[0].error.details["pads"], json!(["p1", "p2"]));
     }
 

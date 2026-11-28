@@ -1195,7 +1195,7 @@ pub enum Code {
     /// ryueda DRC finding (a warning): a pad a pour reaches by fewer than
     /// two thermal spokes (`details.spokes`).
     PourThermalStarved,
-    /// Footprint lint (ryueda 7.F, an error): two pads of different
+    /// Footprint lint (ryueda 7.F, a warning): two pads of different
     /// numbers whose copper touches on a layer both are on.
     FootprintPadsOverlap,
     /// Footprint lint (a warning): pads of one number whose copper isn't

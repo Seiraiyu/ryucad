@@ -6770,29 +6770,24 @@ fn a_footprint_is_created_from_the_cli() {
         ["footprint_pads_overlap", "footprint_no_reference"],
         "{bad}"
     );
-    let e = p.fails(&["lib", "check", "--footprint", "short"], "check_failed", 1);
-    let fps = e["details"]["report"]["footprints"].as_array().unwrap();
+    // Overlapping pads are a warning (KiCad stacks lands on purpose).
+    let e = p.ok(&["lib", "check", "--footprint", "short"]);
+    let fps = e["footprints"].as_array().unwrap();
     assert_eq!(fps.len(), 1, "{e}");
     assert_eq!(fps[0]["reference"], "lib/self/footprint/short");
-    assert_eq!(e["details"]["report"]["errors"], 1);
+    assert_eq!(
+        (e["errors"].as_u64(), e["warnings"].as_u64()),
+        (Some(0), Some(2)),
+        "{e}"
+    );
     let clean = p.ok(&["lib", "check", "--footprint", "test_pad"]);
     assert_eq!(clean["footprints"][0]["findings"], json!([]), "{clean}");
     assert!(
         clean.get("symbols").is_none() || clean["symbols"] == json!([]),
         "{clean}"
     );
-    let only = p.fails(
-        &["lib", "check", "--code", "footprint_pads_overlap"],
-        "check_failed",
-        1,
-    );
-    assert_eq!(
-        only["details"]["report"]["footprints"]
-            .as_array()
-            .unwrap()
-            .len(),
-        1
-    );
+    let only = p.ok(&["lib", "check", "--code", "footprint_pads_overlap"]);
+    assert_eq!(only["footprints"].as_array().unwrap().len(), 1, "{only}");
     p.fails(
         &["lib", "check", "--footprint", "short", "--symbol", "x"],
         "invalid_param",
@@ -6896,4 +6891,55 @@ fn footprint_writes_undo_and_redo_through_the_daemon() {
     assert!(!path.exists(), "undo takes the create back");
     assert_eq!(p.run_in(&p.daemon, "board", &["redo"]).0, 0);
     assert!(path.exists());
+}
+
+/// A USB-C receptacle's stacked lands, as KiCad's own footprints draw them
+/// (A1 on B12 for GND, A4 on B9 for VBUS), in a KiCad 9 file we wrote.
+const USB_C_STACKED: &str = r#"(footprint "USB_C_Stacked"
+	(version 20241229)
+	(generator "ryueda_tests")
+	(layer "F.Cu")
+	(property "Reference" "REF**" (at 0 -3 0) (layer "F.SilkS") (effects (font (size 1 1) (thickness 0.15))))
+	(attr smd)
+	(fp_rect (start -4.5 -2) (end 4.5 2) (stroke (width 0.05) (type solid)) (fill no) (layer "F.CrtYd"))
+	(pad "A1" smd rect (at -3.2 0) (size 0.6 1.2) (layers "F.Cu" "F.Mask" "F.Paste"))
+	(pad "B12" smd rect (at -3.2 0) (size 0.6 1.2) (layers "F.Cu" "F.Mask" "F.Paste"))
+	(pad "A4" smd rect (at -2.4 0) (size 0.6 1.2) (layers "F.Cu" "F.Mask" "F.Paste"))
+	(pad "B9" smd rect (at -2.4 0) (size 0.6 1.2) (layers "F.Cu" "F.Mask" "F.Paste"))
+)
+"#;
+
+/// Importing a USB-C receptacle doesn't fail lib check (ryueda 7.F): its
+/// stacked lands of different numbers are warnings, not errors, since KiCad
+/// draws them on purpose and a board's DRC judges real shorts.
+#[test]
+fn a_usb_c_receptacles_stacked_lands_dont_fail_lib_check() {
+    let p = Pair::projects();
+    for top in [&p.direct, &p.daemon] {
+        let dir = top.join("usb/Ryu_USB.pretty");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("USB_C_Stacked.kicad_mod"), USB_C_STACKED).unwrap();
+    }
+    p.ok(&["import", "kicad", "../usb/Ryu_USB.pretty"]);
+    let c = p.ok(&["lib", "check", "--footprint", "ryu_usb_usb_c_stacked"]);
+    assert_eq!(c["errors"], 0, "{c}");
+    let found: Vec<&str> = c["footprints"][0]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["code"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        found,
+        ["footprint_pads_overlap", "footprint_pads_overlap"],
+        "{c}"
+    );
+    assert!(
+        c["footprints"][0]["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|f| f["severity"] == "warning"),
+        "{c}"
+    );
 }
