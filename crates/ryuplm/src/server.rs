@@ -11,7 +11,7 @@ use crate::source::write_atomic;
 use crate::units::Unit;
 use crate::{Plm, activity};
 use ryu_session::activity::EntryKind;
-use ryu_session::live::{self, Live};
+use ryu_session::live::{self, Live, SelectMode};
 use serde_json::{Value, json};
 use std::path::Path;
 
@@ -115,6 +115,10 @@ pub fn answer(
     if let Some(l) = live.as_deref_mut() {
         if !external.is_empty() {
             ryu_session::activity::record_external(l, external);
+            // What a change from outside took away leaves every
+            // selection, highlight and status before the request reads
+            // them (design 938).
+            l.prune(|t| crate::refs::stands(session, t));
         }
         if let Some(me) = me {
             l.touch(me);
@@ -123,6 +127,7 @@ pub fn answer(
     // A daemon keeps what its writes change, for the log and for undo;
     // undo and redo log themselves.
     let (method, params) = (req.method(), req.params());
+    let writes = req.mutates();
     let logs_itself = matches!(req, Request::Undo { .. } | Request::Redo { .. });
     let files_before = match (&live, req.mutates() && !logs_itself) {
         (Some(_), true) => Some(session.files()),
@@ -138,6 +143,11 @@ pub fn answer(
         }
     }
     if let (Some(l), Some(before)) = (live, before) {
+        // References a write took away drop out of every selection,
+        // highlight and status.
+        if writes && result.is_ok() {
+            l.prune(|t| crate::refs::stands(session, t));
+        }
         l.announce(&before);
         publish(l, session);
     }
@@ -167,6 +177,8 @@ fn dispatch(
             state,
             make_buy,
             faults,
+            source,
+            counts,
             sort,
             offset,
             limit,
@@ -179,6 +191,8 @@ fn dispatch(
                 state,
                 make_buy,
                 faults,
+                source,
+                counts,
                 sort,
                 offset,
                 limit,
@@ -514,6 +528,104 @@ fn dispatch(
             let who = live.caller(me);
             activity::undo(live, session, &who, entry, true)?
         }
+        Request::SelectionGet { participant } => {
+            let live = live.ok_or_else(|| live::no_live_session("selection.get"))?;
+            match live.target(participant.as_deref())? {
+                Some(p) => json!({
+                    "participant": p.id,
+                    "selection": p.selection,
+                    "objects": crate::refs::objects(session, &p.selection),
+                }),
+                None => json!({"participant": null, "selection": [], "objects": []}),
+            }
+        }
+        Request::SelectionSet { refs, mode } => {
+            let live = live.ok_or_else(|| live::no_live_session("selection.set"))?;
+            // What is taken out may be gone already: kept as given when it
+            // no longer reads.
+            let refs = if mode == SelectMode::Remove {
+                refs.iter()
+                    .map(|r| crate::refs::target(session, r).unwrap_or_else(|_| r.clone()))
+                    .collect()
+            } else {
+                crate::refs::targets(session, &refs)?
+            };
+            let id = live.caller(me);
+            let selection = live.select(&id, refs, mode)?.to_vec();
+            json!({"participant": id, "selection": selection})
+        }
+        Request::HighlightSet { refs, style, label } => {
+            let live = live.ok_or_else(|| live::no_live_session("highlight.set"))?;
+            let refs = crate::refs::targets(session, &refs)?;
+            let id = live.caller(me);
+            let highlights = live.highlight(&id, style, label, refs)?.to_vec();
+            json!({"participant": id, "highlights": highlights})
+        }
+        Request::HighlightClear { style } => {
+            let live = live.ok_or_else(|| live::no_live_session("highlight.clear"))?;
+            let id = live.caller(me);
+            let highlights = live.clear_highlights(&id, style)?.to_vec();
+            json!({"participant": id, "highlights": highlights})
+        }
+        Request::ActivitySet { status, refs } => {
+            let live = live.ok_or_else(|| live::no_live_session("activity.set"))?;
+            let refs = crate::refs::targets(session, &refs)?;
+            let id = live.caller(me);
+            live.set_status(&id, &status, refs)?;
+            json!({"participant": id, "status": live.get(&id)?.status})
+        }
+        Request::ViewGet { participant } => {
+            let live = live.ok_or_else(|| live::no_live_session("view.get"))?;
+            match live.target(participant.as_deref())? {
+                Some(p) => json!({"participant": p.id, "view": crate::view::to_json(&p.view)}),
+                None => json!({"participant": null, "view": null}),
+            }
+        }
+        Request::ViewSet { item, tab, list } => {
+            let live = live.ok_or_else(|| live::no_live_session("view.set"))?;
+            let item = item.map(|i| session.catalogue().find(&i)).transpose()?;
+            if let Some(t) = &tab {
+                crate::view::check_tab(t)?;
+            }
+            let list = list.unwrap_or_default();
+            list.check()?;
+            let id = live.caller(me);
+            let v = &mut live.get_mut(&id)?.view;
+            v.item = item.map(|i| i.to_string());
+            v.tab = tab;
+            v.list = list;
+            v.shown_by = Some(id.clone());
+            json!({"participant": id, "view": crate::view::to_json(v)})
+        }
+        Request::ViewShow {
+            reference,
+            participant,
+        } => {
+            let live = live.ok_or_else(|| live::no_live_session("view.show"))?;
+            let r = crate::refs::target(session, &reference)?;
+            let by = live.caller(me);
+            let who: Vec<String> = match &participant {
+                Some(p) => vec![live.get(p)?.id.clone()],
+                None => live.humans().map(|h| h.id.clone()).collect(),
+            };
+            let (item, tab) = crate::view::shown_at(&r);
+            for id in &who {
+                live.select(id, vec![r.clone()], SelectMode::Replace)?;
+                let v = &mut live.get_mut(id)?.view;
+                if item.is_some() {
+                    v.item = item.clone();
+                }
+                if let Some(t) = tab {
+                    v.tab = Some(t.to_owned());
+                }
+                v.shown_by = Some(by.clone());
+            }
+            let object = crate::refs::objects(session, std::slice::from_ref(&r)).remove(0);
+            json!({"ref": r, "shown": who, "item": item, "tab": tab, "object": object})
+        }
+        // In process there is nothing running to cancel; the daemon's
+        // loop answers it there.
+        Request::RequestCancel { .. } => return Err(live::no_live_session("request.cancel")),
         Request::SessionHello {
             kind,
             name,
@@ -549,6 +661,8 @@ pub fn publish(live: &mut Live<Plm>, session: &Session) {
     let now = session.revisions();
     if live.hub.is_watched()
         && let Some(seen) = &live.seen.revisions
+        // The same generation's map is the same allocation: nothing moved.
+        && !std::sync::Arc::ptr_eq(seen, &now)
         && seen != &now
     {
         let changed: Vec<&String> = now
@@ -561,7 +675,7 @@ pub fn publish(live: &mut Live<Plm>, session: &Session) {
         live.hub.send(
             Topic::Project,
             "project.changed",
-            &json!({"revisions": now, "changed": changed}),
+            &json!({"revisions": *now, "changed": changed}),
         );
     }
     live.seen.revisions = Some(now);
@@ -575,6 +689,7 @@ pub fn settle(slot: &mut Option<Session>, live: &mut Live<Plm>, root: &Path) {
         let external = s.refresh_changes()?;
         if !external.is_empty() {
             ryu_session::activity::record_external(live, external);
+            live.prune(|t| crate::refs::stands(s, t));
         }
         live.announce(&before);
         publish(live, s);
@@ -635,5 +750,178 @@ pub(crate) mod tests {
         assert_eq!(v["revision"].as_str().unwrap().len(), 32);
         assert_eq!(v["default_unit"], "mm");
         assert_eq!(v["schema"], 1);
+    }
+
+    #[test]
+    fn people_point_and_agents_show() {
+        use ryu_session::live::{Kind, SelectMode, Style};
+        let (_d, root) = catalogue();
+        for n in ["A-1", "B-1"] {
+            ask(
+                &root,
+                Request::ItemCreate {
+                    fields: Default::default(),
+                    number: Some(n.into()),
+                    next: None,
+                    expected_revision: None,
+                },
+            )
+            .unwrap();
+        }
+        let line = ask(
+            &root,
+            Request::BomAdd {
+                item: "A-1".into(),
+                fields: serde_json::from_value(json!({"child": "B-1", "quantity": "2"})).unwrap(),
+                expected_revision: None,
+            },
+        )
+        .unwrap()["line"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let a = ask(&root, Request::ItemShow { item: "A-1".into() }).unwrap()["item"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let mut slot = None;
+        let mut live = Live::<Plm>::new();
+        let dana = live.hello(Kind::Human, Some("Dana"), None).unwrap();
+        let mut at = |live: &mut Live<Plm>, me: Option<&str>, r: Request| {
+            handle_safely(&mut slot, Some(live), me, &root, r).map(|a| a.result)
+        };
+        // The person picks by number; the session keeps the ID.
+        let s = at(
+            &mut live,
+            Some(&dana),
+            Request::SelectionSet {
+                refs: vec!["item/A-1".into()],
+                mode: SelectMode::Replace,
+            },
+        )
+        .unwrap();
+        assert_eq!(s["selection"], json!([format!("item/{a}")]));
+        // An agent reads what the one person points at.
+        let g = at(&mut live, None, Request::SelectionGet { participant: None }).unwrap();
+        assert_eq!(g["participant"], json!(dana));
+        assert_eq!(g["objects"][0]["number"], "A-1");
+        // An agent shows a line: the person's item opens at its BOM.
+        let v = at(
+            &mut live,
+            None,
+            Request::ViewShow {
+                reference: format!("item/A-1/line/{line}"),
+                participant: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(v["shown"], json!([dana]));
+        assert_eq!(v["tab"], "bom");
+        let view = at(&mut live, None, Request::ViewGet { participant: None }).unwrap();
+        assert_eq!(view["view"]["item"], json!(a));
+        assert_eq!(view["view"]["tab"], "bom");
+        assert_ne!(view["view"]["shown_by"], json!(dana));
+        assert_eq!(
+            live.get(&dana).unwrap().selection,
+            [format!("item/{a}/line/{line}")]
+        );
+        // The person's own view, its filter checked.
+        let e = at(
+            &mut live,
+            Some(&dana),
+            Request::ViewSet {
+                item: None,
+                tab: Some("scene".into()),
+                list: None,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(e.code, Code::InvalidParam);
+        let mine = at(
+            &mut live,
+            Some(&dana),
+            Request::ViewSet {
+                item: Some("B-1".into()),
+                tab: Some("findings".into()),
+                list: Some(crate::view::List {
+                    sort: Some("number".into()),
+                    ..Default::default()
+                }),
+            },
+        )
+        .unwrap();
+        assert_eq!(mine["view"]["shown_by"], json!(dana));
+        // Highlights and status take references the same way.
+        let h = at(
+            &mut live,
+            None,
+            Request::HighlightSet {
+                refs: vec!["item/A-1".into()],
+                style: Style::Pending,
+                label: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(h["highlights"][0]["entities"], json!([format!("item/{a}")]));
+        let st = at(
+            &mut live,
+            None,
+            Request::ActivitySet {
+                status: "renumbering".into(),
+                refs: vec!["item/A-1".into()],
+            },
+        )
+        .unwrap();
+        assert_eq!(st["status"]["text"], "renumbering");
+        assert!(
+            at(&mut live, None, Request::HighlightClear { style: None }).unwrap()["highlights"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        // Nothing of it in process.
+        for r in [
+            Request::SelectionGet { participant: None },
+            Request::ViewShow {
+                reference: "item/A-1".into(),
+                participant: None,
+            },
+            Request::RequestCancel {
+                token: "t".into(),
+                name: None,
+            },
+        ] {
+            assert_eq!(ask(&root, r).unwrap_err().code, Code::NoLiveSession);
+        }
+    }
+
+    #[test]
+    fn revisions_are_computed_once_per_generation() {
+        let (_d, root) = catalogue();
+        let mut slot = None;
+        handle_safely(&mut slot, None, None, &root, Request::ProjectInfo {}).unwrap();
+        let s = slot.as_ref().unwrap();
+        let a = s.revisions();
+        assert!(
+            std::sync::Arc::ptr_eq(&a, &s.revisions()),
+            "kept while nothing moves"
+        );
+        handle_safely(
+            &mut slot,
+            None,
+            None,
+            &root,
+            Request::ItemCreate {
+                fields: Default::default(),
+                number: Some("A-1".into()),
+                next: None,
+                expected_revision: None,
+            },
+        )
+        .unwrap();
+        handle_safely(&mut slot, None, None, &root, Request::ProjectInfo {}).unwrap();
+        let b = slot.as_ref().unwrap().revisions();
+        assert!(!std::sync::Arc::ptr_eq(&a, &b));
+        assert_eq!(b.len(), a.len() + 1, "the new item is in it");
     }
 }

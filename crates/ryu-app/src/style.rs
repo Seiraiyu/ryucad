@@ -461,6 +461,49 @@ pub fn apply(ctx: &egui::Context, look: Look, contrast: Contrast) {
 /// Simulated colour vision and CIEDE2000, for apps' colour tests.
 pub mod vision;
 
+/// WCAG's relative luminance of an sRGB colour.
+pub fn luminance(c: Color32) -> f64 {
+    let lin = |u: u8| {
+        let x = f64::from(u) / 255.0;
+        if x <= 0.04045 {
+            x / 12.92
+        } else {
+            ryu_math::pow((x + 0.055) / 1.055, 2.4)
+        }
+    };
+    0.2126 * lin(c.r()) + 0.7152 * lin(c.g()) + 0.0722 * lin(c.b())
+}
+
+/// WCAG's contrast ratio of two colours, 1 to 21.
+pub fn contrast(a: Color32, b: Color32) -> f64 {
+    let (x, y) = (luminance(a), luminance(b));
+    (x.max(y) + 0.05) / (x.min(y) + 0.05)
+}
+
+/// The least a mark needs against what it is drawn on (WCAG 2.1's
+/// non-text contrast).
+pub const ON_BACKGROUND: f64 = 3.0;
+
+/// `c`, or the nearest shade of it at least `ratio` against
+/// `background`: mixed toward black on a light background, toward white
+/// on a dark one, in 5 % steps (#879). The shell's constants never
+/// change, so no picture of a colour that already passes moves.
+pub fn held(c: Color32, background: Color32, ratio: f64) -> Color32 {
+    if contrast(c, background) >= ratio {
+        return c;
+    }
+    let toward: u8 = if luminance(background) > 0.18 { 0 } else { 255 };
+    let mix = |u: u8, t: f32| (f32::from(u) * (1.0 - t) + f32::from(toward) * t).round() as u8;
+    for k in 1..=20 {
+        let t = k as f32 * 0.05;
+        let x = Color32::from_rgba_unmultiplied(mix(c.r(), t), mix(c.g(), t), mix(c.b(), t), c.a());
+        if contrast(x, background) >= ratio {
+            return x;
+        }
+    }
+    Color32::from_gray(toward)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -666,5 +709,25 @@ mod tests {
             assert!(!look.style(false).visuals.dark_mode);
             assert_eq!(look.style(false).visuals.window_shadow, Shadow::NONE);
         }
+    }
+
+    #[test]
+    fn a_mark_is_held_to_its_background() {
+        use egui::Color32;
+        let (black, white) = (Color32::BLACK, Color32::WHITE);
+        assert!((super::contrast(black, white) - 21.0).abs() < 1e-9);
+        assert!((super::contrast(white, white) - 1.0).abs() < 1e-9);
+        let yellow = Color32::from_rgb(250, 230, 80);
+        assert!(super::contrast(yellow, white) < ON_BACKGROUND);
+        let held_light = held(yellow, white, ON_BACKGROUND);
+        assert!(
+            super::contrast(held_light, white) >= ON_BACKGROUND,
+            "{held_light:?}"
+        );
+        let navy = Color32::from_rgb(20, 30, 90);
+        let dark = Color32::from_gray(27);
+        assert!(super::contrast(held(navy, dark, ON_BACKGROUND), dark) >= ON_BACKGROUND);
+        // A colour that passes is left alone.
+        assert_eq!(held(black, white, ON_BACKGROUND), black);
     }
 }

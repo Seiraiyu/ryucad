@@ -12,6 +12,8 @@
 #                           ryuplm-v0.1.0 (default: the newest release)
 #   RYUPLM_HOME             install root (default: ~/.ryuplm); the binary goes in bin/
 #   RYUPLM_NO_MODIFY_PATH   set to 1 to leave shell profiles alone
+#   RYUPLM_NO_APP           set to 1 to install the ryuplm command only, not
+#                           the desktop app (servers, CI)
 #   GH_TOKEN, GITHUB_TOKEN  a token for a private repository (else `gh auth token`)
 #   RYUPLM_DOWNLOAD_BASE    a mirror laid out as <base>/releases (the API's
 #                           list of releases) and <base>/download/<tag>/<asset>;
@@ -99,6 +101,67 @@ newest() {
     ' "$1"
 }
 
+# register BIN SHARE: lets the desktop open catalogues in the app: a
+# desktop entry and the catalogue MIME type on Linux, ~/Applications/ryuplm.app
+# on macOS. Running it again replaces them.
+register() {
+    case "$(uname -s)" in
+        Linux)
+            data=${XDG_DATA_HOME:-$HOME/.local/share}
+            mkdir -p "$data/applications" "$data/mime/packages"
+            # The program, quoted only if it must be: xdg-open's generic
+            # mode can't run a quoted one. Inside quotes the desktop-entry
+            # spec escapes \ " ` and $ with a backslash, itself escaped.
+            exe="$1/ryuplm-app"
+            case "$exe" in
+                *[!A-Za-z0-9/._+-]*)
+                    exe=$(printf '%s' "$exe" | sed 's/[\\"`$]/\\\\&/g')
+                    exe="\"$exe\""
+                    ;;
+            esac
+            # As a sed replacement, & | and \ are special.
+            exe=$(printf '%s' "$exe" | sed 's/[&|\\]/\\&/g')
+            sed "s|@EXEC@|$exe|g" "$2/ryuplm.desktop" >"$data/applications/ryuplm.desktop"
+            cp "$2/ryuplm.xml" "$data/mime/packages/ryuplm.xml"
+            if command -v update-mime-database >/dev/null 2>&1; then
+                update-mime-database "$data/mime" >/dev/null 2>&1 || true
+            fi
+            if command -v update-desktop-database >/dev/null 2>&1; then
+                update-desktop-database "$data/applications" >/dev/null 2>&1 || true
+            fi
+            ;;
+        Darwin)
+            # A launcher compiled here, so it knows where the binaries are.
+            if command -v osacompile >/dev/null 2>&1; then
+                mkdir -p "$HOME/Applications"
+                sed "s|@BIN@|$1|g" "$2/ryuplm.applescript" >"$tmp/ryuplm.applescript"
+                app="$HOME/Applications/ryuplm.app"
+                rm -rf "$app"
+                # osacompile signs what it makes and says so on stderr
+                # ("replacing existing signature"); only real faults show.
+                status=0
+                osacompile -o "$app" "$tmp/ryuplm.applescript" 2>"$tmp/osacompile.err" || status=$?
+                grep -v 'replacing existing signature' "$tmp/osacompile.err" >&2 || true
+                [ "$status" -eq 0 ] || die "could not compile the launcher $app"
+                # Offered by Finder (Open With, not the default) for
+                # folders and JSON files: ryuplm.json is plain JSON.
+                plutil -replace CFBundleIdentifier -string com.seiraiyu.ryuplm "$app/Contents/Info.plist"
+                plutil -replace CFBundleDocumentTypes -json '[
+                    {"CFBundleTypeName": "Folder", "CFBundleTypeRole": "Viewer",
+                     "LSHandlerRank": "Alternate", "LSItemContentTypes": ["public.folder"]},
+                    {"CFBundleTypeName": "ryuplm catalogue", "CFBundleTypeRole": "Viewer",
+                     "LSHandlerRank": "Alternate", "LSItemContentTypes": ["public.json"]}
+                ]' "$app/Contents/Info.plist"
+                codesign --force --sign - "$app" >/dev/null 2>&1 || true
+                lsregister=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+                if [ -x "$lsregister" ]; then
+                    "$lsregister" -f "$app" >/dev/null 2>&1 || true
+                fi
+            fi
+            ;;
+    esac
+}
+
 main() {
     target=$(detect_target)
     token=$(find_token)
@@ -173,6 +236,19 @@ main() {
     mv -f "$bin/.ryuplm.new" "$bin/ryuplm"
     # Daemons from the old version must not keep running.
     "$bin/ryuplm" daemon stop --all >/dev/null 2>&1 || true
+
+    # The desktop app, unless only the command is wanted.
+    staged="$tmp/ryuplm-$version-$target"
+    if [ "${RYUPLM_NO_APP:-0}" = 1 ]; then
+        say "RYUPLM_NO_APP=1: the desktop app is not installed"
+    elif [ -f "$staged/ryuplm-app" ]; then
+        cp "$staged/ryuplm-app" "$bin/.ryuplm-app.new"
+        chmod 755 "$bin/.ryuplm-app.new"
+        mv -f "$bin/.ryuplm-app.new" "$bin/ryuplm-app"
+        register "$bin" "$staged/share"
+        "$bin/ryuplm-app" --version >/dev/null 2>&1 ||
+            say "warning: ryuplm-app doesn't run on this machine (on Linux it needs glibc 2.35 or newer); the ryuplm command works without it"
+    fi
 
     # PATH.
     case ":$PATH:" in

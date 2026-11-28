@@ -11,10 +11,17 @@
 # service's contract (version's schema_outputs, a list window, git
 # attributes, reps, resolve and index), and the daemon stopped again.
 #
-#   scripts/smoke-ryuplm.sh path/to/ryuplm
+#   scripts/smoke-ryuplm.sh path/to/ryuplm [path/to/ryuplm-app]
+#
+# With the app, its --smoke frame is drawn on the session's catalogue; no
+# adapter is a skip unless RYUPLM_REQUIRE_GPU=1.
 set -eu
 
 exe=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
+app=""
+if [ -n "${2:-}" ]; then
+    app=$(cd "$(dirname "$2")" && pwd)/$(basename "$2")
+fi
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/catalogue"
@@ -160,6 +167,24 @@ run index --out "$work/index.jsonl"
     echo "FAIL ryuplm index wrote nothing"
     exit 1
 }
+# The window's frame on this catalogue (design 938), through a daemon.
+if [ -n "$app" ]; then
+    out=$(PATH="$(dirname "$exe"):$PATH" "$app" --smoke "$work/catalogue") || true
+    case "$out" in
+        '{"ok":true'*) echo "ok   ryuplm-app --smoke: $out" ;;
+        *"No graphics adapter"*)
+            if [ "${RYUPLM_REQUIRE_GPU:-}" = 1 ]; then
+                echo "FAIL ryuplm-app --smoke: $out"
+                exit 1
+            fi
+            echo "skip ryuplm-app --smoke: no graphics adapter"
+            ;;
+        *)
+            echo "FAIL ryuplm-app --smoke: $out"
+            exit 1
+            ;;
+    esac
+fi
 # The contract's requests started a daemon again: stop it, or on Windows it
 # holds the catalogue's folder and the exit trap can't remove it.
 run daemon stop

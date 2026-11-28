@@ -177,6 +177,10 @@ pub struct ListAsk {
     pub state: Option<String>,
     pub make_buy: Option<String>,
     pub faults: Option<String>,
+    /// An import mapping's name: items it made or updated.
+    pub source: Option<String>,
+    /// Count every item by class, state, findings and import too.
+    pub counts: bool,
     pub sort: Option<String>,
     pub offset: Option<usize>,
     pub limit: Option<usize>,
@@ -243,6 +247,7 @@ pub fn list(session: &mut Session, ask: &ListAsk) -> Result<Value> {
                 .as_ref()
                 .is_none_or(|m| r.make_buy.as_ref() == Some(m))
             && faults.is_none_or(|errors| if errors { r.errors > 0 } else { r.warnings > 0 })
+            && ask.source.as_ref().is_none_or(|s| r.sources.contains(s))
             && needle.as_ref().is_none_or(|t| r.hay.contains(t.as_str()));
         if !keep {
             continue;
@@ -260,14 +265,43 @@ pub fn list(session: &mut Session, ask: &ListAsk) -> Result<Value> {
         }
         total += 1;
     }
+    let counts = ask.counts.then(|| counts_of(listing.rows()));
     crate::listing::put(session, listing);
-    Ok(json!({
+    let mut v = json!({
         "schema": crate::OUTPUT_SCHEMA,
         "total": total,
         "offset": offset,
         "count": rows.len(),
         "items": rows,
-    }))
+    });
+    if let Some(c) = counts {
+        v["counts"] = c;
+    }
+    Ok(v)
+}
+
+/// `item.list --counts`: every item (no filter) counted by class, state,
+/// findings and import, in one pass over the list's rows, so a window's
+/// Navigator needs one request rather than one per count.
+fn counts_of(rows: &[crate::listing::Row]) -> Value {
+    use std::collections::BTreeMap;
+    let mut class: BTreeMap<&str, u64> = BTreeMap::new();
+    let mut state: BTreeMap<&str, u64> = BTreeMap::new();
+    let mut source: BTreeMap<&str, u64> = BTreeMap::new();
+    let (mut errors, mut warnings) = (0u64, 0u64);
+    for r in rows {
+        if let Some(c) = &r.class {
+            *class.entry(c).or_default() += 1;
+        }
+        *state.entry(&r.state).or_default() += 1;
+        for s in &r.sources {
+            *source.entry(s).or_default() += 1;
+        }
+        errors += u64::from(r.errors > 0);
+        warnings += u64::from(r.warnings > 0);
+    }
+    json!({"all": rows.len(), "class": class, "state": state, "source": source,
+           "errors": errors, "warnings": warnings})
 }
 
 /// The item `item` names, its revision checked against `expected`.
@@ -603,6 +637,8 @@ mod tests {
                 state: None,
                 make_buy: None,
                 faults: None,
+                source: None,
+                counts: false,
                 sort: None,
                 offset: None,
                 limit: None,
@@ -749,5 +785,96 @@ mod tests {
         );
         let both = edit(json!({"ledger": true, "class": "x"})).unwrap_err();
         assert_eq!(both.code, crate::error::Code::Usage);
+    }
+
+    #[test]
+    fn a_list_by_the_import_that_made_its_items() {
+        let (_d, root) = catalogue();
+        let mk = |n: &str| {
+            ask(
+                &root,
+                Request::ItemCreate {
+                    fields: Default::default(),
+                    number: Some(n.into()),
+                    next: None,
+                    expected_revision: None,
+                },
+            )
+            .unwrap()["item"]["id"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        let a = mk("A-1");
+        mk("B-1");
+        // Provenance as an import writes it (0.C): `source.<mapping>`.
+        let path = root.join(crate::ids::item_path(
+            &crate::id::Id::parse(&a, "item").unwrap(),
+        ));
+        let mut v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        v["source"] = json!({"erp": {"key": "42", "digest": "ab"}});
+        std::fs::write(&path, crate::canonical::to_string(&v)).unwrap();
+        let by = |s: &str| {
+            ask(
+                &root,
+                serde_json::from_value(json!({"method": "item.list", "params": {"source": s}}))
+                    .unwrap(),
+            )
+            .unwrap()
+        };
+        assert_eq!(by("erp")["total"], 1);
+        assert_eq!(by("erp")["items"][0]["number"], "A-1");
+        assert_eq!(by("plm")["total"], 0);
+    }
+
+    #[test]
+    fn counts_are_every_item_by_class_state_finding_and_import() {
+        let (_d, root) = catalogue();
+        ask(
+            &root,
+            serde_json::from_value(json!({"method": "settings.edit", "params": {"class": "x"}}))
+                .unwrap(),
+        )
+        .unwrap();
+        for (n, class) in [("A-1", Some("x")), ("B-1", None), ("C-1", Some("x"))] {
+            ask(
+                &root,
+                Request::ItemCreate {
+                    fields: super::Fields {
+                        class: class.map(str::to_owned),
+                        ..Default::default()
+                    },
+                    number: Some(n.into()),
+                    next: None,
+                    expected_revision: None,
+                },
+            )
+            .unwrap();
+        }
+        let v = ask(
+            &root,
+            serde_json::from_value(json!({"method": "item.list",
+                "params": {"counts": true, "limit": 0, "class": "x"}}))
+            .unwrap(),
+        )
+        .unwrap();
+        // The counts are the whole catalogue's, whatever the filter.
+        assert_eq!(v["total"], 2);
+        let c = &v["counts"];
+        assert_eq!(c["all"], 3);
+        assert_eq!(c["class"], json!({"x": 2}));
+        assert_eq!(c["state"], json!({"in_work": 3}));
+        assert_eq!(
+            (c["errors"].clone(), c["source"].clone()),
+            (json!(0), json!({}))
+        );
+        // Without --counts, nothing more is said.
+        let plain = ask(
+            &root,
+            serde_json::from_value(json!({"method": "item.list", "params": {}})).unwrap(),
+        )
+        .unwrap();
+        assert!(plain.get("counts").is_none());
     }
 }

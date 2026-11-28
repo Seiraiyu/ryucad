@@ -40,24 +40,7 @@ fn owners_of<'a>(scene: &'a Scene, r: &'a str) -> impl Iterator<Item = usize> + 
         .map(|(i, _)| i)
 }
 
-/// WCAG's relative luminance of an sRGB colour.
-fn luminance(c: Color32) -> f64 {
-    let lin = |u: u8| {
-        let x = f64::from(u) / 255.0;
-        if x <= 0.04045 {
-            x / 12.92
-        } else {
-            ryu_math::pow((x + 0.055) / 1.055, 2.4)
-        }
-    };
-    0.2126 * lin(c.r()) + 0.7152 * lin(c.g()) + 0.0722 * lin(c.b())
-}
-
-/// WCAG's contrast ratio of two colours, 1 to 21.
-pub fn contrast(a: Color32, b: Color32) -> f64 {
-    let (x, y) = (luminance(a), luminance(b));
-    (x.max(y) + 0.05) / (x.min(y) + 0.05)
-}
+pub use ryu_app::style::contrast;
 
 /// The least needed for a mark on paper (WCAG 2.1's non-text contrast).
 pub const ON_PAPER: f64 = 3.0;
@@ -78,21 +61,10 @@ pub const SELECTED_ON_PAPER: f64 = 4.5;
 /// lightness where their hues look alike.
 pub const HOVER_ON_PAPER: f64 = 7.5;
 
-/// [`on_paper`] to `ratio` rather than [`ON_PAPER`].
+/// [`on_paper`] to `ratio` rather than [`ON_PAPER`]
+/// (`ryu_app::style::held`, #879).
 pub fn on_paper_at(c: Color32, paper: Color32, ratio: f64) -> Color32 {
-    if contrast(c, paper) >= ratio {
-        return c;
-    }
-    let toward: u8 = if luminance(paper) > 0.18 { 0 } else { 255 };
-    let mix = |u: u8, t: f32| (f32::from(u) * (1.0 - t) + f32::from(toward) * t).round() as u8;
-    for k in 1..=20 {
-        let t = k as f32 * 0.05;
-        let x = Color32::from_rgba_unmultiplied(mix(c.r(), t), mix(c.g(), t), mix(c.b(), t), c.a());
-        if contrast(x, paper) >= ratio {
-            return x;
-        }
-    }
-    Color32::from_gray(toward)
+    ryu_app::style::held(c, paper, ratio)
 }
 
 pub fn marks(

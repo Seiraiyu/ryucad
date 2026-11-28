@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=ryuplm
+GenericName=Product lifecycle management
+Comment=A catalogue's items, BOMs and findings, pointed at by people and agents
+Exec=@EXEC@ %f
+Terminal=false
+Categories=Development;Engineering;Office;
+MimeType=application/x-ryuplm-catalogue;
+Keywords=PLM;PDM;BOM;part number;item;agent;

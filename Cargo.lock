@@ -5258,6 +5258,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryuplm-app"
+version = "0.0.0"
+dependencies = [
+ "eframe",
+ "egui_kittest",
+ "egui_tiles",
+ "image",
+ "pollster 0.4.0",
+ "rfd",
+ "ryu-app",
+ "ryu-doc",
+ "ryu-session",
+ "ryuplm",
+ "serde_json",
+ "tempfile",
+ "windows-sys 0.61.2",
+ "winit",
+]
+
+[[package]]
 name = "ryusch"
 version = "0.0.0"
 dependencies = [

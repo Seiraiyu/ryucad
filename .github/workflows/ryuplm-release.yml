@@ -88,14 +88,21 @@ jobs:
       matrix:
         # ryucad's release targets: static musl on Linux, the static CRT
         # on Windows.
+        # `target` is the CLI's (and the archive's); `app` is ryuplm-app's.
+        # On Linux the app is a glibc build on Ubuntu 22.04: winit and wgpu
+        # load the desktop's libraries at run time, which a static musl
+        # binary can't (ryueda-release.yml does the same).
         include:
-          - { os: ubuntu-22.04, target: x86_64-unknown-linux-musl }
-          - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-musl }
-          - { os: macos-latest, target: aarch64-apple-darwin }
-          - { os: windows-latest, target: x86_64-pc-windows-msvc }
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-musl, app: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-musl, app: aarch64-unknown-linux-gnu }
+          - { os: macos-latest, target: aarch64-apple-darwin, app: aarch64-apple-darwin }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, app: x86_64-pc-windows-msvc }
     runs-on: ${{ matrix.os }}
     env:
       TARGET: ${{ matrix.target }}
+      APP: ${{ matrix.app }}
+      # The app's smoke run must draw: lavapipe, Metal or WARP.
+      RYUPLM_REQUIRE_GPU: "1"
       NAME: ryuplm-${{ needs.version.outputs.version }}-${{ matrix.target }}
       CC_x86_64_unknown_linux_musl: musl-gcc
       CC_aarch64_unknown_linux_musl: musl-gcc
@@ -105,10 +112,11 @@ jobs:
       - name: stamp the version
         run: sh scripts/stamp-version.sh "${{ needs.version.outputs.version }}"
         shell: bash
-      - run: rustup toolchain install && rustup target add "$TARGET"
+      - run: rustup toolchain install && rustup target add "$TARGET" "$APP"
         shell: bash
       - if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
+        # musl for the CLI; lavapipe so the app's smoke run can draw.
+        run: sudo apt-get update && sudo apt-get install -y musl-tools mesa-vulkan-drivers
       - uses: Swatinem/rust-cache@v2
         with:
           key: ryuplm-${{ matrix.target }}
@@ -116,15 +124,25 @@ jobs:
         run: cargo test --locked -p ryuplm --release --target "$TARGET" --test determinism
         shell: bash
       - name: build
-        run: RYUPLM_COMMIT="${GITHUB_SHA::12}" cargo build --locked --release -p ryuplm --target "$TARGET"
         shell: bash
+        run: |
+          RYUPLM_COMMIT="${GITHUB_SHA::12}" cargo build --locked --release -p ryuplm --target "$TARGET"
+          RYUPLM_COMMIT="${GITHUB_SHA::12}" cargo build --locked --release -p ryuplm-app --target "$APP"
       - name: stage
         shell: bash
         run: |
           x=""
           [ "$RUNNER_OS" = Windows ] && x=".exe"
-          mkdir -p "dist/$NAME"
-          cp "target/$TARGET/release/ryuplm$x" LICENSE NOTICE "dist/$NAME/"
+          mkdir -p "dist/$NAME/licenses"
+          cp "target/$TARGET/release/ryuplm$x" "target/$APP/release/ryuplm-app$x" LICENSE NOTICE "dist/$NAME/"
+          # The app's embedded fonts' and icons' licences.
+          cp crates/ryu-app/fonts/LICENSES.md crates/ryu-app/fonts/Inter-LICENSE.txt \
+            crates/ryu-app/fonts/JetBrainsMono-OFL.txt crates/ryu-app/fonts/Phosphor-LICENSE.txt \
+            "dist/$NAME/licenses/"
+          case "$RUNNER_OS" in
+            Linux) mkdir -p "dist/$NAME/share" && cp packaging/linux/ryuplm.desktop packaging/linux/ryuplm.xml "dist/$NAME/share/" ;;
+            macOS) mkdir -p "dist/$NAME/share" && cp packaging/macos/ryuplm.applescript "dist/$NAME/share/" ;;
+          esac
       - name: smoke test
         shell: bash
         run: |
@@ -136,7 +154,10 @@ jobs:
           echo "$out" | grep -q "\"target\":\"$TARGET\""
           echo "$out" | grep -q "\"ryuplm\":\"${{ needs.version.outputs.version }}\""
           echo "$out" | grep -q "\"commit\":\"${GITHUB_SHA::12}\""
-          sh scripts/smoke-ryuplm.sh "$exe"
+          app=$("dist/$NAME/ryuplm-app$x" --version)
+          echo "$app"
+          echo "$app" | grep -q "\"commit\":\"${GITHUB_SHA::12}\""
+          sh scripts/smoke-ryuplm.sh "$exe" "dist/$NAME/ryuplm-app$x"
       - name: package (Unix)
         if: runner.os != 'Windows'
         run: tar -czf "dist/$NAME.tar.gz" -C dist "$NAME"
@@ -216,6 +237,7 @@ jobs:
         name: fresh shells find the installed version
         run: |
           bash -lc 'ryuplm version' | grep -q "\"ryuplm\":\"$WANT\""
+          bash -lc 'ryuplm-app --version' | grep -q "\"ryuplm\":\"$WANT\""
           if command -v zsh >/dev/null; then zsh -c 'ryuplm version' | grep -q "\"ryuplm\":\"$WANT\""; fi
       - if: runner.os == 'Windows'
         shell: pwsh
@@ -230,3 +252,5 @@ jobs:
           $out = powershell -NoProfile -Command "`$env:Path = '$userPath;' + `$env:Path; ryuplm version"
           $out
           if ($out -notmatch "`"ryuplm`":`"$env:WANT`"") { throw 'wrong version on PATH' }
+          $app = powershell -NoProfile -Command "`$env:Path = '$userPath;' + `$env:Path; ryuplm-app --version"
+          if ($app -notmatch "`"ryuplm`":`"$env:WANT`"") { throw 'wrong app on PATH' }

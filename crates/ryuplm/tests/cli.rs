@@ -324,6 +324,15 @@ fn every_protocol_method_has_a_command() {
         ("activity.log", &["history"]),
         ("undo", &["undo"]),
         ("redo", &["redo"]),
+        ("selection.get", &["selection"]),
+        ("selection.set", &["select"]),
+        ("highlight.set", &["highlight"]),
+        ("highlight.clear", &["highlight"]),
+        ("activity.set", &["status"]),
+        ("view.get", &["view"]),
+        ("view.set", &["view", "set"]),
+        ("view.show", &["show"]),
+        ("request.cancel", &["cancel"]),
         ("session.hello", &["participants"]),
         ("participant.list", &["participants"]),
         ("subscribe", &["watch"]),
@@ -860,5 +869,99 @@ fn the_services_answers_from_the_cli() {
             (1, &json!("rev_not_found")),
             "{v}"
         );
+    }
+}
+
+/// The live session from the CLI (design 938): an agent selects by
+/// number and the session keeps the ID; highlights, status and a view;
+/// a show with nobody attached shows no one; and none of it in process.
+#[test]
+fn live_requests_from_the_cli() {
+    let p = Pair::project();
+    let d = p.daemon.clone();
+    assert_eq!(p.run_in(&d, &["item", "create", "A-1"]).0, 0);
+    let (c, v) = p.run_in(&d, &["select", "item/A-1"]);
+    assert_eq!(c, 0, "{v}");
+    let picked = v["result"]["selection"][0].as_str().unwrap().to_owned();
+    assert!(
+        picked.starts_with("item/") && picked != "item/A-1",
+        "{picked}"
+    );
+    let (_, who) = p.run_in(&d, &["participants"]);
+    let agent = who["result"]["participants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|x| x["name"] == "agent")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (_, s) = p.run_in(&d, &["selection", "--of", &agent]);
+    assert_eq!(s["result"]["objects"][0]["number"], "A-1");
+    for args in [
+        &["highlight", "item/A-1", "--style", "pending"][..],
+        &["highlight", "--clear"],
+        &["status", "renumbering", "--ref", "item/A-1"],
+        &[
+            "view", "set", "--item", "A-1", "--tab", "bom", "--sort", "number",
+        ],
+    ] {
+        let (c, v) = p.run_in(&d, args);
+        assert_eq!(c, 0, "{args:?}: {v}");
+    }
+    let (_, v) = p.run_in(&d, &["view", "--of", &agent]);
+    assert_eq!(v["result"]["view"]["tab"], "bom");
+    assert_eq!(v["result"]["view"]["list"]["sort"], "number");
+    let (c, v) = p.run_in(&d, &["show", "item/A-1"]);
+    assert_eq!((c, &v["result"]["shown"]), (0, &json!([])), "{v}");
+    let (_, v) = p.run_in(&d, &["select", "item/NOPE"]);
+    assert_eq!(v["error"]["code"], "item_not_found");
+    let (_, v) = p.run_in(&d, &["highlight", "item/A-1", "--style", "loud"]);
+    assert_eq!(v["error"]["code"], "usage");
+    let (_, v) = p.run_in(&p.direct, &["select", "item/A-1"]);
+    assert_eq!(v["error"]["code"], "no_live_session");
+}
+
+/// `ryuplm open` (design 938): RYUPLM_APP's program on the catalogue's
+/// folder, detached; `app_not_installed` (exit 4) when there is none.
+#[test]
+fn open_starts_the_app_or_says_it_isnt_installed() {
+    let p = Pair::project();
+    let missing = p.run.with_file_name("no-such-app");
+    let mut cmd = ryuplm(&p.run);
+    cmd.current_dir(p.direct.join("p"))
+        .env("RYUPLM_APP", &missing)
+        .arg("open");
+    let (code, v) = parse(cmd.output().unwrap(), &p.direct);
+    assert_eq!(
+        (code, v["error"]["code"].as_str()),
+        (4, Some("app_not_installed")),
+        "{v}"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let said = p.run.with_file_name("app-said");
+        let app = p.run.with_file_name("fake-app");
+        fs::write(
+            &app,
+            format!("#!/bin/sh\necho \"$1\" > '{}'\n", said.display()),
+        )
+        .unwrap();
+        fs::set_permissions(&app, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut cmd = ryuplm(&p.run);
+        cmd.current_dir(p.direct.join("p"))
+            .env("RYUPLM_APP", &app)
+            .arg("open");
+        let (code, v) = parse(cmd.output().unwrap(), &p.direct);
+        assert_eq!((code, &v["result"]["opened"]), (0, &json!("new")), "{v}");
+        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !said.exists() {
+            assert!(std::time::Instant::now() < end, "the app never ran");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let dir = fs::read_to_string(&said).unwrap();
+        assert_eq!(Path::new(dir.trim()), p.direct.join("p"));
     }
 }
