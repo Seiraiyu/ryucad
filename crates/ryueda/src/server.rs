@@ -487,6 +487,7 @@ fn working(
         Request::LibCheck {
             library,
             symbol,
+            footprint,
             summary,
             codes,
             ..
@@ -494,6 +495,7 @@ fn working(
             session.project(),
             library.as_deref(),
             symbol.as_deref(),
+            footprint.as_deref(),
             &crate::symlint::Listing { summary, codes },
         ),
         Request::Output {
@@ -649,6 +651,7 @@ fn read_at(session: &mut Session, p: &Project, commit: &str, req: Request) -> Re
         Request::LibCheck {
             library,
             symbol,
+            footprint,
             summary,
             codes,
             ..
@@ -656,6 +659,7 @@ fn read_at(session: &mut Session, p: &Project, commit: &str, req: Request) -> Re
             p,
             library.as_deref(),
             symbol.as_deref(),
+            footprint.as_deref(),
             &crate::symlint::Listing { summary, codes },
         ),
         Request::Scene {

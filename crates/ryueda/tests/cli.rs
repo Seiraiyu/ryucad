@@ -6754,6 +6754,50 @@ fn a_footprint_is_created_from_the_cli() {
         "invalid_param",
         1,
     );
+    let bad = p.ok(&["footprint", "create", "Short", "--ops", r#"[
+        {"op": "add", "pad": null, "number": "1", "kind": "smd", "shape": "rect", "at": ["-0.4", 0], "size": ["1", "1"], "layers": ["copper.top"]},
+        {"op": "add", "pad": null, "number": "2", "kind": "smd", "shape": "rect", "at": ["0.4", 0], "size": ["1", "1"], "layers": ["copper.top"]}
+    ]"#]);
+    let codes = |v: &Value| -> Vec<String> {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["code"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(
+        codes(&bad["findings"]),
+        ["footprint_pads_overlap", "footprint_no_reference"],
+        "{bad}"
+    );
+    let e = p.fails(&["lib", "check", "--footprint", "short"], "check_failed", 1);
+    let fps = e["details"]["report"]["footprints"].as_array().unwrap();
+    assert_eq!(fps.len(), 1, "{e}");
+    assert_eq!(fps[0]["reference"], "lib/self/footprint/short");
+    assert_eq!(e["details"]["report"]["errors"], 1);
+    let clean = p.ok(&["lib", "check", "--footprint", "test_pad"]);
+    assert_eq!(clean["footprints"][0]["findings"], json!([]), "{clean}");
+    assert!(
+        clean.get("symbols").is_none() || clean["symbols"] == json!([]),
+        "{clean}"
+    );
+    let only = p.fails(
+        &["lib", "check", "--code", "footprint_pads_overlap"],
+        "check_failed",
+        1,
+    );
+    assert_eq!(
+        only["details"]["report"]["footprints"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    p.fails(
+        &["lib", "check", "--footprint", "short", "--symbol", "x"],
+        "invalid_param",
+        1,
+    );
 }
 
 #[test]

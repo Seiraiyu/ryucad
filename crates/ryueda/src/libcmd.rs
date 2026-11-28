@@ -550,6 +550,7 @@ pub fn footprint_create(
     )?;
     let mut v = footprint_json(session.project().library(SELF)?, &id)?;
     v["added"] = json!(applied.added);
+    v["findings"] = fault::list(&crate::fplint::lint(&f));
     Ok(v)
 }
 
@@ -690,6 +691,7 @@ pub fn footprint_edit(
     )?;
     let mut v = footprint_json(session.project().library(SELF)?, &id)?;
     v["added"] = json!(applied.added);
+    v["findings"] = fault::list(&crate::fplint::lint(&f));
     v["components"] = faults_of(session.project(), &users);
     v["boards"] = Value::Array(
         was.into_iter()

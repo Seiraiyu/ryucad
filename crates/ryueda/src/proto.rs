@@ -208,6 +208,9 @@ pub enum Request {
         library: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         symbol: Option<String>,
+        /// One footprint (ryueda 7.F): only it is judged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        footprint: Option<String>,
         /// Counts by code, no findings (#711).
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         summary: bool,

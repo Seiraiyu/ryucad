@@ -218,5 +218,5 @@ schematic.rp2040.mitayi.s3.scene.dark ca0d6f6d2e885dc3c55c73aac6a08e4c
 schematic.rp2040.mitayi.s3.scene.light 98e5c359256c24398b08214bba586d59
 schematic.rp2040.mitayi.svg 2d342a31ce2338fa38cdaae35c9c5870
 schematic.rp2040.pdf 9a58fd91ecb4015fe6a5869c7d6e3c6c
-symbols.lint 674b164854a974b7bb718d051e7a1109
+symbols.lint f2fdbfa10806ee988b0f59140927aebf
 symbols.templates 1f056384595d56c1eaa9e9691f2eab7d

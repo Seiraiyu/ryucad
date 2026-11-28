@@ -787,6 +787,9 @@ enum LibCmd {
         /// One symbol (<id>, or lib/<alias>/symbol/<id>).
         #[arg(long)]
         symbol: Option<String>,
+        /// One footprint (<id>, or lib/<alias>/footprint/<id>).
+        #[arg(long)]
+        footprint: Option<String>,
         /// Each symbol's counts by code and the library's (by_code), not
         /// the findings: what to read first over a large library.
         #[arg(long)]
@@ -3180,12 +3183,14 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
         Command::Lib(LibCmd::Check {
             library,
             symbol,
+            footprint,
             summary,
             codes,
             rev,
         }) => Request::LibCheck {
             library: library.clone(),
             symbol: symbol.clone(),
+            footprint: footprint.clone(),
             summary: *summary,
             codes: codes.clone(),
             rev: rev.rev.clone(),
