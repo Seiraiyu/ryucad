@@ -32,8 +32,10 @@ fn replace_root(v: &mut Value, forms: &[&str]) {
 
 /// `ryueda` with the variables that keep a test's daemons and settings
 /// its own.
-fn ryueda(run: &Path) -> Command {
-    let mut cmd = Command::cargo_bin("ryueda").unwrap();
+/// As a std `Command`: a watcher spawned on the test's thread and waited
+/// for on another needs one (#1133); [`ryueda`] is assert_cmd's.
+fn ryueda_std(run: &Path) -> std::process::Command {
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_ryueda"));
     cmd.env("RYUEDA_RUNTIME_DIR", run)
         .env("RYUEDA_IDLE_TIMEOUT", "60")
         .env("RYUEDA_CONFIG_DIR", run.with_file_name("config"))
@@ -49,6 +51,11 @@ fn ryueda(run: &Path) -> Command {
         cmd.env_remove(v);
     }
     cmd
+}
+
+/// [`ryueda_std`], as assert_cmd's `Command`.
+fn ryueda(run: &Path) -> Command {
+    Command::from_std(ryueda_std(run))
 }
 
 fn parse(out: std::process::Output, root: &Path) -> (i32, Value) {
@@ -662,7 +669,7 @@ fn watchers_hear_of_library_changes() {
         assert_eq!(p.run_in(&p.daemon, sub, &args).0, 0);
     }
     let board = p.daemon.join("board");
-    let mut watch = ryueda(&p.run);
+    let mut watch = ryueda_std(&p.run);
     watch.current_dir(&board).args([
         "--as",
         "watcher",
@@ -672,7 +679,16 @@ fn watchers_hear_of_library_changes() {
         "--timeout",
         "20",
     ]);
-    let waiting = std::thread::spawn(move || watch.output().unwrap());
+    // Spawned here and only waited for on a thread: two threads spawning
+    // at once can hand one's output pipe to the other's child on macOS,
+    // which has no pipe2, and `output()` then waits for that child (#1133).
+    let child = watch
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let waiting = std::thread::spawn(move || child.wait_with_output().unwrap());
     // The watcher says hello, then subscribes at once.
     let attached = || {
         let (_, v) = p.run_in(&p.daemon, "board", &["participants"]);
@@ -692,6 +708,7 @@ fn watchers_hear_of_library_changes() {
     // sleep before the write was a guess a busy machine broke, as it
     // once did ryucad's.)
     let mut named = false;
+    let mut writes = 0;
     while !waiting.is_finished() {
         let args: &[&str] = match named {
             false => &["lib", "add", "passives", "../passives"],
@@ -699,11 +716,19 @@ fn watchers_hear_of_library_changes() {
         };
         assert_eq!(p.run_in(&p.daemon, "board", args).0, 0, "{args:?}");
         named = !named;
+        writes += 1;
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
     let (code, v) = parse(waiting.join().unwrap(), &p.daemon);
     assert_eq!(code, 0, "{v}");
     let notes = v["result"]["notifications"].as_array().unwrap();
+    // Two daemons started at once (#1133): the watcher on one, the writes
+    // on the other. Say what was heard and who serves the project.
+    let (_, status) = p.run_in(&p.daemon, "board", &["daemon", "status"]);
+    assert!(
+        !notes.is_empty(),
+        "the watcher heard nothing in 20 s of {writes} writes: {v}; daemon: {status}"
+    );
     assert_eq!(notes[0]["method"], "project.changed", "{v}");
     let changed = &notes[0]["params"]["changed"];
     assert_eq!(changed, &json!(["lib/passives", "project"]));
@@ -726,7 +751,7 @@ fn watchers_hear_of_pointing() {
     let p = Pair::breakout();
     p.ok(&["layout"]);
     let board = p.daemon.join("board");
-    let mut watch = ryueda(&p.run);
+    let mut watch = ryueda_std(&p.run);
     watch.current_dir(&board).args([
         "--as",
         "watcher",
@@ -736,7 +761,16 @@ fn watchers_hear_of_pointing() {
         "--timeout",
         "20",
     ]);
-    let waiting = std::thread::spawn(move || watch.output().unwrap());
+    // Spawned here and only waited for on a thread: two threads spawning
+    // at once can hand one's output pipe to the other's child on macOS,
+    // which has no pipe2, and `output()` then waits for that child (#1133).
+    let child = watch
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let waiting = std::thread::spawn(move || child.wait_with_output().unwrap());
     let attached = || {
         let (_, v) = p.run_in(&p.daemon, "board", &["participants"]);
         v["result"]["participants"]
@@ -3417,6 +3451,138 @@ fn regions_from_the_cli() {
     );
     let (code, _) = p.run_in(&p.daemon, "board", &["undo"]);
     assert_eq!(code, 0);
+}
+
+/// #1093: a one-sheet block laid out again whole keeps every hard rule, as
+/// laid out again by its sheet does, so `place` still takes an instruction.
+#[test]
+fn a_block_laid_out_again_whole_keeps_its_stacks_labels() {
+    let p = Pair::projects();
+    let data = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/kicad");
+    for top in [&p.direct, &p.daemon] {
+        copy_tree(&data, &top.join("kicad"));
+    }
+    p.ok_in(
+        "passives",
+        &[
+            "import",
+            "kicad",
+            "../kicad/symbols/Ryu_Test.kicad_sym",
+            "../kicad/footprints/Ryu_Test.pretty",
+            "--models",
+            "../kicad/3dmodels",
+        ],
+    );
+    // Warnings (an open pin) aren't the point: code and ok only.
+    let go = |args: &[&str]| {
+        let (code, v) = p.both_in("board", args);
+        assert_eq!((code, &v["ok"]), (0, &json!(true)), "{args:?}: {v}");
+        v["result"].clone()
+    };
+    for args in [
+        &["rail", "add", "VIN", "--id", "vin", "--voltage", "5 V"][..],
+        &["rail", "add", "GND", "--id", "gnd"],
+        &["block", "create", "Divider", "--id", "div"],
+        &["block", "edit", "div", "--add-port", "IN:in"],
+        &["block", "edit", "div", "--add-port", "OUT:out"],
+        &[
+            "component",
+            "add",
+            "div",
+            "--of",
+            "lib/passives/libcomp/ryu_test_r",
+            "--id",
+            "r1",
+            "--value",
+            "4k7",
+        ],
+        &[
+            "component",
+            "add",
+            "div",
+            "--of",
+            "lib/passives/libcomp/ryu_test_r_10k",
+            "--id",
+            "r2",
+        ],
+        &["connect", "div/r1/1", "port:IN"],
+        &["connect", "div/r1/2", "port:OUT"],
+        &["connect", "div/r2/1", "port:OUT"],
+        &["connect", "div/r2/2", "rail:GND"],
+        &["block", "create", "Top", "--id", "top"],
+        &["net", "add", "top", "SENSE_A", "--id", "sense_a"],
+        &["net", "add", "top", "SENSE_B", "--id", "sense_b"],
+        &[
+            "instance",
+            "add",
+            "top",
+            "--of",
+            "div",
+            "--id",
+            "a",
+            "--port",
+            "IN=rail:VIN",
+            "--port",
+            "OUT=SENSE_A",
+            "--suffix",
+            "_A",
+        ],
+        &[
+            "instance",
+            "add",
+            "top",
+            "--of",
+            "div",
+            "--id",
+            "b",
+            "--port",
+            "IN=rail:VIN",
+            "--port",
+            "OUT=SENSE_B",
+            "--suffix",
+            "_B",
+        ],
+        &[
+            "component",
+            "add",
+            "top",
+            "--of",
+            "lib/passives/libcomp/ryu_test_r",
+            "--id",
+            "r9",
+            "--value",
+            "100k",
+            "--refdes",
+            "R9",
+        ],
+        &["connect", "top/r9/1", "rail:VIN"],
+        &["connect", "top/r9/2", "SENSE_A"],
+        &[
+            "component",
+            "add",
+            "top",
+            "--of",
+            "lib/passives/libcomp/ryu_test_r",
+            "--id",
+            "r8",
+            "--value",
+            "1k",
+            "--refdes",
+            "R8",
+        ],
+        &["connect", "top/r8/1", "SENSE_B"],
+        &["design", "create", "Board", "--root", "top", "--id", "d"],
+        &["layout"],
+        &["place", "top", "beside R8 R9 below", "region Sensing R9 R8"],
+    ] {
+        go(args);
+    }
+    for whole in ["top", "top/s1", "top"] {
+        go(&["layout", "--relayout", whole]);
+        go(&["place", "top", "orient R8 90", "--dry-run"]);
+        let c = go(&["check"]);
+        assert!(!c.to_string().contains("\"connected\""), "{whole}: {c}");
+    }
 }
 
 /// Plan 2.A's paper fit: a small block takes A4, drawn and paged so.
@@ -6211,6 +6377,44 @@ fn parts_placed_by_constraint_from_the_cli() {
     assert!(placement_of(&p, "main", "R1").get("side").is_none());
 }
 
+/// #1095: two parts' designators on one another are a warning naming both,
+/// with `--ref-at` as its fix; moving one clears it.
+#[test]
+fn designators_overlapping_are_a_warning() {
+    let p = Pair::breakout();
+    p.ok(&[
+        "board", "create", "Main", "--design", "board", "--rect", "30,20", "--id", "main",
+    ]);
+    p.ok(&["board", "place", "main", "R1", "--at", "10,10"]);
+    let ops = json!([{"ref": "R2", "at": ["14", "10"], "ref_at": ["-4", "1.26"]}]).to_string();
+    let v = p.ok(&["board", "place", "main", "--ops", &ops]);
+    let f = v["drc"]["added"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["code"] == "silk_ref_overlap")
+        .unwrap_or_else(|| panic!("{v}"))
+        .clone();
+    assert_eq!(f["severity"], "warning", "{f}");
+    assert_eq!(f["refs"].as_array().unwrap().len(), 2, "{f}");
+    assert!(f["message"].as_str().unwrap().contains("--ref-at"), "{f}");
+    // The other parts aren't placed, so `board drc` exits 1 with its report.
+    let d = p.fails(&["board", "drc", "main"], "check_failed", 1);
+    assert!(
+        d["details"]["report"]["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x["id"] == f["id"]),
+        "{d}"
+    );
+    let m = p.ok(&["board", "place", "main", "R2", "--ref-at", "0,1.26"]);
+    assert!(
+        m["drc"]["removed"].as_array().unwrap().contains(&f["id"]),
+        "{m}"
+    );
+}
+
 /// Groups from the CLI (ryueda 7.C): listed, moved, turned and flipped
 /// rigidly, all or nothing; an unknown group refused.
 #[test]
@@ -6395,4 +6599,57 @@ fn text_and_drawings_from_the_cli() {
     }
     p.ok(&["board", "drawing", "delete", id, "rev"]);
     p.fails(&["board", "drawing", "delete", id, "rev"], "not_found", 1);
+}
+
+/// #1077: `ryueda config` reads and writes this machine's preferences.
+#[test]
+fn config_gets_and_sets_a_preference() {
+    let d = tempfile::tempdir().unwrap();
+    let run = d.path().join("run");
+    let config = |args: &[&str]| {
+        parse(
+            ryueda(&run)
+                .current_dir(d.path())
+                .arg("config")
+                .args(args)
+                .output()
+                .unwrap(),
+            d.path(),
+        )
+    };
+    let (code, v) = config(&["get", "pdm.dependents"]);
+    assert_eq!(
+        (code, &v["result"]["value"], &v["result"]["default"]),
+        (0, &json!([]), &json!(true)),
+        "{v}"
+    );
+    let (code, v) = config(&["set", "pdm.dependents", r#"["../boards"]"#]);
+    assert_eq!(
+        (code, &v["result"]["value"]),
+        (0, &json!(["../boards"])),
+        "{v}"
+    );
+    let file = fs::read_to_string(d.path().join("config/preferences.json")).unwrap();
+    assert!(file.contains("\"pdm.dependents\""), "{file}");
+    let (_, v) = config(&["get"]);
+    assert!(
+        v["result"]["preferences"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["key"] == "pdm.dependents" && p["default"] == false),
+        "{v}"
+    );
+    let (code, v) = config(&["set", "pdm.dependents", "../boards"]);
+    assert_ne!(code, 0);
+    assert_eq!(v["error"]["code"], "invalid_setting", "{v}");
+    let (code, v) = config(&["get", "nope"]);
+    assert_ne!(code, 0);
+    assert_eq!(v["error"]["code"], "unknown_setting", "{v}");
+    assert_eq!(config(&["set", "pdm.dependents", "[]"]).0, 0);
+    assert_eq!(
+        config(&["get", "pdm.dependents"]).1["result"]["default"],
+        true,
+        "its default: gone"
+    );
 }

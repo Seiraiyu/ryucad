@@ -128,11 +128,12 @@ impl Properties {
         for k in ["voltage", "current", "impedance"] {
             self.row(k, &n[k]);
         }
-        self.pins = v["pins"]
-            .as_array()
+        // Instance ports by name (#1105), else the references.
+        let names = strings(&v["pin_names"]);
+        self.pins = strings(&v["pins"])
             .into_iter()
-            .flatten()
-            .map(|p| (s(p), String::new()))
+            .enumerate()
+            .map(|(i, r)| (names.get(i).cloned().unwrap_or(r), String::new()))
             .collect();
     }
 
@@ -338,6 +339,22 @@ pub fn activity(v: &Value) -> Vec<Entry> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// #1105: Properties lists a port by its name.
+    #[test]
+    fn properties_name_ports_by_name() {
+        let mut p = Properties::default();
+        p.net(&json!({
+            "net": {"name": "SENSE_LOW"},
+            "pins": ["top/r8/1", "top/b/ivdzdac4ry"],
+            "pin_names": ["top/r8/1", "top/b/OUT"]
+        }));
+        assert!(p.pins.iter().any(|(n, _)| n == "top/b/OUT"), "{:?}", p.pins);
+        assert!(!p.pins.iter().any(|(n, _)| n.contains("ivdzdac4ry")));
+        // An older daemon's answer, without pin_names: the references.
+        p.net(&json!({"net": {"name": "X"}, "pins": ["top/b/ivdzdac4ry"]}));
+        assert_eq!(p.pins, [("top/b/ivdzdac4ry".to_owned(), String::new())]);
+    }
 
     #[test]
     fn what_properties_ask_and_show() {

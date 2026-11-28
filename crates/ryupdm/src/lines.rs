@@ -225,26 +225,63 @@ fn change(a: &Line, b: &Line, config: &Config, compared: &[&str]) -> Option<Valu
 /// key (in order, where a key has several), the rest added or removed;
 /// `{summary, added, removed, changed}`, each list in key order.
 pub fn diff(from: &[Line], to: &[Line], config: &Config, compared: &[&str]) -> Value {
+    diff_pairing(from, to, config, compared, &[])
+}
+
+/// [`diff`], then each removed line paired with the first added line of the
+/// same part and project whose `same` columns agree (ryueda: refdes, dnp)
+/// into one changed row, so a line whose key moved (a revalue) reads as
+/// changed (#1078). With `same` empty, [`diff`]. Lists in key order.
+pub fn diff_pairing(
+    from: &[Line],
+    to: &[Line],
+    config: &Config,
+    compared: &[&str],
+    same: &[&str],
+) -> Value {
     let mut keys: Vec<&str> = from.iter().chain(to).map(|l| l.key.as_str()).collect();
     keys.sort_unstable();
     keys.dedup();
-    let (mut added, mut removed, mut changed) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut added, mut removed, mut changed): (Vec<&Line>, Vec<&Line>, Vec<(&str, Value)>) =
+        Default::default();
     for k in keys {
         let a: Vec<&Line> = from.iter().filter(|l| l.key == k).collect();
         let b: Vec<&Line> = to.iter().filter(|l| l.key == k).collect();
         for (x, y) in a.iter().zip(&b) {
             if let Some(c) = change(x, y, config, compared) {
-                changed.push(c);
+                changed.push((k, c));
             }
         }
-        removed.extend(a.iter().skip(b.len()).map(|l| line_json(l)));
-        added.extend(b.iter().skip(a.len()).map(|l| line_json(l)));
+        removed.extend(a.iter().skip(b.len()).copied());
+        added.extend(b.iter().skip(a.len()).copied());
+    }
+    if !same.is_empty() {
+        let mut kept = Vec::new();
+        for r in removed {
+            let found = added.iter().position(|a| {
+                a.part == r.part
+                    && a.project == r.project
+                    && same.iter().all(|c| cell(a, c) == cell(r, c))
+            });
+            match found {
+                Some(i) => {
+                    let a = added.remove(i);
+                    if let Some(c) = change(r, a, config, compared) {
+                        changed.push((r.key.as_str(), c));
+                    }
+                }
+                None => kept.push(r),
+            }
+        }
+        removed = kept;
+        // Stable: rows of one key keep their order.
+        changed.sort_by(|x, y| x.0.cmp(y.0));
     }
     json!({
         "summary": {"added": added.len(), "removed": removed.len(), "changed": changed.len()},
-        "added": added,
-        "removed": removed,
-        "changed": changed,
+        "added": added.iter().map(|l| line_json(l)).collect::<Vec<_>>(),
+        "removed": removed.iter().map(|l| line_json(l)).collect::<Vec<_>>(),
+        "changed": changed.into_iter().map(|(_, c)| c).collect::<Vec<_>>(),
     })
 }
 
@@ -268,6 +305,41 @@ pub(crate) mod tests {
             defaulted: vec!["name".to_owned()],
             columns: BTreeMap::from([("refdes".to_owned(), "R1,R2".to_owned())]),
         }
+    }
+
+    /// #1078: a line whose key moved (a revalue) pairs by part and the
+    /// `same` columns into one changed row; with another designator it doesn't.
+    #[test]
+    fn a_line_whose_key_moved_pairs_by_part_and_the_same_columns() {
+        let config = Config::default();
+        let mut a = line("self/r", "working", 1);
+        a.key = "self/r\u{0}100k\u{0}".into();
+        a.columns.insert("refdes".into(), "R9".into());
+        a.columns.insert("value".into(), "100k".into());
+        let mut b = a.clone();
+        b.key = "self/r\u{0}330k\u{0}".into();
+        b.columns.insert("value".into(), "330k".into());
+        let cols = ["refdes", "value"];
+        assert_eq!(
+            diff(&[a.clone()], &[b.clone()], &config, &cols)["summary"],
+            json!({"added": 1, "removed": 1, "changed": 0})
+        );
+        let p = diff_pairing(&[a.clone()], &[b.clone()], &config, &cols, &["refdes"]);
+        assert_eq!(
+            p["summary"],
+            json!({"added": 0, "removed": 0, "changed": 1}),
+            "{p}"
+        );
+        assert_eq!(
+            p["changed"][0]["value"],
+            json!({"from": "100k", "to": "330k"})
+        );
+        let mut c = b;
+        c.columns.insert("refdes".into(), "R10".into());
+        assert_eq!(
+            diff_pairing(&[a], &[c], &config, &cols, &["refdes"])["summary"],
+            json!({"added": 1, "removed": 1, "changed": 0})
+        );
     }
 
     #[test]

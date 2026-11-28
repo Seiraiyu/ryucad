@@ -787,6 +787,39 @@ fn boms_diffs_and_where_used_at_labels_and_in_checkouts() {
         );
         git(&top, &["add", "-A"]);
         git(&top, &["commit", "-q", "-m", "board at B"]);
+        // #1078: the line revalued (every component placing it) reads as
+        // one changed row; then the files are put back.
+        let mut kept = Vec::new();
+        for b in std::fs::read_dir(board.join("blocks")).unwrap() {
+            for f in std::fs::read_dir(b.unwrap().path().join("components"))
+                .into_iter()
+                .flatten()
+            {
+                let f = f.unwrap().path();
+                let was = std::fs::read(&f).unwrap();
+                let mut v: Value = serde_json::from_slice(&was).unwrap();
+                if v["of"]["id"] == comp.as_str() {
+                    v["value"] = json!("330k");
+                    std::fs::write(
+                        &f,
+                        format!("{}\n", serde_json::to_string_pretty(&v).unwrap()),
+                    )
+                    .unwrap();
+                    kept.push((f, was));
+                }
+            }
+        }
+        assert!(!kept.is_empty());
+        let d2 = ok(&board, &run, daemon, &["bom", "diff"]);
+        assert_eq!(
+            d2["summary"],
+            json!({"added": 0, "removed": 0, "changed": 1}),
+            "{d2}"
+        );
+        assert_eq!(d2["changed"][0]["value"]["to"], "330k", "{d2}");
+        for (f, was) in kept {
+            std::fs::write(f, was).unwrap();
+        }
         // Where-used, in the library: the board's working design at B, and
         // its release A.
         let w = ok(

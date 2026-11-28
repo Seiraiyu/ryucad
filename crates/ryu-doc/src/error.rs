@@ -1149,6 +1149,9 @@ pub enum Code {
     /// ryueda DRC finding (a warning): a courtyard whose graphics don't
     /// close, judged by its box.
     DrcCourtyardOpen,
+    /// ryueda DRC finding (a warning): two parts' designators overlap on
+    /// one silk layer (#1095).
+    SilkRefOverlap,
     /// A board's stackup doesn't start and end with copper, doesn't
     /// alternate copper and dielectric, has fewer than 2 or more than 32
     /// copper layers, or has a thickness that isn't positive.
@@ -1675,6 +1678,7 @@ impl Code {
         Code::DrcEdgeClearance,
         Code::DrcCourtyardOverlap,
         Code::DrcCourtyardOpen,
+        Code::SilkRefOverlap,
         Code::BoardStackupInvalid,
         Code::BoardLayerNotFound,
         Code::DrcViaSpan,
@@ -1887,6 +1891,7 @@ mod tests {
             (Code::DrcEdgeClearance, "drc_edge_clearance"),
             (Code::DrcCourtyardOverlap, "drc_courtyard_overlap"),
             (Code::DrcCourtyardOpen, "drc_courtyard_open"),
+            (Code::SilkRefOverlap, "silk_ref_overlap"),
         ] {
             assert_eq!(json!(c), json!(s));
             assert_eq!(c.exit_code(), 1);

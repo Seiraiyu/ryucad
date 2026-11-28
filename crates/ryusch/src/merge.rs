@@ -547,8 +547,9 @@ pub fn merge(block: &Block, base: &Layout, ours: &Layout, theirs: &Layout) -> Me
 }
 
 /// Settles `merged`'s conflicts, one repair each in order, and lays the
-/// block out over the result; refused as the engine refuses when the
-/// merged instructions can't hold together.
+/// block out over the result. Both sides' additions that contradict are
+/// settled by the area they move (#1094); other merged instructions that
+/// can't hold together are refused as the engine refuses them.
 pub fn resolve(
     block: &Block,
     base: &Layout,
@@ -635,7 +636,70 @@ pub fn resolve(
                 }
         })
     });
-    let l = shifted_by_base(&l, base, -1);
+    let mut l = shifted_by_base(&l, base, -1);
+    // Additions of both sides that can't hold together (each side's `i3`,
+    // theirs renumbered; #1094): the side an area they move was settled
+    // by keeps its own; laid out again, neither stays. The base's are
+    // kept, and a pair no settled area holds is refused as before.
+    loop {
+        let mut probe = block.clone();
+        probe.instructions = l.instructions.clone();
+        probe.previous = Some(l.clone());
+        probe.moves = Vec::new();
+        let Err(e) = crate::instr::resolve(&probe) else {
+            break;
+        };
+        let ids: Vec<String> = e.details["instructions"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|x| x.as_str().map(str::to_owned))
+            .collect();
+        if e.code != "instruction_conflict" || ids.len() != 2 {
+            break;
+        }
+        let added: Vec<(&String, &Instruction)> = ids
+            .iter()
+            .filter_map(|id| l.instructions.get_key_value(id))
+            .filter(|(_, i)| !has(base, i))
+            .collect();
+        if added.len() != 2 {
+            break;
+        }
+        let keys: BTreeSet<&str> = added
+            .iter()
+            .flat_map(|(_, i)| {
+                i.parts()
+                    .iter()
+                    .flat_map(|s| crate::instr::parts_named(block, s))
+            })
+            .map(|p| block.parts[p].key.as_str())
+            .collect();
+        let Some(r) = settled
+            .iter()
+            .find(|(ps, _)| keys.iter().any(|k| ps.contains(k)))
+            .map(|(_, r)| *r)
+        else {
+            break;
+        };
+        let drop: Vec<String> = added
+            .iter()
+            .filter(|(_, i)| match r {
+                Repair::Ours => !has(ours, i),
+                Repair::Theirs => !has(theirs, i),
+                Repair::Relayout => true,
+            })
+            .map(|(id, _)| (*id).clone())
+            .collect();
+        if drop.is_empty() {
+            break;
+        }
+        for id in &drop {
+            l.instructions.remove(id);
+            l.notes.remove(id);
+            l.before.remove(id);
+        }
+    }
     let mut again = block.clone();
     again.instructions = l.instructions.clone();
     again.previous = Some(l);
@@ -831,6 +895,64 @@ mod tests {
                 Repair::Ours => assert!(has_near && !has_beside, "{kept:?}"),
                 Repair::Theirs => assert!(has_beside && !has_near, "{kept:?}"),
                 Repair::Relayout => assert!(!has_near && !has_beside, "{kept:?}"),
+            }
+        }
+    }
+
+    /// #1094: both sides add one ID's instruction and they contradict:
+    /// settled by a side, that side's stands; laid out again, neither.
+    #[test]
+    fn contradicting_instructions_settle_by_the_side_taken() {
+        let b = seeded(3, 4);
+        let base = engine::lay_out(&b).unwrap().layout;
+        let k = b
+            .parts
+            .iter()
+            .find(|p| p.refdes.starts_with('R'))
+            .unwrap()
+            .key
+            .clone();
+        let r0 = base.placed[&k].rotation;
+        let (ro, rt) = ((r0 + 90) % 360, (r0 + 270) % 360);
+        let with = |rotation: u16| {
+            let mut e = b.clone();
+            e.instructions.insert(
+                "i1".into(),
+                Instruction::Orient {
+                    parts: vec![k.clone()],
+                    rotation,
+                    mirror: false,
+                },
+            );
+            e.previous = Some(base.clone());
+            engine::lay_out(&e).unwrap().layout
+        };
+        let (ours, theirs) = (with(ro), with(rt));
+        let m = merge(&b, &base, &ours, &theirs);
+        assert_eq!(m.layout.instructions.len(), 2, "theirs renumbered");
+        assert!(!m.conflicts.is_empty(), "{k} turned both ways");
+        let n = m.conflicts.len();
+        for repair in [Repair::Ours, Repair::Theirs, Repair::Relayout] {
+            let out = resolve(&b, &base, &ours, &theirs, &m, &vec![repair; n])
+                .unwrap_or_else(|e| panic!("{repair:?}: {}", e.message));
+            assert_eq!(crate::rules::check(&b, &out.layout), [], "{repair:?}");
+            let turns: Vec<u16> = out
+                .layout
+                .instructions
+                .values()
+                .filter_map(|i| match i {
+                    Instruction::Orient { rotation, .. } => Some(*rotation),
+                    _ => None,
+                })
+                .collect();
+            let want: Vec<u16> = match repair {
+                Repair::Ours => vec![ro],
+                Repair::Theirs => vec![rt],
+                Repair::Relayout => vec![],
+            };
+            assert_eq!(turns, want, "{repair:?}");
+            if let [w] = want[..] {
+                assert_eq!(out.layout.placed[&k].rotation, w, "{repair:?}");
             }
         }
     }

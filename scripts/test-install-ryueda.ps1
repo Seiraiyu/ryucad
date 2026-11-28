@@ -104,6 +104,7 @@ try {
         Test-Case 'registers ryueda''s textconv with Git' ($textconv -match '/\.ryueda/bin/ryueda\.exe'' git textconv$') $r
         $driver = & git config -f (Join-Path $r.Home '.gitconfig') merge.ryueda.driver
         Test-Case 'registers ryueda''s merge driver with Git' ($driver -match '/\.ryueda/bin/ryueda\.exe'' git merge-driver %O %A %B %P$') $r
+        Test-Case 'says it registered ryueda with Git' ($r.Out -match 'registered .*ryueda\.exe with Git') $r
     }
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     Test-Case 'user PATH gets the bin directory' (($userPath -split ';') -contains (Split-Path $exe)) $r
@@ -166,6 +167,7 @@ try {
     $r = Invoke-Installer 'custom' $good @{ RYUEDA_HOME = $elsewhere }
     Test-Case 'RYUEDA_HOME is honoured' (Test-Path (Join-Path $elsewhere 'bin\ryueda.exe')) $r
     Test-Case 'RYUEDA_NO_MODIFY_PATH leaves the user PATH alone' ([Environment]::GetEnvironmentVariable('Path', 'User') -eq $before) $r
+    Test-Case 'RYUEDA_NO_MODIFY_PATH leaves Git''s global config alone' ((-not (Test-Path (Join-Path $r.Home '.gitconfig'))) -and $r.Out -match 'Git''s global config left alone') $r
 
     $r = Invoke-Installer 'arm' $good @{ PROCESSOR_ARCHITECTURE = 'ARM64' }
     Test-Case 'unsupported platform fails' ((-not $r.Ok) -and $r.Out -match 'no ryueda build for Windows ARM64') $r

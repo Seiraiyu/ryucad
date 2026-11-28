@@ -52,9 +52,15 @@ fn window(root: &Path) -> Harness<'static, App> {
 
 /// Steps frames until `done` holds, 30 s at most.
 fn frames(h: &mut Harness<'static, App>, done: impl Fn(&App) -> bool) {
+    until(h, "", done);
+}
+
+/// [`frames`], saying which wait never settled (as #1138 did for
+/// ryucad-app's).
+fn until(h: &mut Harness<'static, App>, what: &str, done: impl Fn(&App) -> bool) {
     let end = Instant::now() + Duration::from_secs(30);
     while !done(h.state()) {
-        assert!(Instant::now() < end, "the window never got there");
+        assert!(Instant::now() < end, "the window never got there: {what}");
         h.step();
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -447,4 +453,110 @@ fn a_manifest_record_opens_conflicts_alone() {
     let m: serde_json::Value =
         serde_json::from_slice(&std::fs::read(board.join("ryueda.json")).unwrap()).unwrap();
     assert_eq!(m["properties"]["rev"], "theirs", "{m}");
+}
+
+/// #1103: the part a value conflict is in is drawn, at the value its file
+/// holds, and Show frames it; the navigator keeps its tree.
+#[test]
+fn a_conflicted_part_is_drawn_and_show_frames_it() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let (_top, board) = merging(
+        "cf-value",
+        &[&["component", "edit", "breakout/r1", "--value", "5k6"]],
+        &[&["component", "edit", "breakout/r1", "--value", "6k8"]],
+    );
+    let mut h = window(&board);
+    until(&mut h, "the value conflict, quiet", |a| {
+        kinds(a).iter().any(|k| k == "value") && quiet(a)
+    });
+    until(&mut h, "the navigator's tree under breakout", |a| {
+        a.opened().is_some_and(|w| {
+            w.nav.design_ids().any(|d| {
+                let t = w.nav.tree(d);
+                t.block == "breakout" && !t.children.is_empty()
+            })
+        })
+    });
+    until(&mut h, "the sheet drawn, with R1", |a| {
+        a.opened().is_some_and(|w| {
+            w.camera.is_some()
+                && w.scene
+                    .as_ref()
+                    .is_some_and(|s| s.owner("breakout/r1").is_some())
+        })
+    });
+    let row = row_of(h.state(), "value");
+    assert!(
+        row.refs.iter().any(|r| r == "breakout/r1"),
+        "{:?}",
+        row.refs
+    );
+    let whole = h.state().opened().unwrap().camera.unwrap().zoom;
+    let r1 = {
+        let sc = h.state().opened().unwrap().scene.as_ref().unwrap();
+        let b = sc.owners[sc.owner("breakout/r1").unwrap()]
+            .boxed
+            .expect("R1's box");
+        [(b[0][0] + b[1][0]) / 2.0, (b[0][1] + b[1][1]) / 2.0]
+    };
+    h.state_mut().opened_mut().unwrap().show_conflict(&row);
+    // The canvas takes the frame Show asks for on the next frame drawn,
+    // so what is seen is the camera it leaves: on R1, closer than the
+    // whole sheet.
+    until(&mut h, "Show framing R1", |a| {
+        a.opened().is_some_and(|w| {
+            w.selection == row.refs
+                && w.frame.is_none()
+                && w.camera.as_ref().is_some_and(|c| {
+                    c.zoom > whole * 1.5
+                        && (c.centre[0] - r1[0]).abs() < 1.0
+                        && (c.centre[1] - r1[1]).abs() < 1.0
+                })
+        })
+    });
+    let sc = h.state().opened().unwrap().scene.as_ref().unwrap();
+    let r1 = sc.owner("breakout/r1").expect("R1 drawn while unsettled");
+    assert!(sc.owners[r1].unsettled, "R1 marked unsettled");
+}
+
+/// #1104: the typed-value command wraps inside the Conflicts tile, its
+/// start never left of the row it belongs to.
+#[test]
+fn a_typed_values_command_stays_inside_its_tile() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let (_top, board) = merging(
+        "cf-typed",
+        &[&["component", "edit", "breakout/r1", "--value", "5k6"]],
+        &[&["component", "edit", "breakout/r1", "--value", "6k8"]],
+    );
+    let root = board.clone();
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(1280.0, 832.0))
+        .wgpu()
+        .build_eframe(move |cc| App::open(&cc.egui_ctx, &root, daemon()));
+    frames(&mut h, |a| {
+        kinds(a).iter().any(|k| k == "value") && quiet(a)
+    });
+    for _ in 0..3 {
+        h.step();
+    }
+    let lead = h
+        .query_by_label("A value of your own:")
+        .expect("the row")
+        .rect();
+    let cmd = h
+        .query_by_label_contains("ryueda merge resolve")
+        .expect("the command")
+        .rect();
+    assert!(
+        cmd.min.x >= lead.min.x - 0.5,
+        "clipped left: {cmd:?} vs {lead:?}"
+    );
+    assert!(cmd.max.x <= 1280.0, "{cmd:?}");
 }

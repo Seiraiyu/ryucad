@@ -32,14 +32,21 @@ fn corpus(name: &str) -> PathBuf {
 
 /// `ryudfm` with the variables that keep a test's daemons and settings
 /// its own.
-fn ryudfm(run: &Path) -> Command {
-    let mut cmd = Command::cargo_bin("ryudfm").unwrap();
+/// As a std `Command`: a watcher spawned on the test's thread and waited
+/// for on another needs one (#1133); [`ryudfm`] is assert_cmd's.
+fn ryudfm_std(run: &Path) -> std::process::Command {
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_ryudfm"));
     cmd.env("RYUDFM_RUNTIME_DIR", run)
         .env("RYUDFM_IDLE_TIMEOUT", "60")
         .env("RYUDFM_CONFIG_DIR", run.with_file_name("config"))
         .env_remove("RYUDFM_NO_DAEMON")
         .env_remove("RYUDFM_PARTICIPANT");
     cmd
+}
+
+/// [`ryudfm_std`], as assert_cmd's `Command`.
+fn ryudfm(run: &Path) -> Command {
+    Command::from_std(ryudfm_std(run))
 }
 
 fn parse(out: std::process::Output, root: &Path) -> (i32, Value) {
@@ -560,7 +567,7 @@ fn watchers_hear_of_board_changes() {
     // to the other (#246).
     let (code, v) = p.run_in(&p.daemon, &["info"]);
     assert_eq!(code, 0, "{v}");
-    let mut watch = ryudfm(&p.run);
+    let mut watch = ryudfm_std(&p.run);
     watch.current_dir(p.daemon.join("p")).args([
         "--as",
         "watcher",
@@ -570,7 +577,16 @@ fn watchers_hear_of_board_changes() {
         "--timeout",
         "120",
     ]);
-    let waiting = std::thread::spawn(move || watch.output().unwrap());
+    // Spawned here and only waited for on a thread: two threads spawning
+    // at once can hand one's output pipe to the other's child on macOS,
+    // which has no pipe2, and `output()` then waits for that child (#1133).
+    let child = watch
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let waiting = std::thread::spawn(move || child.wait_with_output().unwrap());
     let attached = || {
         let (_, v) = p.run_in(&p.daemon, &["participants"]);
         v["result"]["participants"]

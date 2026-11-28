@@ -163,6 +163,8 @@ pub struct Owner {
     pub hash: String,
     /// Its compare mark, in a compare scene.
     pub mark: Option<Diff>,
+    /// A component mid-merge, drawn at the value its file holds (#1103).
+    pub unsettled: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -369,6 +371,7 @@ impl Scene {
                         Some("moved") => Some(Diff::Moved),
                         _ => None,
                     },
+                    unsettled: o["unsettled"].as_bool().unwrap_or(false),
                 })
             })
             .collect::<Option<_>>()?;

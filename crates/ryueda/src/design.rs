@@ -36,6 +36,10 @@ pub struct BlockFiles {
     pub components: BTreeMap<Id, Loaded<Component>>,
     pub nets: BTreeMap<Id, Loaded<Net>>,
     pub instances: BTreeMap<Id, Loaded<Instance>>,
+    /// The components mid-merge (their reads failed with `merge_conflict`)
+    /// as the values the merge left in place, ours (#1103): drawn, marked
+    /// unsettled, never checked, flattened or committed.
+    pub unsettled: BTreeMap<Id, Component>,
     /// `layout.json`: the block's schematic as last laid out, or why it
     /// doesn't read; `None` before the block is laid out.
     pub layout: Option<Result<ryusch::layout::Layout>>,
@@ -89,6 +93,19 @@ impl BlockFiles {
     /// Whether an object of any part of the block has the ID `id`:
     /// components, nets and instances share one, so `<block>/<id>` names
     /// one object.
+    /// The components a sheet draws, by ID: those that read, and those
+    /// mid-merge at the values their files hold (#1103).
+    pub fn drawn_components(&self) -> impl Iterator<Item = (&Id, &Component)> {
+        let mut all: Vec<(&Id, &Component)> = self
+            .components
+            .iter()
+            .filter_map(|(id, c)| c.item.as_ref().ok().map(|c| (id, c)))
+            .chain(&self.unsettled)
+            .collect();
+        all.sort_by(|a, b| a.0.cmp(b.0));
+        all.into_iter()
+    }
+
     pub fn has(&self, id: &str) -> bool {
         let Ok(id) = Id::parse(id, "object") else {
             return false;
@@ -333,6 +350,7 @@ fn load_block(src: &dyn Source, id: Id, faults: &mut Vec<Fault>) -> Result<Optio
         faults,
         Component::check,
     );
+    let unsettled = unsettled(&take(COMPONENTS), &join(&dir, COMPONENTS), &components);
     let nets = read_all(
         &take(NETS),
         &join(&dir, NETS),
@@ -354,8 +372,52 @@ fn load_block(src: &dyn Source, id: Id, faults: &mut Vec<Fault>) -> Result<Optio
         components,
         nets,
         instances,
+        unsettled,
         layout,
     }))
+}
+
+/// The components of `files` whose reads failed with `merge_conflict`,
+/// read again without the merge's record: the values it left in place.
+fn unsettled(
+    files: &[Named],
+    dir: &str,
+    read: &BTreeMap<Id, Loaded<Component>>,
+) -> BTreeMap<Id, Component> {
+    let mut out = BTreeMap::new();
+    for (file, bytes) in files {
+        let Some(id) = file
+            .strip_suffix(".json")
+            .and_then(|s| Id::parse(s, "design object").ok())
+        else {
+            continue;
+        };
+        let conflicted = read.get(&id).is_some_and(|l| {
+            l.item
+                .as_ref()
+                .is_err_and(|e| e.code == Code::MergeConflict)
+        });
+        if !conflicted {
+            continue;
+        }
+        let path = join(dir, file);
+        let Some(v) = std::str::from_utf8(bytes)
+            .ok()
+            .and_then(|t| crate::canonical::parse(t).ok())
+        else {
+            continue;
+        };
+        let v = ryu_doc::files::without_conflicts(&v);
+        if let Ok(c) = doc::from_value::<Component>(
+            v,
+            &path,
+            conn::COMPONENT_KIND,
+            conn::newest(conn::COMPONENT_KIND),
+        ) {
+            out.insert(id, c);
+        }
+    }
+    out
 }
 
 /// Reads a project's connectivity from `src`. References between files

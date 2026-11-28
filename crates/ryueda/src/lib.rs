@@ -25,6 +25,7 @@ pub mod cascade;
 pub mod clash;
 pub mod client;
 pub mod compare;
+pub mod config;
 pub mod conn;
 pub mod coord;
 pub mod daemon;
@@ -107,6 +108,25 @@ impl ryu_session::Product for Eda {
         }
     }
 }
+
+/// Every preference `ryueda config` knows, in the order `get` lists them
+/// (#1077): the keys [`Schema::accepts`](ryu_session::prefs::Schema::accepts)
+/// takes.
+pub const PREFERENCE_KEYS: &[&str] = &[
+    "daemon.poll_ms",
+    "parts.max_age",
+    "pdm.dependents",
+    "review.url",
+    "ui.theme",
+    "ui.style",
+    "ui.contrast",
+    "ui.notify",
+    "ui.layout",
+    "ui.keys",
+    "app.window",
+    "ui.flash_changes",
+    "ui.follow_shows",
+];
 
 impl ryu_session::prefs::Schema for Eda {
     const CONFIG_DIR_VAR: &'static str = "RYUEDA_CONFIG_DIR";

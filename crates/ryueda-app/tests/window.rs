@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::{agent, breakout, daemon, gpu, one_at_a_time};
+use common::{agent, breakout, cli, daemon, gpu, one_at_a_time, shared};
 use eframe::egui;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
@@ -268,4 +268,28 @@ fn undo_goes_through_the_daemon() {
             .and_then(|w| w.scene.as_ref())
             .is_some_and(|s| s.revision == before)
     });
+}
+
+/// `--smoke` on a project fresh from `ryueda init` draws its empty state at
+/// once, `sheet` null (#1099), not a minute's wait reported as a fault.
+#[test]
+fn smoke_draws_a_project_with_no_design_at_once() {
+    let _one = one_at_a_time();
+    if !gpu() {
+        return;
+    }
+    let root = shared().join("smoke-no-design");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    cli(&root, &["init"]);
+    let root = std::fs::canonicalize(root).unwrap();
+    let start = Instant::now();
+    let v = ryueda_app::ui::smoke::run_with(&root, daemon()).unwrap();
+    assert!(
+        start.elapsed() < Duration::from_secs(20),
+        "{:?}",
+        start.elapsed()
+    );
+    assert_eq!(v["sheet"], serde_json::Value::Null);
+    assert!(v["frame"]["drawn_pixels"].as_u64().unwrap() > 0, "{v}");
 }

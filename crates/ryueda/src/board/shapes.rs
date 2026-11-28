@@ -75,6 +75,18 @@ pub struct CourtyardInfo {
     pub bottom: bool,
 }
 
+/// A designator as drawn (#1095): whose, on which layer, its strokes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DesignatorInfo {
+    /// `<board>:<refdes>`, the placement's owner.
+    pub owner: String,
+    pub refdes: String,
+    /// The silk layer it's drawn on, sided (`silk.top`, `silk.bottom`).
+    pub layer: String,
+    /// Its strokes, placed.
+    pub shape: Shape,
+}
+
 /// A keepout as placed: the board's own, or a part's.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeepoutInfo {
@@ -154,6 +166,8 @@ pub struct BoardShapes {
     pub tracks: Vec<TrackInfo>,
     pub vias: Vec<ViaInfo>,
     pub courtyards: Vec<CourtyardInfo>,
+    /// The parts' designators as drawn, shown ones only (#1095).
+    pub designators: Vec<DesignatorInfo>,
     /// The board's keepouts and its parts' (ryueda 7.C).
     pub keepouts: Vec<KeepoutInfo>,
     /// The outline less its cutouts.
@@ -291,6 +305,7 @@ struct One {
     holes: Vec<HoleInfo>,
     pads: Vec<PadInfo>,
     courtyards: Vec<CourtyardInfo>,
+    designators: Vec<DesignatorInfo>,
     keepouts: Vec<KeepoutInfo>,
     notices: Vec<Fault>,
 }
@@ -446,16 +461,18 @@ fn one(
         note_missing(&mut out.notices, o, &s);
         put(&mut out, &sided(&g.layer, flipped), s);
     }
-    for (field, over, string) in [
+    for (field, over, string, designator) in [
         (
             f.fields.reference.as_ref(),
             fields.reference.as_ref(),
             refdes.as_str(),
+            true,
         ),
         (
             f.fields.value.as_ref(),
             fields.value.as_ref(),
             value.as_str(),
+            false,
         ),
     ] {
         let Some(fl) = field_with(field, over) else {
@@ -466,7 +483,16 @@ fn one(
         }
         if let Ok(s) = text::centred(string, fl.at, fl.rotation_mdeg, fl.size_nm, fl.thickness_nm) {
             note_missing(&mut out.notices, o, &s);
-            put(&mut out, &sided(&fl.layer, flipped), s);
+            let layer = sided(&fl.layer, flipped);
+            if designator && layer.starts_with("silk.") && !s.parts.is_empty() {
+                out.designators.push(DesignatorInfo {
+                    owner: owner.clone(),
+                    refdes: refdes.clone(),
+                    layer: layer.clone(),
+                    shape: s.placed(&place, Polarity::Positive),
+                });
+            }
+            put(&mut out, &layer, s);
         }
     }
     let court: Vec<&crate::footprint::Graphic> = f
@@ -590,6 +616,7 @@ pub fn build(p: &Project, b: &BoardFiles) -> Result<BoardShapes> {
         out.holes.extend(one.holes);
         out.pads.extend(one.pads);
         out.courtyards.extend(one.courtyards);
+        out.designators.extend(one.designators);
         out.keepouts.extend(one.keepouts);
         notices.extend(one.notices);
     }

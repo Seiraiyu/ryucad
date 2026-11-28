@@ -117,7 +117,8 @@ enum Command {
     Release(ReleaseCmd),
     /// Where a library component is used (PDM), run in its library
     /// project: designs of this repository's projects, of other checkouts
-    /// (--in, else the pdm.dependents preference) and their releases.
+    /// (--in, else the pdm.dependents preference: `ryueda config set
+    /// pdm.dependents '["../boards"]'`) and their releases.
     WhereUsed {
         part: String,
         /// Only designs placing this release label.
@@ -629,6 +630,19 @@ enum Command {
     },
     #[command(subcommand)]
     Daemon(DaemonCmd),
+    /// This machine's preferences (preferences.json in the config folder;
+    /// RYUEDA_CONFIG_DIR moves it).
+    #[command(subcommand)]
+    Config(ConfigCmd),
+}
+
+#[derive(Subcommand)]
+enum ConfigCmd {
+    /// A preference's value, or every one's.
+    Get { key: Option<String> },
+    /// Set a preference: JSON, or else a string. Set to its default, it is
+    /// removed.
+    Set { key: String, value: String },
 }
 
 #[derive(Subcommand)]
@@ -1786,6 +1800,9 @@ enum BoardCmd {
     #[command(subcommand)]
     Hole(HoleCmd),
     /// The board's DRC findings; exits 1 when any is an error.
+    ///
+    /// Two parts' designators on one silk layer are a warning
+    /// (`silk_ref_overlap`); `board place BOARD REF --ref-at X,Y` moves one.
     Drc {
         board: String,
         /// Only findings of this code; repeat for more.
@@ -4558,6 +4575,7 @@ fn request(cmd: &Command, here: &std::path::Path) -> Result<Option<Request>> {
         | Command::Init { .. }
         | Command::Watch { .. }
         | Command::Daemon(_)
+        | Command::Config(_)
         | Command::Git(_)
         | Command::Review(_)
         | Command::WhereUsed { org: true, .. }
@@ -4649,6 +4667,13 @@ fn run(cli: &Cli, warnings: &mut Vec<String>) -> Result<Value> {
             };
             ryueda::review::run(&here, action)
         }
+        // This machine's preferences file, under its lock: never through a
+        // daemon or the log.
+        Command::Config(ConfigCmd::Get { key }) => ryueda::config::get(key.as_deref()),
+        Command::Config(ConfigCmd::Set { key, value }) => ryueda::config::set(
+            key,
+            serde_json::from_str(value).unwrap_or_else(|_| Value::String(value.clone())),
+        ),
         Command::Git(GitCmd::Attributes) => Ok(json!({
             "schema": ryueda::OUTPUT_SCHEMA,
             "lines": ryueda::drivers::LINES,
