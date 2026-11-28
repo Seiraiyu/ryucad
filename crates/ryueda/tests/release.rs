@@ -619,3 +619,20 @@ fn ryuedas_release_carries_the_app() {
         assert!(root().join(file).is_file(), "{file}");
     }
 }
+
+/// ryueda.app opened with no folder asks for one (#1102): an app Finder
+/// starts has `/` for its folder.
+#[test]
+fn the_mac_launcher_asks_for_a_folder_when_given_none() {
+    let text = std::fs::read_to_string(root().join("packaging/macos/ryueda.applescript")).unwrap();
+    let run = text
+        .split("on run")
+        .nth(1)
+        .and_then(|t| t.split("end run").next())
+        .expect("an on run handler");
+    assert!(run.contains("choose folder"), "on run: {run}");
+    assert!(
+        !run.contains("launch(\"\")"),
+        "on run starts the app with no folder"
+    );
+}
