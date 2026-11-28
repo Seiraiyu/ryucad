@@ -83,6 +83,15 @@ pub struct Margins {
     pub zone_connect: Option<ZoneConnect>,
 }
 
+/// Every length margins hold (7.F's review: each is judged against the
+/// range, so no shape built from it overflows).
+fn margin_lengths(m: &Margins) -> Vec<i64> {
+    [m.mask_margin_nm, m.paste_margin_nm, m.clearance_nm]
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
 /// How copper pours meet a pad.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -599,7 +608,32 @@ impl Footprint {
             }
             // Past a metre, a pad's shape isn't judged further: exact tests
             // on such coordinates could overflow (7.F's review).
-            let out_of_range = far_points(&points) || far(p.size[0]) || far(p.size[1]);
+            // Every length the pad holds, not only its points and size:
+            // its primitives' widths, margins, thermal, drill and bond
+            // (a field sized i64::MAX overflowed its text, 7.F's review).
+            let mut lengths = vec![p.size[0], p.size[1]];
+            if let PadShape::Custom { primitives, .. } = &p.shape {
+                lengths.extend(primitives.iter().flat_map(Shape::sizes));
+            }
+            if let PadShape::Trapezoid { delta } = &p.shape {
+                lengths.extend(delta);
+            }
+            lengths.extend(margin_lengths(&p.margins));
+            if let Some(t) = &p.thermal {
+                lengths.extend([t.spoke_nm, t.gap_nm]);
+            }
+            match &p.drill {
+                Some(Drill::Round {
+                    diameter_nm,
+                    offset,
+                }) => lengths.extend([*diameter_nm, offset[0], offset[1]]),
+                Some(Drill::Slot { size, offset }) => {
+                    lengths.extend([size[0], size[1], offset[0], offset[1]])
+                }
+                None => {}
+            }
+            lengths.extend(p.die_length_nm);
+            let out_of_range = far_points(&points) || lengths.into_iter().any(far);
             if !out_of_range && let Some(why) = unmakeable(p) {
                 out.push(
                     Fault::error(Code::LibraryPadInvalid, format!("pad {id}: {why}"))
@@ -670,6 +704,10 @@ impl Footprint {
             let Some(f) = f else { continue };
             let ptr = format!("/fields/{name}");
             layers(std::slice::from_ref(&f.layer), &ptr, &mut out);
+            let out_of_range = far_points(&[f.at])
+                || far(f.size_nm[0])
+                || far(f.size_nm[1])
+                || far(f.thickness_nm);
             if f.size_nm[0] <= 0 || f.size_nm[1] <= 0 || f.thickness_nm < 0 {
                 out.push(
                     Fault::error(
@@ -679,15 +717,24 @@ impl Footprint {
                     .with("pointer", &ptr),
                 );
             }
-            if far_points(&[f.at]) {
+            if out_of_range {
                 out.push(
                     Fault::error(
                         Code::LibraryOutOfRange,
-                        format!("the {name} field is past a metre from the origin"),
+                        format!("the {name} field reaches past a metre from the origin"),
                     )
                     .with("pointer", &ptr),
                 );
             }
+        }
+        if margin_lengths(&self.margins).into_iter().any(far) {
+            out.push(
+                Fault::error(
+                    Code::LibraryOutOfRange,
+                    "a footprint margin reaches past a metre",
+                )
+                .with("pointer", ""),
+            );
         }
         let courtyard = self
             .graphics
@@ -891,12 +938,29 @@ pub(crate) mod tests {
                        "drill": {"shape": "round", "diameter_nm": max, "offset": [min, 0]}}
             },
             "graphics": {"g1": {"layer": "silk.top", "type": "arc", "start": [min, min], "mid": [max, 0], "end": [0, max], "width_nm": 1}},
-            "keepouts": {"k1": {"polygon": [[min, min], [max, min], [max, max], [min, max]], "keeps": ["tracks"], "layers": ["copper.top"]}}
+            "keepouts": {"k1": {"polygon": [[min, min], [max, min], [max, max], [min, max]], "keeps": ["tracks"], "layers": ["copper.top"]}},
+            "fields": {"reference": {"layer": "silk.top", "at": [0, 0], "size_nm": [max, 1_000_000]}}
         });
         let f: Footprint = doc::from_value(v, "library/footprints/far.json", KIND, FORMAT).unwrap();
         let codes: Vec<Code> = f.check().iter().map(|x| x.error.code).collect();
         assert!(codes.contains(&Code::LibraryOutOfRange), "{codes:?}");
-        // In range, its extreme offsets and lean are judged exactly.
-        assert!(codes.contains(&Code::LibraryPadInvalid), "{codes:?}");
+        // Every object here is past a metre, its size, margin, drill or
+        // lean included (the fuzzer's field sized i64::MAX drew text that
+        // overflowed): each is out of range and judged no further.
+        let at: Vec<String> = f
+            .check()
+            .iter()
+            .filter(|x| x.error.code == Code::LibraryOutOfRange)
+            .filter_map(|x| x.error.details["pointer"].as_str().map(str::to_owned))
+            .collect();
+        for ptr in [
+            "/pads/p1",
+            "/pads/p2",
+            "/graphics/g1",
+            "/keepouts/k1",
+            "/fields/reference",
+        ] {
+            assert!(at.iter().any(|a| a == ptr), "{ptr}: {at:?}");
+        }
     }
 }

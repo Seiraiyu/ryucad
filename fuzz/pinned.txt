@@ -233,3 +233,4 @@ copper/spoke-across-a-sloped-edge
 footprint/seed
 footprint/undeclared-pad
 footprint/arc-far-out
+footprint/field-size-max
