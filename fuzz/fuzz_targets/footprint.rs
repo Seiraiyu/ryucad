@@ -15,12 +15,16 @@ impl Bytes<'_> {
         self.1 += 1;
         usize::from(b)
     }
-    /// A length: mostly 0 to 5 mm on a 10 µm grid, sometimes zero, negative or far.
+    /// A length: mostly 0 to 5 mm on a 10 µm grid, sometimes zero, negative,
+    /// far, or either end of the range.
     fn len(&mut self) -> Value {
         match self.next() % 16 {
             0 => json!(0),
             1 => json!(-(self.next() as i64) * 10_000),
             2 => json!(1i64 << 40),
+            // The ends of the range (7.F's review: a move by one overflowed).
+            3 => json!(i64::MAX),
+            4 => json!(i64::MIN),
             _ => json!((self.next() as i64 % 500) * 10_000),
         }
     }

@@ -151,6 +151,17 @@ fn existing_pin(o: &Map<String, Value>, i: usize, s: &Symbol) -> Result<String> 
     Ok(n)
 }
 
+/// `p` moved by `d`: refused, at the op's `by`, when that leaves the
+/// range of coordinates (an overflow before 7.F's review).
+pub(crate) fn moved(p: [i64; 2], d: [i64; 2], i: usize) -> Result<[i64; 2]> {
+    match (p[0].checked_add(d[0]), p[1].checked_add(d[1])) {
+        (Some(x), Some(y)) => Ok([x, y]),
+        _ => Err(
+            op_error(i, "by", "moving by that leaves the range of coordinates")
+                .with("reason", "out_of_range"),
+        ),
+    }
+}
 pub(crate) fn offset(o: &Map<String, Value>, i: usize, unit: Unit) -> Result<[i64; 2]> {
     let by = o
         .get("by")
@@ -301,7 +312,7 @@ pub fn apply(s: &mut Symbol, ops: &[Value], unit: Unit) -> Result<Applied> {
                     }
                     (None, Some(_)) => {
                         let d = offset(o, i, unit)?;
-                        pin.at = [pin.at[0] + d[0], pin.at[1] + d[1]];
+                        pin.at = moved(pin.at, d, i)?;
                     }
                     _ => return Err(op_error(i, "", "move a pin to at, or by [dx, dy]")),
                 }
@@ -311,7 +322,7 @@ pub fn apply(s: &mut Symbol, ops: &[Value], unit: Unit) -> Result<Applied> {
                 let id = graphic_id(o, i, s)?;
                 let d = offset(o, i, unit)?;
                 for p in s.graphics.get_mut(&id).expect("found").points_mut() {
-                    *p = [p[0] + d[0], p[1] + d[1]];
+                    *p = moved(*p, d, i)?;
                 }
             }
             _ => return Err(op_error(i, "op", "op is add, remove, set or move")),
@@ -471,5 +482,24 @@ mod tests {
             )),
             (Code::InvalidParam, "/ops/0".into())
         );
+    }
+
+    /// A symbol's pin or graphic moved past the range of coordinates is
+    /// refused, not an overflow (7.F's review).
+    #[test]
+    fn a_move_out_of_range_is_refused() {
+        let s = resistor();
+        for op in [
+            json!({"op": "move", "pin": "1", "by": [i64::MAX, i64::MAX]}),
+            json!({"op": "move", "graphic": "g1", "by": [0, i64::MIN]}),
+        ] {
+            let mut t = s.clone();
+            let e = apply(&mut t, &[op], Unit::Mm).unwrap_err();
+            assert_eq!(
+                (e.code, e.details["reason"].as_str()),
+                (Code::InvalidParam, Some("out_of_range"))
+            );
+            assert_eq!(e.details["pointer"], "/ops/0/by");
+        }
     }
 }

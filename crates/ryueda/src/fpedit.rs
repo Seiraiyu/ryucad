@@ -9,7 +9,7 @@
 //! ID, or `null` for the next free one (`p<n>`, `g<n>`, `k<n>`).
 
 use crate::coord;
-use crate::edit::{offset, only, op_error, typed};
+use crate::edit::{moved, offset, only, op_error, typed};
 use crate::error::{Code, Error, Result};
 use crate::footprint::Footprint;
 use crate::id::Id;
@@ -389,7 +389,7 @@ fn apply_to(
                         .map_err(|e| e.with("pointer", format!("{ptr}/at")))?,
                     (None, Some(_)) => {
                         let d = offset(o, i, unit)?;
-                        [p.at[0] + d[0], p.at[1] + d[1]]
+                        moved(p.at, d, i)?
                     }
                     _ => return Err(op_error(i, "", "move a pad to at, or by [dx, dy]")),
                 };
@@ -423,7 +423,7 @@ fn apply_to(
                 let id = existing(&f.graphics, v, i, "graphic")?;
                 let d = offset(o, i, unit)?;
                 for p in f.graphics.get_mut(&id).expect("found").shape.points_mut() {
-                    *p = [p[0] + d[0], p[1] + d[1]];
+                    *p = moved(*p, d, i)?;
                 }
             }
             (Some("remove"), "graphic") => {
@@ -455,7 +455,7 @@ fn apply_to(
                 let id = existing(&f.keepouts, v, i, "keepout")?;
                 let d = offset(o, i, unit)?;
                 for p in &mut f.keepouts.get_mut(&id).expect("found").polygon {
-                    *p = [p[0] + d[0], p[1] + d[1]];
+                    *p = moved(*p, d, i)?;
                 }
             }
             (Some("remove"), "keepout") => {
@@ -514,7 +514,7 @@ fn apply_to(
                         current.at = coord::point(at, unit)
                             .map_err(|e| e.with("pointer", format!("{ptr}/at")))?
                     }
-                    (_, None, Some(d)) => current.at = [current.at[0] + d[0], current.at[1] + d[1]],
+                    (_, None, Some(d)) => current.at = moved(current.at, d, i)?,
                     _ => return Err(op_error(i, "", "move a field to at, or by [dx, dy]")),
                 }
             }
@@ -826,5 +826,51 @@ pub(crate) mod tests {
             .0,
             Code::NotFound
         );
+    }
+
+    /// The review's find: a move by a huge offset overflowed (an
+    /// `internal` panic in a debug build). Every kind of move is refused
+    /// as out of range instead, at its `by`.
+    #[test]
+    fn a_move_out_of_range_is_refused() {
+        let mut f = empty();
+        ok(
+            &mut f,
+            json!([
+                {"op": "add", "pad": "p1", "number": "1", "kind": "smd", "shape": "rect", "at": [1, -1], "size": [1000, 1000], "layers": ["copper.top"]},
+                {"op": "add", "graphic": "g1", "type": "line", "layer": "silk.top", "start": [1, -1], "end": [2, -1], "width": 100},
+                {"op": "add", "keepout": "k1", "polygon": [[1, -1], [2, -1], [2, 2]], "keeps": ["tracks"], "layers": ["copper.top"]},
+                {"op": "add", "field": "reference", "layer": "silk.top", "at": [1, -1], "size": [1000, 1000]}
+            ]),
+        );
+        for (key, id) in [
+            ("pad", "p1"),
+            ("graphic", "g1"),
+            ("keepout", "k1"),
+            ("field", "reference"),
+        ] {
+            for by in [json!([i64::MAX, 0]), json!([0, i64::MIN])] {
+                let mut t = f.clone();
+                let e = apply(
+                    &mut t,
+                    json!([{"op": "move", key: id, "by": by}])
+                        .as_array()
+                        .unwrap(),
+                    Unit::Mm,
+                    &no_models,
+                )
+                .unwrap_err();
+                assert_eq!(
+                    (
+                        e.code,
+                        e.details["pointer"].as_str(),
+                        e.details["reason"].as_str()
+                    ),
+                    (Code::InvalidParam, Some("/ops/0/by"), Some("out_of_range")),
+                    "{key}"
+                );
+                crate::error::details::check(&e);
+            }
+        }
     }
 }
