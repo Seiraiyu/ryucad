@@ -3,7 +3,7 @@
 //! egui's wgpu renderer, read back and counted: a release check that the
 //! app draws on this machine.
 
-use crate::core::link::find_ryueda;
+use crate::core::link::{Daemon, find_ryueda};
 use crate::core::window::Window;
 use crate::ui::app::App;
 use crate::ui::platform::NO_ADAPTER;
@@ -33,17 +33,26 @@ pub fn headless() -> Option<(wgpu::Adapter, wgpu::Device, wgpu::Queue)> {
 }
 
 pub fn run(dir: &Path) -> Result<Value> {
-    let daemon = find_ryueda()?;
+    run_with(dir, &find_ryueda()?)
+}
+
+/// [`run`] with the daemon given (tests pass theirs). A project with no
+/// design draws its empty state, `sheet` null (#1099); any other refused
+/// scene is refused at once.
+pub fn run_with(dir: &Path, daemon: &Daemon) -> Result<Value> {
     let ctx = egui::Context::default();
-    let mut app = App::open(&ctx, dir, &daemon);
+    let mut app = App::open(&ctx, dir, daemon);
     let w: &mut Window = app
         .opened_mut()
         .ok_or_else(|| Error::new(Code::NotFound, "no ryueda project here"))?;
-    if !w.wait_until(WAIT, |w| w.scene.is_some()) {
+    if !w.wait_until(WAIT, |w| w.scene.is_some() || w.scene_error.is_some()) {
         return Err(Error::new(
             Code::Daemon,
             "the first sheet wasn't drawn in time",
         ));
+    }
+    if let Some(e) = w.scene_error.as_ref().filter(|e| e.code != Code::NotFound) {
+        return Err(e.clone());
     }
     let sheet = w.scene.as_ref().map(|s| s.name.clone());
     let (adapter, device, queue) =
