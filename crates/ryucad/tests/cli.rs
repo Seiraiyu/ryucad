@@ -9824,6 +9824,31 @@ fn blend_edits_from_the_cli() {
         "3.5mm",
     ]);
     assert_eq!(r["feature"]["below"]["value"], "3.5 mm", "{r}");
+    // Partial, and back (plan 23.D): written as partial: true at format
+    // 27, then taken away, at format 20 again.
+    p.ok(&["feature", "edit", "box", "flat", "--partial"]);
+    let flat = p.daemon.join("parts/box/features/flat.json");
+    let text = fs::read_to_string(&flat).unwrap();
+    assert!(
+        text.contains("\"partial\": true") && text.contains("\"format\": 27"),
+        "{text}"
+    );
+    p.ok(&["feature", "edit", "box", "flat", "--partial", "false"]);
+    let text = fs::read_to_string(&flat).unwrap();
+    assert!(
+        !text.contains("partial") && text.contains("\"format\": 20"),
+        "{text}"
+    );
+    // The daemon logged both: undo makes it partial again, redo takes it
+    // away again.
+    let (code, v) = p.run_in(&p.daemon, "", &["undo"]);
+    assert_eq!(code, 0, "{v}");
+    let text = fs::read_to_string(&flat).unwrap();
+    assert!(text.contains("\"partial\": true"), "{text}");
+    let (code, v) = p.run_in(&p.daemon, "", &["redo"]);
+    assert_eq!(code, 0, "{v}");
+    let text = fs::read_to_string(&flat).unwrap();
+    assert!(!text.contains("partial"), "{text}");
     // A resize of one fillet, by its flags; then made a chamfer.
     let face = listed["blends"][0]["faces"][0].as_str().unwrap().to_owned();
     p.ok(&["feature", "edit", "box", "flat", "--below", "1mm"]);

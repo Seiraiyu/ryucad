@@ -1503,7 +1503,7 @@ enum FeatureCmd {
     /// rebuild, making again the blends it breaks; a delete_face (--face repeated,
     /// --seed repeated, --heal auto, cap or grow) taking faces out of a solid and
     /// healing each gap (`ryucad feature-faces` shows what a seed takes); a
-    /// delete_blend (--below LEN, --face repeated, --tolerance) deleting a solid's
+    /// delete_blend (--below LEN, --face repeated, --tolerance, --partial) deleting a solid's
     /// fillets and chamfers by size or by face, their supports growing back (`ryucad
     /// blends` lists them); a resize_blend (--face repeated, with --radius, or --form,
     /// --d, --d1, --d2, --angle and --chamfer-face; or --groups) giving blends a new
@@ -3724,6 +3724,11 @@ struct FieldArgs {
     /// it reaches (`ryucad blends <part> --below LEN` lists them).
     #[arg(long, value_name = "LENGTH")]
     below: Option<String>,
+    /// A delete_blend that deletes what it can, unit by unit, and keeps what
+    /// refuses, listing each kept blend with its cause (`--partial false` takes
+    /// it away).
+    #[arg(long, value_name = "BOOL", num_args = 0..=1, default_missing_value = "true")]
+    partial: Option<bool>,
     /// A resize_blend's chamfer group: the face its --d1 (or its --d with --angle) runs
     /// along, one of the chamfer's two supports. --face names the blends it resizes.
     #[arg(long, value_name = "REFERENCE")]
@@ -4190,6 +4195,7 @@ impl FieldArgs {
             blends: self.blends.clone(),
             heal: self.heal.clone(),
             below: self.below.clone().map(Value::String),
+            partial: self.partial,
             chamfer_face: self.chamfer_face.clone(),
             seeds: None,
             radius: self.radius.clone().map(Value::String),
@@ -7915,6 +7921,37 @@ mod tests {
             );
             assert_eq!(f.make_solid, Some(false));
             assert_eq!(f.tolerance, Some(json!("0.02mm")));
+        });
+    }
+
+    #[test]
+    fn a_blend_delete_takes_partial() {
+        on_cli_stack(|| {
+            let f = sent(&[
+                "ryucad",
+                "feature",
+                "add",
+                "p",
+                "delete_blend",
+                "--below",
+                "2mm",
+                "--partial",
+            ])
+            .unwrap();
+            assert_eq!(f.partial, Some(true));
+            let f = sent(&["ryucad", "feature", "edit", "p", "d", "--partial", "false"]).unwrap();
+            assert_eq!(f.partial, Some(false));
+            let f = sent(&[
+                "ryucad",
+                "feature",
+                "add",
+                "p",
+                "delete_blend",
+                "--below",
+                "2mm",
+            ])
+            .unwrap();
+            assert_eq!(f.partial, None);
         });
     }
 

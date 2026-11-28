@@ -24,11 +24,22 @@ use serde_json::{Value, json};
 /// nothing else names it.
 pub const FORMAT: u64 = 20;
 
+/// The feature format a `delete_blend` with `partial` needs (ryukei
+/// 23.D): what it deletes depends on what the kernel can delete.
+pub const PARTIAL_FORMAT: u64 = 27;
+
 /// The feature types this module reads.
 pub const TYPES: [&str; 3] = ["delete_face", "delete_blend", "resize_blend"];
 
 /// The fields a request may give a `delete_blend`.
-pub const DELETE_BLEND_REQUEST: &[&str] = &["target", "targets", "faces", "below", "tolerance"];
+pub const DELETE_BLEND_REQUEST: &[&str] = &[
+    "target",
+    "targets",
+    "faces",
+    "below",
+    "tolerance",
+    "partial",
+];
 
 /// The fields a request may give a `resize_blend`: its groups whole, or
 /// its one group's fields (a fillet's `radius`, or a chamfer's `form`,
@@ -232,13 +243,17 @@ fn tolerance(o: &mut Obj, default: Unit, env: &Env) -> Result<Option<Quantity>> 
 /// radius, a chamfer's larger distance) and every blend holding one of
 /// `faces` deleted, closed over their chains and the corners they reach,
 /// their supports grown until they meet. `tolerance` is recognition's
-/// (the kernel's 10 µm when not written).
+/// (the kernel's 10 µm when not written). `partial` deletes unit by unit
+/// and keeps what refuses (ryukei 23.D).
 #[derive(Clone, Debug, PartialEq)]
 pub struct DeleteBlend {
     pub target: Id,
     pub below: Option<Quantity>,
     pub faces: Vec<Reference>,
     pub tolerance: Option<Quantity>,
+    /// Delete what can be deleted, unit by unit, keeping what refuses
+    /// (`ryukei::tweak::delete_blends_partial`); written only when true.
+    pub partial: bool,
 }
 
 impl DeleteBlend {
@@ -253,6 +268,9 @@ impl DeleteBlend {
         }
         if let Some(t) = &self.tolerance {
             v["tolerance"] = json!(t.text());
+        }
+        if self.partial {
+            v["partial"] = json!(true);
         }
         v
     }
@@ -289,11 +307,17 @@ impl DeleteBlend {
         }
         twice(&faces, "faces")?;
         let tolerance = tolerance(o, default, env)?;
+        let partial = match o.take_opt("partial") {
+            None | Some(Value::Bool(false)) => false,
+            Some(Value::Bool(true)) => true,
+            Some(_) => return Err(invalid("/partial", "partial is true or false")),
+        };
         Ok(DeleteBlend {
             target,
             below,
             faces,
             tolerance,
+            partial,
         })
     }
 
@@ -461,6 +485,21 @@ mod tests {
         let d = DeleteBlend::from_fields(&mut o, Unit::Mm, &Env::empty())?;
         o.finish()?;
         Ok(d)
+    }
+
+    /// Plan 23.D: `partial` is read as a boolean and written only when
+    /// true; anything else is invalid.
+    #[test]
+    fn a_partial_blend_delete_writes_partial_only_when_true() {
+        let d = blend_delete(json!({"target": "b", "below": "2 mm", "partial": true})).unwrap();
+        assert!(d.partial);
+        assert_eq!(d.fields()["partial"], true);
+        let d = blend_delete(json!({"target": "b", "below": "2 mm", "partial": false})).unwrap();
+        assert!(!d.partial);
+        assert!(d.fields().get("partial").is_none());
+        let e =
+            blend_delete(json!({"target": "b", "below": "2 mm", "partial": "yes"})).unwrap_err();
+        assert_eq!(e.details["pointer"], "/partial", "{e}");
     }
 
     fn resize(v: Value) -> Result<ResizeBlend> {

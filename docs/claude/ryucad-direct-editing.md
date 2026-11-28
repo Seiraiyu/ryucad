@@ -29,3 +29,34 @@ The design is document 445 in the Coxswain planning project `ryucad-ryukei`; thi
 - **The edit budget.** Measured again (plan 22.B, Task 23, release, cox-worker-5, 2026-11-11), the committed corpus included: nothing moved. The largest edit is still ryukei's `edit_props` seed 70 (3,249,017 units), so `DEFAULT_EDIT_BUDGET` stays `1 << 24`. ryucad's own largest is 38,149 (the groove run through, 29,957 in 22.A before ryukei 16.A), its largest blend edit 9,705 (a boss's foot and a pocket's rim); no corpus edit built.
 - **Testing.** `tests/direct_edits.rs`: `a_rounded_box_is_defeatured_by_size`, `a_named_fillet_is_deleted_leaving_the_chamfer`, `a_fillet_resized_keeps_its_names`, `chamfers_resize_and_a_fillet_becomes_one`, `the_blends_query_lists_what_delete_blend_takes`, `a_bosss_foot_and_a_pockets_rim_are_defeatured`, `a_sketch_on_a_deleted_chamfer_fails_naming_the_delete`, `a_mate_to_a_kept_face_holds_across_a_resize`, `blend_edits_refuse_with_their_hints`, `blend_edits_build_alike_on_one_thread_and_eight`, `a_rounded_box_through_step_is_defeatured` and `the_committed_corpus_defeatures_or_refuses_typed` (release), against exact volumes at millimetre scale. The `blend_edits` golden section (part `be` of `edited()`), `blend_edits_recompute_as_from_nothing`, `blend_edits_from_the_cli` (both ways, with undo and redo), and step-hunt's `defeature_finds_faults_and_counts_refusals`. Unit tests in `doc::blend`, `doc::edit`, `doc::files`, `blends`, `tweak`, `cli`, `diff`, `merge`, `renumber` and step-hunt's `classify`, `report` and `stages`.
 - **Limits.** Every millimetre case built at millimetres; none moved to ten times the size. A single rim edge of a pocket filleted alone overflows the top at its ends (the kernel's `overflow`), so the boss-and-pocket case fillets the whole rim. The committed corpus defeatures nothing yet (above). 22.A's committed feature seed for an offset past the opposite side with `topology: change` panics in ryukei's repair (`NotOutward`, #704), found while building this plan's fuzz targets. The campaign found no blend-edit fault; most real bodies still refuse typed, and their `count` lines are where the kernel's progress shows.
+
+## Partial blend deletes (decided in ryukei phase 23.D)
+
+Design 919, plan 23.D (phase 5).
+
+- **The field.** `partial` on `delete_blend` (`doc::edit::DeleteBlend::partial`), written only when true, at feature format 27 (`edit::PARTIAL_FORMAT`). Without it the feature is byte for byte ryucad 22's, at format 20. `partial: false` reads as absent.
+- **Building** (`tweak::build`, `Spec::DeleteBlend { partial }`):
+  - ryucad recognises the body under the feature's cancel alone.
+  - `blends::units` counts the picked units: each picked blend closed alone over its chain and corners, as the kernel tries them.
+  - ryukei's `delete_blends_partial_with` gets `edit.budget × units`, saturating.
+  - The feature builds whatever the kernel kept.
+  - A budget that runs out keeps the units not yet settled, with reason `budget`. One that runs out in the kernel's own recognition, before anything is built, is `edit_budget_exceeded`, as a plain delete: ryukei's `run_keeping` answers the budget for a refusal past it (plan 23.D, Task 1).
+  - A plain `delete_blend` is unchanged: recognition and delete under one `edit.budget`.
+- **Reports** (`tweak::partial_report`, kept in `Made::report`):
+  - `blends` and `corners` are the deleted units' blends and corners, as a plain delete's.
+  - `kept` is each blend of each kept unit, as `blends::blend_raw` gives it, with `reason` and, where one applies, `hint`. The reason is `tweak::refusal`'s for a tweak's refusal, `budget`, `not_a_solid` or `kernel`.
+  - `spent` is the kernel call's.
+  - `tweak::resolved` renders `kept` as it renders `blends`, in `inspect --feature` and `feature.show`.
+  - There is no warning and no new code (design 919): a rebuild warning would be a new `Code`.
+- **CLI and protocol.** `FeatureFields.partial`; `--partial [BOOL]` on `feature add` and `feature edit` (`--partial false` takes it away; `tweak::delete_blend_given`); `partial` in `edit::DELETE_BLEND_REQUEST`.
+- **Git.** Textconv prints `partial = true`. Merge is per key and its format follows (`feature_format`): a merge that drops `partial` writes format 20. Renumbering keeps it. The merge fuzz target's blend-edit mode toggles it. The feature corpus has a partial seed.
+- **References.** A later feature naming a kept blend's face resolves (deleting it is the kernel's refusal). One naming a deleted blend's face is refused as it is added, `reference_unresolved`.
+- **The test project** is ryukei 23.C's bridged twin (`ryukei_testkit::partial_deletes`), written to STEP in millimetres and imported as a solid. `blends.get` lists its 2 mm fillet, two 4 mm bridges and 10 mm disc. Below 5 mm a plain delete refuses `tweak_failed`. A partial one deletes the fillet and keeps both bridges, `heal_ambiguous`, at the profile's closed-form volume, spending 51,659 units.
+- **Testing.**
+  - `tests/direct_edits.rs`: `the_bridged_twin_through_step_holds_its_blends`, `a_partial_blend_delete_keeps_the_bridges`, `a_partial_blend_delete_has_its_budget_per_unit`, `references_to_a_partial_deletes_kept_and_deleted_faces` and `a_partial_blend_delete_is_the_same_everywhere`.
+  - `tests/cli.rs`' `blend_edits_from_the_cli`: `--partial`, `--partial false`, undo and redo.
+  - Unit tests: `edit::a_partial_blend_delete_writes_partial_only_when_true`, `files::a_partial_blend_delete_is_format_27`, `tweak::a_blend_deletes_partial_is_given_and_taken_away` and `cli::a_blend_delete_takes_partial`, with the textconv, merge and renumber tests' partial cases.
+  - The `partial_blend_delete` golden section (`44fd278ee4eb2850`).
+- **Limits.**
+  - A partial feature's result depends on what the kernel can delete, so a later kernel may delete more from the same file; the kept report says what a rebuild did.
+  - On the four NIST bodies SolidWorks refuses whole, a partial delete keeps most of their blends (ryukei 23.C, census VIII), and each refused unit spends up to the edit budget. No ryucad test runs one.

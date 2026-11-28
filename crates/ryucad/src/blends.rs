@@ -70,6 +70,21 @@ pub fn taken(rec: &Recognition, below: Option<f64>, faces: &[Name]) -> BTreeSet<
     }
 }
 
+/// How many units `taken` holds (ryukei 23.C): each picked blend closed
+/// alone over its chain and the corners it reaches, as the kernel's
+/// partial delete tries them.
+pub fn units(rec: &Recognition, taken: &BTreeSet<usize>) -> u64 {
+    let mut seen = BTreeSet::new();
+    let mut n = 0;
+    for &i in taken {
+        if seen.insert(i) {
+            n += 1;
+            seen.extend(self::taken(rec, None, &rec.blends[i].faces[..1]));
+        }
+    }
+    n
+}
+
 /// The corners (indices into `rec.corners`) that `blends` reach.
 pub fn corners_of(rec: &Recognition, blends: &BTreeSet<usize>) -> Vec<usize> {
     rec.corners

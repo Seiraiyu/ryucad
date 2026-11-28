@@ -3256,6 +3256,27 @@ mod tests {
             (m.value["below"].as_str(), &m.value["faces"]),
             (Some("3 mm"), &json!([r(1)]))
         );
+        // One side sets partial, the other edits below: both, at 27; one
+        // side takes it away: format 20 again (plan 23.D).
+        let mut part = base.clone();
+        part["partial"] = json!(true);
+        part["format"] = json!(27);
+        let m = merge(Some(&base), &part, &ours);
+        assert!(m.conflicts.is_empty(), "{:?}", m.conflicts);
+        assert_eq!(
+            (&m.value["partial"], &m.value["format"], &m.value["below"]),
+            (&json!(true), &json!(27), &json!("3 mm"))
+        );
+        let mut dropped = part.clone();
+        dropped.as_object_mut().unwrap().remove("partial");
+        dropped["format"] = json!(20);
+        let m = merge(Some(&part), &dropped, &part);
+        assert!(m.conflicts.is_empty(), "{:?}", m.conflicts);
+        assert!(
+            m.value.get("partial").is_none() && m.value["format"] == 20,
+            "{}",
+            m.value
+        );
         let z = json!({"format": 20, "kind": "ryucad.feature", "type": "resize_blend",
             "target": "b", "groups": [{"radius": "3 mm", "faces": [r(1)]}]});
         let mut a = z.clone();

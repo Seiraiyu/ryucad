@@ -84,7 +84,8 @@ pub const MANIFEST_FORMAT: u64 = 4;
 /// thread, fastener, fit and tolerance (ryucad 28), 24 an instance
 /// pattern that follows a part's features or a sketch's points (ryucad
 /// 25.C), 25 a hole's new geometry and cosmetic threads (ryucad 28.B), 26
-/// a hole at places and a fill pattern (ryucad 28.C). A
+/// a hole at places and a fill pattern (ryucad 28.C), 27 a partial
+/// `delete_blend` (ryukei 23.D). A
 /// feature is written at the lowest format that holds it, so one with
 /// only literals stays 1.
 pub const FEATURE_FORMAT: u64 = {
@@ -99,6 +100,7 @@ pub const FEATURE_FORMAT: u64 = {
         super::tweak::DRAFT_FORMAT,
         super::body::TOOL_FORMAT,
         super::edit::FORMAT,
+        super::edit::PARTIAL_FORMAT,
         super::hole::INTENT_FORMAT,
         super::hole::GEOMETRY_FORMAT,
         super::hole::PLACES_FORMAT,
@@ -773,7 +775,11 @@ pub fn manifest_format(v: &Value) -> u64 {
 /// expression.
 pub fn feature_format(v: &Value) -> u64 {
     let ty = v.get("type").and_then(Value::as_str);
-    // Highest first: a hole at places and a fill pattern are 26, a
+    // Highest first: a partial delete_blend is 27.
+    if ty == Some("delete_blend") && v.get("partial") == Some(&Value::Bool(true)) {
+        return super::edit::PARTIAL_FORMAT;
+    }
+    // Then a hole at places and a fill pattern are 26, a
     // cosmetic thread and a hole's new geometry 25, a following instance
     // pattern 24, a hole with intent 23, whatever else they hold.
     if (ty == Some("hole") && v.get("places").is_some())
@@ -1212,6 +1218,11 @@ impl Feature {
     /// The lowest format that holds this feature.
     pub fn format(&self) -> u64 {
         // Highest first, as `feature_format`.
+        if let Feature::DeleteBlend(d) = self
+            && d.partial
+        {
+            return super::edit::PARTIAL_FORMAT;
+        }
         if let Feature::Hole(h) = self
             && h.has_places()
         {
@@ -3206,5 +3217,31 @@ mod tests {
         ] {
             assert_eq!(feature_format(&v), want, "{v}");
         }
+    }
+
+    /// Plan 23.D: a partial delete_blend is format 27, a plain one 20,
+    /// from its file and from the feature alike.
+    #[test]
+    fn a_partial_blend_delete_is_format_27() {
+        use super::super::edit::{DeleteBlend, FORMAT, PARTIAL_FORMAT};
+        let partial =
+            json!({"type": "delete_blend", "target": "a", "below": "2 mm", "partial": true});
+        let plain = json!({"type": "delete_blend", "target": "a", "below": "2 mm"});
+        assert_eq!(feature_format(&partial), PARTIAL_FORMAT);
+        assert_eq!(feature_format(&plain), FORMAT);
+        let fields = json!({"target": "a", "below": "2 mm", "partial": true});
+        let mut o = Obj::new(&fields, "").unwrap();
+        let d =
+            DeleteBlend::from_fields(&mut o, crate::units::Unit::Mm, &crate::expr::Env::empty())
+                .unwrap();
+        assert_eq!(
+            Feature::DeleteBlend(Box::new(d.clone())).format(),
+            PARTIAL_FORMAT
+        );
+        let d = DeleteBlend {
+            partial: false,
+            ..d
+        };
+        assert_eq!(Feature::DeleteBlend(Box::new(d)).format(), FORMAT);
     }
 }

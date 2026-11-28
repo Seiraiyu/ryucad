@@ -790,3 +790,26 @@ Design 919, plan 23.C (#658).
   - The order is greedy: a unit kept might have gone in another order, and the design forbids searching orders.
   - A unit that refuses costs about what its set's refusal did (23.B), so a body's partial delete costs roughly its refused sets plus its refused units, each up to a gap.
   - Where a body's sets refuse alone, as FTC 07's do, no order of units helps: the refusal is the growth's (#652).
+
+## SolidWorks parity: the verdict (decided in ryukei phase 23.D)
+
+Design 919, plan 23.D (phase 6; #652, #658). The owner's direction (2026-11-18) was "go for SW parity and call it good". The bars, from 23.A to 23.D:
+
+| Bar (design 919) | SolidWorks 2026 | Result |
+|---|---|---|
+| CTC 02 with PMI #295, one operation | deleted, 3 faces | **Unmet** (23.A): the release is asked and built, and the delete still refuses `GapNotHealed`; moved to ryukei 24 |
+| One-operation refusals inside 10 s | 0.1–2 s | **Unmet** (23.B, the owner's choice): `GAP` = `1 << 26` keeps main's answers and times, 26.5 to 55.5 s on cox-worker-2 |
+| Partial, FTC 07 rd | 75 of 101 faces | **Unmet** (23.C): 32 |
+| Partial, FTC 10 rb | 90 of 94 | **Unmet**: 28 |
+| Partial, STC 10 #3044 | 104 of 108 | **Unmet**: 38 |
+| Partial, FTC 07 AP242 #13541 | 68 of 101 | **Unmet**: 0 |
+| Partial results valid | every one valid | **Met**: one valid solid each, every kept face under its name, every cause typed |
+| Partial, time inside 120 s | – | **Unmet**: hours on cox-worker-4; the strict run was skipped, since the bar is unmet by hours (the coxswain) |
+| No delete changed, goldens, work figures, property suites, fuzzing | – | **Met** in 23.A, 23.B, 23.C and 23.D |
+| ryucad's `delete_blend` with `partial` | – | **Met** (23.D; `ryucad-direct-editing.md`) |
+
+- **The reading** (census VIII, #658's issuecomment-7110808604):
+  - In every NIST body, every unit kept refuses when grown on its own, as the set holding it does, mostly `Uncertain` near the gap at 10 to 67 M units each.
+  - No unit was tried again, because nothing built after a refusal.
+  - So the limit is the re-trim's growth on these bodies (#652's family), not the order of deletes. Phases 16 to 23 each moved a failure rather than removing the family.
+- **The verdict** (the owner, 2026-11-24, question 1279 on plan 981): **accept this level.** #652 and #658 are closed with the measured shortfall and every kept unit's cause on record. No new stage follows from them. CTC 02 with PMI's one operation continues in ryukei 24, which design 919's verdict doesn't close.
