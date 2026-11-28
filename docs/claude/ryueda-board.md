@@ -202,3 +202,87 @@ The design is document 924 in the Coxswain planning project `ryucad-ryukei`; the
     - What remains is three plane-sized booleans (the difference, the opening's grow and the join), at about 3.7, 3.7 and 2.2 s.
     - Every write, DRC and export on a board with a large plane refills it in seconds. Windowing the refill is stage 8's work, not 7.D's.
     - `bar.rs`'s `a_plane_fills_within_its_bar` is ignored until then (`--ignored` runs it). Its plane is on `top`: the bars' board has no bottom copper and no vias, so a bottom plane is one island its net never reaches.
+    - **Met in ryueda 7.E:** 0.32 to 0.35 s (500 ms), at 1 µm and by tile (#1067 closed); the test runs again.
+
+## Continuous DRC (decided in ryueda 7.E)
+
+The design is document 924 in the Coxswain planning project `ryucad-ryukei`; these are its phases 9 and 10, plan 7.E.
+
+- **The write path, profiled first.** `RYUEDA_PROFILE=1` prints stage timings to stderr, and `=<file>` appends them to a file, which is the only way to see a daemon's (`crate::profile`). On `Spec::bar()`'s board (1,000 parts), Task 1's profile of a track write (about 110 ms worst) showed two costs:
+  - the freshness scans, a full listing and stat of 3,000 files twice, 17 ms;
+  - parsing, 6.6 ms.
+
+  So the daemon's session watches its folder through `ryu_session`'s `Watch` (ryucad's pattern): a request checks only the files that events name, plus every file every `RESCAN`, and `RYUEDA_NO_WATCH` turns that off. `adopt` stamps only the files written. The bars age their generated files (`board_gen::age`), since a stamp is trusted only two seconds after it was taken. Board files keep their parse across a session's loads, keyed by the shared `Arc<[u8]>` buffer of an unchanged file (`board/load.rs`). On the scale board that took a load from 67 to 60 ms: the rest is per-file bookkeeping over 50,000 files and hashing for the revision (#1126).
+
+  | Track write with its delta, `Spec::bar()` | Worst |
+  |---|---|
+  | 7.D | about 110 ms |
+  | file events, stamps of the written files | 60 ms |
+  | pieces, `Live`, scoped rules, tiles | 46 ms |
+  | the layout edited by object | 38.8 ms (bar 25 ms) |
+- **Pieces by object** (`shapes::pieces`, `ObjShapes`, `Pieces`): a board's shapes are built per object (`Obj`: a placement by occurrence, a track, via, hole, keepout or drawing). Each piece carries the hash of what it was built from. A piece whose hash held is reused, and `assemble` concatenates the pieces in `build`'s order, then fills the pours. `Pieces::base` (the board file, its preset, the copper count and the board's name) reuses nothing when it moves.
+- **Copper edited, not rebuilt.**
+  - `Copper::apply_layout` (ryu-copper) edits the copper built from one layout into that of another, by key. It is named so because a private `apply` already exists.
+  - `Connectivity::apply_delta` is told which pieces changed and which pours differ. It builds and compares only their items and holes (`layout::put_items`, `put_pour`, `put_holes`), edits the layout by key, and removes and inserts only those keys in the copper.
+  - `Copper::mark_changes` and `take_marks` note the box of every item whose body or pieces an edit changed, and of every hole it drilled or filled. `Copper::land` (the nodes a point lands on) and `placement_of` (those nodes read as islands) split `place`. A net point that didn't move and lies outside every mark keeps its landing, and only its islands are read again.
+  - The result equals `connect(board, s)`. On the scale board that took `live.apply` from about 210 to about 88 ms.
+- **`Live` and the session's LRU.** `board::live::Live` keeps a board's pieces, its rules' key and its check (connectivity included) between requests. `update` carries it to the files as they are now, and says `Same`, `Edited` or `Rebuilt`. The check is an `Option` the update takes; when something else still holds it (`Arc` shared), the update rebuilds. The session keeps the four most recently used boards' `Live` (`Session::lives`, `BOARDS`), and drops one whose update fails.
+- **What rebuilds from nothing:**
+  - a change of `rules_key` (the rules file, the board file, its preset, the design's nets' classes);
+  - a change of `Pieces::base`;
+  - copper layers that differ (a stackup change: `apply` says `None`);
+  - a check that is still shared.
+
+  An edit that dirties more than half the objects is judged whole.
+- **The dirty set** (`drc::Dirty`) is the copper's changed keys, every object whose piece changed (new, gone or hashed differently), and the references of those objects in the old shapes and the new. It is then widened to every layout key a dirty reference names. There are three kinds of rule (`drc::SCOPED` lists the scoped codes):
+  - per-object rules judge only the dirty objects: track width, drills, via spans, annular rings, edge clearance;
+  - pairwise rules judge only pairs with a dirty end (`Index::pairs_with`, `clearance_of`, `hole_clearance_of`): clearance, mask clearance, hole spacing, hole clearance, courtyards, keepouts;
+  - whole-board rules run every time: placements, the copper's opens, shorts and mismatches, placement constraints, and the pours' findings.
+- **Findings merged.** `BoardCheck::raw` keeps the rules' findings before folding. An edit keeps the scoped codes' raw findings that name nothing dirty, adds what it judged, and folds, waives and sorts the result as a check does. So an edited check says what a check built from the files says (`live::said`: findings, islands, uncertain contacts).
+- **The fill's bound** (question 1305): fills flatten at `fill::BOUND` = 1 µm, not 7.D's 10 nm. With 10 nm a plane's time was in its round corners' vertices (9.9 s against 0.64 s on the bars' board). Obstacles still grow by their rule plus `BOUND` plus a nanometre, so a fill is exactly clear by its rule. A fill is inside its area to the grid's rounding (`fill::outside`; see 7.D's steps above).
+- **Tiles** (question 1306, #1067; `fill::fill_tiled`, `fill::TILE` = 8 mm):
+  - A pour fills square tiles in parallel, each from its window: the tile grown by the least width, the longest spoke and `4·BOUND + 2`. Each pad's spokes are chosen in the tile that holds its centre, and each tile's fill is clipped exactly to the tile.
+  - Pieces join into regions by their contacts across seams; only the 8 neighbouring tiles are looked at, and own copper is found through an `Index`.
+  - Obstacles are bucketed by tile and grow by `TILE_SNAP` more for the seams; each is grown once (`OnceLock`).
+  - A refill reuses every tile whose inputs' 128-bit fingerprint held (`Print`; ryu-copper takes no hashing crate, `tests/deps.rs`), so a write refills only the tiles it reaches.
+  - Pour pieces are keyed `Key::Pour { id, tile, n }`, stable while other tiles change: renumbering them made a part move cost 6 s.
+  - `pour::Grown` keeps each grown obstacle, keyed by a fingerprint of its shape and reach (`GrowRef`) and checked for equality on a hit. A refill then grows only the copper that changed: a scale track write went from 2.4 s to 0.9 s.
+  - 16 mm tiles fill faster (0.29 s against 0.37 s) but make each tile's refill three times dearer.
+- **`board.checked`**: `server::publish_boards` sends it on the `boards` topic (`Hub::watches_topic`) for each board whose findings moved since its watchers were last told. It carries `board`, `revision`, `delta` (`added` findings, `removed` IDs), `errors`, `warnings` and `waived`, or `error` for a board that can't be checked. A board first seen while watched is told whole, and nothing is checked while nobody watches.
+- **`board ratsnest B [--net N] [--ref R]`** gives each open net's unrouted connections: a spanning tree over its islands (Prim's from the least island, each edge the nearest pair of pieces), measuring only the island just joined against the rest. It equals the all-pairs table, which is kept as the test's reference. Each connection carries `a`, `b`, their layers and points, `distance_nm` and `net`, plus `unplaced` for the parts with no place. `board render --ratsnest` draws the connections and `--findings` the findings' points.
+- **`board_gen::Spec::scale()`**: 5,000 parts, 10,000 pads, 39,724 track segments, 4 layers, planes on `in2`, `in1` and `bottom` on nets the chain's vias join (via_every 4), and a top pour round the first row (`Spec.planes`). `scale_boards_are_clean_at_a_tenth` checks it at a tenth of its parts.
+- **Testing.**
+  - Unit tests per module: pieces and their reuse, `Live`'s update kinds, the dirty set, scoped per-object and pairwise rules, the merge, tiles and their reuse, `board.checked`, the ratsnest and its renders.
+  - ryu-copper: `apply_matches_a_rebuild` (32 seeded layout pairs); `landings_outside_the_marks_are_kept` (random edits; a point outside every mark lands where it did, and every placement is a rebuild's); the near queries' properties (`pairs_with_keys_are_the_whole_pairs_filtered`, `clearance_of_keys_is_the_whole_query_filtered`); the tiled fill's (`tiled_fills_keep_the_whole_fills_promises`, `a_refill_rebuilds_only_the_tiles_an_edit_reaches`).
+  - `board_props.rs`'s `live_equals_a_rebuild_after_every_edit`: 16 seeded multilayer boards, 12 steps each (writes and file-level undos). 188 of 192 updates are edited in place and the rest change nothing, and each says what a check built from the files says.
+  - Fuzz: the `board` target carries one `Live` through up to four edits drawn from the bytes (a track added, moved or removed; a placement moved or turned; a via added or removed; a pour's `min_width_nm` changed) against `drc::check`. On GitHub's runner, 10 minutes each: `board` 48,490 runs and `copper` 40,206 runs, no finding (https://github.com/Seiraiyu/ryucad/actions/runs/45557752134). The first run's `copper` finding is the seed `spoke-across-a-sloped-edge`.
+  - Goldens: `board.pour.ratsnest` is new (the breakout's ratsnest after `gnd_c1` is deleted, alike on one thread and eight). What moved is the fills at 1 µm and by tile, and nothing else:
+
+    | Key | Moved |
+    |---|---|
+    | `fill.0` to `fill.7` | yes (1 µm) |
+    | `fill.tiled.0` to `fill.tiled.7` | added |
+    | `board.pour.show`, `board.pour.bottom.svg`, the copper-top and copper-bottom Gerbers | yes |
+    | `board.pour.ratsnest` | added |
+    | `board.pour.drc`, the manifest, every other section | no |
+- **Bars** (cox-worker-2, Ryzen 7 9700X, eight threads, `RYUEDA_BARS=1`, one test at a time; load under 2 at the start and 8.9 by the end, so the scale rows run high; a quiet loose run on the same box gave cold 5.3 s, `in1` plane 1.52 s, track write 0.76 s, part move 0.78 s):
+
+  | Board | Bar (design 924) | Measured |
+  |---|---|---|
+  | `Spec::bar()`, 1,000 parts | checked cold, 1 s | 57 ms |
+  | | the whole top plane, 500 ms | 0.35 s (met; #1067) |
+  | | a track write with its delta, 25 ms | 39.6 ms, accepted |
+  | `Spec::scale()`, 5,000 parts | cold, 3 s | 6.6 s, accepted |
+  | | the `in1` plane, 500 ms | 1.82 s, accepted |
+  | | a top track write, its pour refilled, 150 ms | 0.82 s, accepted |
+  | | a part on the `in1` net moved, 250 ms | 0.80 s, accepted |
+
+  **The owner accepted the misses** (2026-11-28, option (a)): the scale board's four, and `Spec::bar()`'s 25 ms track write (38.8 ms on a quiet box; the same per-write floors, #1126 to #1130). With `RYUEDA_BARS=1`, `bar.rs`'s `accepted` prints them with their issues instead of failing; loose (10×) they are asserted as every bar is.
+  - A warm scale update is about 590 ms: assemble about 200 (concat 42, the pours about 135), check about 130, the re-read files about 90, `apply` about 88 (the netlist compare 50), pieces about 65, the dirty set and the rules key about 40.
+  - These are floors that grow with the board, not with the edit:
+    - #1126: the project reloaded whole per write;
+    - #1127: the check's whole-board state;
+    - #1128: every object's hash;
+    - #1129: the netlist compare;
+    - #1130: shapes cloned, not `Arc<Shape>`.
+  - The plane and cold bars are the polygon booleans' raw speed (#1112): the `in1` plane spends 783 ms growing obstacles and 713 ms filling its 1,216 tiles.
