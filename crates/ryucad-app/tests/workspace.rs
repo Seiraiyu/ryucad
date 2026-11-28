@@ -735,8 +735,8 @@ fn a_burst_costs_each_reader_about_one_request_per_publish() {
         let mut out = std::io::BufReader::new(child.stdout.take().unwrap());
         for i in 0..60 {
             let line = serde_json::json!({"jsonrpc": "2.0", "id": i, "method": "feature.add",
-                "params": {"part": "p", "id": format!("s{i:02}"), "type": "sphere",
-                           "params": {"radius": 1 + i % 4},
+                "params": {"part": "p", "id": format!("s{i:02}"), "type": "box",
+                           "params": {"x": 1 + i % 4, "y": 1, "z": 1},
                            "placement": {"origin": [i * 10, 0, 0]}}});
             writeln!(stdin, "{line}").unwrap();
             let mut a = String::new();
@@ -754,8 +754,12 @@ fn a_burst_costs_each_reader_about_one_request_per_publish() {
     script.join().unwrap();
     // The last publish, and the window's reads after it.
     std::thread::sleep(Duration::from_millis(600));
-    assert!(ws.wait_until(WAIT, |w| w.idle() && !w.doctor_pending()));
-    assert!(ws.wait_until(WAIT, |w| w.idle()));
+    assert!(
+        ws.wait_until(WAIT, |w| w.idle() && !w.doctor_pending()),
+        "not settled: {}",
+        ws.waiting_on()
+    );
+    assert!(ws.wait_until(WAIT, |w| w.idle()), "{}", ws.waiting_on());
     let t = methods(&p);
     let n = |m: &str| t[m]["count"].as_u64().unwrap_or(0);
     let publishes = t["daemon.publish"]["publishes"].as_u64().unwrap_or(0);
@@ -774,8 +778,9 @@ fn a_burst_costs_each_reader_about_one_request_per_publish() {
     );
 }
 
-/// Runs `n` sphere writes through one `ryucad session --stdio`, spread over
-/// `parts`, while `ws` is polled as a window's frames poll it; then waits
+/// Runs `n` box writes (cheap to mesh, #1138) through one `ryucad
+/// session --stdio`, spread over `parts`, while `ws` is polled as a
+/// window's frames poll it; then waits
 /// for the last publish and the reads after it. Returns the burst's
 /// seconds, the daemon's timings by method, and the burst's pauses: the
 /// gaps between one write's answer and the next of `DOCTOR_QUIET` or more
@@ -804,7 +809,7 @@ fn burst(
         for i in 0..n {
             let line = serde_json::json!({"jsonrpc": "2.0", "id": i, "method": "feature.add",
                 "params": {"part": parts[i % parts.len()], "id": format!("b{i:02}"),
-                           "type": "sphere", "params": {"radius": 1 + i % 4},
+                           "type": "box", "params": {"x": 1 + i % 4, "y": 1, "z": 1},
                            "placement": {"origin": [i * 10, 0, 0]}}});
             writeln!(stdin, "{line}").unwrap();
             let mut a = String::new();
@@ -834,8 +839,12 @@ fn burst(
         ws.tick(Instant::now());
         std::thread::sleep(Duration::from_millis(16));
     }
-    assert!(ws.wait_until(WAIT, |w| w.idle() && !w.doctor_pending()));
-    assert!(ws.wait_until(WAIT, |w| w.idle()));
+    assert!(
+        ws.wait_until(WAIT, |w| w.idle() && !w.doctor_pending()),
+        "not settled: {}",
+        ws.waiting_on()
+    );
+    assert!(ws.wait_until(WAIT, |w| w.idle()), "{}", ws.waiting_on());
     let t = methods(p);
     (secs, t, pauses)
 }
