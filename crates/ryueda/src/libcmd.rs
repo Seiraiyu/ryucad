@@ -495,7 +495,7 @@ fn mount_param(text: &str) -> Result<crate::footprint::Mount> {
 fn model_hash(root: &std::path::Path, path: &str) -> Result<String> {
     let full = path_of(root, path);
     let bytes = std::fs::read(&full).map_err(|_| {
-        Error::new(Code::NotFound, format!("there is no model file {path}")).with("path", path)
+        Error::new(Code::NotFound, format!("there is no model file {path}")).with("reference", path)
     })?;
     Ok(blake3::hash(&bytes).to_hex().to_string())
 }

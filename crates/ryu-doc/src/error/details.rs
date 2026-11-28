@@ -155,6 +155,7 @@ details! {
         key("wanted", Any, "What would have been accepted."),
         alias("expected", "wanted"),
         key("known", Arr, "The names accepted."),
+        alias("accepts", "known"),
         key("feature", Str, "The feature at fault."),
         key("part", Str, "The part at fault."),
         key("solid", Str, "The solid at fault."),
@@ -251,6 +252,7 @@ details! {
     ],
     NotFound => [
         key("part", Str, "The part asked for."),
+        key("pad", Str, "The footprint pad asked for, by ID."),
         key("feature", Str, "The feature asked for."),
         key("solid", Str, "The solid asked for."),
         key("solids", Any, "The solids there are."),

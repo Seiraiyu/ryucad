@@ -21,6 +21,7 @@ invalid_param exit 1 "Invalid param"
   wanted any What would have been accepted.
   expected any An older spelling of `wanted`, carried beside it.
   known arr The names accepted.
+  accepts arr An older spelling of `known`, carried beside it.
   feature str The feature at fault.
   part str The part at fault.
   solid str The solid at fault.
@@ -133,6 +134,7 @@ duplicate_id exit 1 "Duplicate ID"
 
 not_found exit 1 "Not found"
   part str The part asked for.
+  pad str The footprint pad asked for, by ID.
   feature str The feature asked for.
   solid str The solid asked for.
   solids any The solids there are.

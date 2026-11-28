@@ -231,3 +231,4 @@ tolerant/3040b5c2af01485ecd6a5d96c4008cfa58c42744
 tolerant/78d2ac85e405b906612814ad69bedb021fe76521
 copper/spoke-across-a-sloped-edge
 footprint/seed
+footprint/undeclared-pad

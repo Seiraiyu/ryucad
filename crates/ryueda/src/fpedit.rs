@@ -585,6 +585,9 @@ pub(crate) mod tests {
     pub(crate) fn fails(f: &Footprint, ops: Value) -> (Code, String) {
         let mut t = f.clone();
         let e = apply(&mut t, ops.as_array().unwrap(), Unit::Mm, &no_models).unwrap_err();
+        // Every refusal's details are its code's declared keys (design
+        // 698): the footprint fuzz target found `pad` undeclared.
+        crate::error::details::check(&e);
         let at = e.details["pointer"].as_str().unwrap_or("").to_owned();
         (e.code, at)
     }
