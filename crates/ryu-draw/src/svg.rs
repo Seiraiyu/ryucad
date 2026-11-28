@@ -116,7 +116,7 @@ pub fn write(size: P, items: &[Item], background: Option<Colour>) -> String {
                 };
                 let _ = writeln!(
                     out,
-                    "<text x=\"{x}\" y=\"{y}\" font-family=\"Inter\" font-size=\"{}\" text-anchor=\"{anchor}\" fill=\"{}\"{turn}>{}</text>",
+                    "<text x=\"{x}\" y=\"{y}\" font-family=\"Inter, sans-serif\" font-size=\"{}\" text-anchor=\"{anchor}\" fill=\"{}\"{turn}>{}</text>",
                     num(*size),
                     colour.to_hex(),
                     escape(text)
@@ -165,6 +165,9 @@ mod tests {
         assert!(s.contains("y=\"277\""), "{s}");
         assert!(s.contains("rotate(-90 5 277)"), "{s}");
         assert!(s.contains(">A&lt;B</text>"), "{s}");
+        // A viewer without Inter draws sans-serif, not its default serif
+        // (#1139, as ryusch's SVG after ryueda's #1091).
+        assert!(s.contains("font-family=\"Inter, sans-serif\""), "{s}");
         assert_eq!(s, write([210.0, 297.0], &items, Some(Colour::WHITE)));
     }
 }
