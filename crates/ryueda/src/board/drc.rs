@@ -1062,6 +1062,54 @@ pub fn courtyards(s: &BoardShapes, board: &str, rules: &Rules) -> Vec<Finding> {
     out
 }
 
+/// Two parts' designators on one silk layer whose strokes touch (#1095,
+/// question 1349): a warning naming both, the second's `--ref-at` its fix.
+/// Judged through ryu-copper's bodies as courtyards are, never by boxes.
+pub fn designators(s: &BoardShapes, board: &str) -> Vec<Finding> {
+    let opts = BodyOptions::default();
+    let bodies: Vec<Body> = s
+        .designators
+        .iter()
+        .map(|d| Body::of_shape(&d.shape, &opts))
+        .collect();
+    let index = ryu_copper::index::Index::from_bodies(
+        1,
+        bodies
+            .iter()
+            .enumerate()
+            .map(|(i, b)| (i, 0, b.clone()))
+            .collect(),
+        opts,
+    );
+    index
+        .pairs(0, 0)
+        .into_par_iter()
+        .filter_map(|p| {
+            let (a, b) = (&s.designators[p.a], &s.designators[p.b]);
+            if a.layer != b.layer || a.owner == b.owner {
+                return None;
+            }
+            let v = measure::touches(&bodies[p.a], &bodies[p.b]);
+            if v == Verdict::No {
+                return None;
+            }
+            let (a, b) = if a.refdes <= b.refdes { (a, b) } else { (b, a) };
+            Some(finding(
+                Code::SilkRefOverlap,
+                Severity::Warning,
+                board,
+                vec![a.owner.clone(), b.owner.clone()],
+                format!(
+                    "{} and {}'s designators overlap on {}; move one with \
+                     `ryueda board place {board} {} --ref-at X,Y`",
+                    a.refdes, b.refdes, a.layer, b.refdes
+                ),
+                json!({"layer": a.layer, "uncertain": v == Verdict::Uncertain}),
+            ))
+        })
+        .collect()
+}
+
 /// A board checked: its shapes, its copper connected and compared, its
 /// findings sorted, and whether a placement's pads were left out.
 pub struct BoardCheck {
@@ -1297,7 +1345,7 @@ struct Ctx<'a> {
 
 type Rule = fn(&Ctx) -> Vec<Finding>;
 
-const RULES: [Rule; 14] = [
+const RULES: [Rule; 15] = [
     |c| placements(c.board, c.files, c.occs, c.shapes),
     |c| copper(c.conn, c.incomplete),
     |c| clearance(c.conn, c.rules),
@@ -1310,6 +1358,7 @@ const RULES: [Rule; 14] = [
     |c| hole_clearance(c.conn, c.shapes, c.rules),
     |c| edges(c.conn, c.shapes, c.rules),
     |c| courtyards(c.shapes, c.board, c.rules),
+    |c| designators(c.shapes, c.board),
     |c| super::place::constraints(c.board, c.files, c.occs, c.shapes),
     |c| super::keepout::check(c.shapes, c.board),
 ];
@@ -1506,6 +1555,45 @@ mod tests {
         let f = mask_clearance(&conn, &s, &preset::JLC_2L);
         assert_eq!(f.len(), 1, "{f:?}");
         assert_eq!(f[0].details["layer"], "copper.bottom");
+    }
+
+    #[test]
+    fn designators_overlapping_on_one_layer_are_one_warning() {
+        let mut s = board(20 * MM, 10 * MM);
+        s.designator("R2", (5 * MM, 5 * MM), "silk.top").designator(
+            "R1",
+            (5 * MM + 300 * UM, 5 * MM),
+            "silk.top",
+        );
+        let f = designators(&s, "b");
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(f[0].code, Code::SilkRefOverlap);
+        assert_eq!(f[0].severity, Severity::Warning);
+        assert_eq!(f[0].refs, ["b:R1", "b:R2"]);
+        assert!(f[0].message.contains("board place b R2 --ref-at"), "{f:?}");
+    }
+
+    #[test]
+    fn designators_a_millimetre_apart_dont_overlap() {
+        // One above the other, 1 mm high each, 1 mm of clear silk between.
+        let mut s = board(20 * MM, 10 * MM);
+        s.designator("R1", (5 * MM, 4 * MM), "silk.top").designator(
+            "R2",
+            (5 * MM, 6 * MM),
+            "silk.top",
+        );
+        assert!(designators(&s, "b").is_empty());
+    }
+
+    #[test]
+    fn designators_on_opposite_sides_dont_overlap() {
+        let mut s = board(20 * MM, 10 * MM);
+        s.designator("R1", (5 * MM, 5 * MM), "silk.top").designator(
+            "R2",
+            (5 * MM, 5 * MM),
+            "silk.bottom",
+        );
+        assert!(designators(&s, "b").is_empty());
     }
 
     #[test]

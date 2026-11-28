@@ -6377,6 +6377,44 @@ fn parts_placed_by_constraint_from_the_cli() {
     assert!(placement_of(&p, "main", "R1").get("side").is_none());
 }
 
+/// #1095: two parts' designators on one another are a warning naming both,
+/// with `--ref-at` as its fix; moving one clears it.
+#[test]
+fn designators_overlapping_are_a_warning() {
+    let p = Pair::breakout();
+    p.ok(&[
+        "board", "create", "Main", "--design", "board", "--rect", "30,20", "--id", "main",
+    ]);
+    p.ok(&["board", "place", "main", "R1", "--at", "10,10"]);
+    let ops = json!([{"ref": "R2", "at": ["14", "10"], "ref_at": ["-4", "1.26"]}]).to_string();
+    let v = p.ok(&["board", "place", "main", "--ops", &ops]);
+    let f = v["drc"]["added"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["code"] == "silk_ref_overlap")
+        .unwrap_or_else(|| panic!("{v}"))
+        .clone();
+    assert_eq!(f["severity"], "warning", "{f}");
+    assert_eq!(f["refs"].as_array().unwrap().len(), 2, "{f}");
+    assert!(f["message"].as_str().unwrap().contains("--ref-at"), "{f}");
+    // The other parts aren't placed, so `board drc` exits 1 with its report.
+    let d = p.fails(&["board", "drc", "main"], "check_failed", 1);
+    assert!(
+        d["details"]["report"]["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x["id"] == f["id"]),
+        "{d}"
+    );
+    let m = p.ok(&["board", "place", "main", "R2", "--ref-at", "0,1.26"]);
+    assert!(
+        m["drc"]["removed"].as_array().unwrap().contains(&f["id"]),
+        "{m}"
+    );
+}
+
 /// Groups from the CLI (ryueda 7.C): listed, moved, turned and flipped
 /// rigidly, all or nothing; an unknown group refused.
 #[test]
