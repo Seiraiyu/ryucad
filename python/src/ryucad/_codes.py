@@ -392,6 +392,7 @@ class Code(str, Enum):
     DRC_EDGE_CLEARANCE = "drc_edge_clearance"
     DRC_COURTYARD_OVERLAP = "drc_courtyard_overlap"
     DRC_COURTYARD_OPEN = "drc_courtyard_open"
+    SILK_REF_OVERLAP = "silk_ref_overlap"
     BOARD_STACKUP_INVALID = "board_stackup_invalid"
     BOARD_LAYER_NOT_FOUND = "board_layer_not_found"
     DRC_VIA_SPAN = "drc_via_span"
@@ -820,6 +821,7 @@ EXIT: dict[Code, int] = {
     Code.DRC_EDGE_CLEARANCE: 1,
     Code.DRC_COURTYARD_OVERLAP: 1,
     Code.DRC_COURTYARD_OPEN: 1,
+    Code.SILK_REF_OVERLAP: 1,
     Code.BOARD_STACKUP_INVALID: 1,
     Code.BOARD_LAYER_NOT_FOUND: 1,
     Code.DRC_VIA_SPAN: 1,

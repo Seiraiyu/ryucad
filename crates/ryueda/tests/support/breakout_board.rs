@@ -62,6 +62,10 @@ pub fn script() -> Vec<Vec<String>> {
             "--rotation",
             "270",
         ],
+        // Not the round's: R2's turned designator touched U2's, a
+        // `silk_ref_overlap` warning since #1095, so it goes to R2's
+        // other side and the board stays clean.
+        &["board", "place", "q7smdsgi6u", "R2", "--ref-at", "0,-2.2"],
         &[
             "board",
             "via",

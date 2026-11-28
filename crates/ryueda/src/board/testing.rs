@@ -237,4 +237,17 @@ impl BoardShapes {
         });
         self
     }
+
+    /// A part's designator `refdes`, 1 mm high, centred on `at`, on
+    /// `layer` (`silk.top` or `silk.bottom`).
+    pub fn designator(&mut self, refdes: &str, at: (i64, i64), layer: &str) -> &mut Self {
+        let shape = super::text::centred(refdes, [at.0, at.1], 0, [MM, MM], 150 * UM).unwrap();
+        self.designators.push(super::shapes::DesignatorInfo {
+            owner: format!("b:{refdes}"),
+            refdes: refdes.into(),
+            layer: layer.into(),
+            shape,
+        });
+        self
+    }
 }

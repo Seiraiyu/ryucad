@@ -1800,6 +1800,9 @@ enum BoardCmd {
     #[command(subcommand)]
     Hole(HoleCmd),
     /// The board's DRC findings; exits 1 when any is an error.
+    ///
+    /// Two parts' designators on one silk layer are a warning
+    /// (`silk_ref_overlap`); `board place BOARD REF --ref-at X,Y` moves one.
     Drc {
         board: String,
         /// Only findings of this code; repeat for more.
