@@ -272,7 +272,8 @@ fn dispatch(
             number,
             text,
             limit,
-        } => crate::documents::list(session, doc_type, number, text, limit),
+            rev,
+        } => crate::documents::list(session, doc_type, number, text, limit, rev.as_deref())?,
         Request::DocumentEdit {
             document,
             fields,
