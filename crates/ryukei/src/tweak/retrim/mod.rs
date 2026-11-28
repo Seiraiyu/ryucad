@@ -703,32 +703,14 @@ fn attempt_adjusted(
                 break;
             }
         }
-        // Slits and seeds (design 683, plan 21.C, question 983): every
-        // seed set failed. The first set whose seeds alone over-use an
-        // edge walks once more without the shortcut's seeds there that
-        // are slit pieces (design 724, plan 22.C) or don't hold their old
-        // face; its answer stands only if it closes (or halts), else the
-        // first try's failure is reported.
-        if !shortcut.is_empty()
-            && matches!(
-                kept,
-                Err(WalkError::Open { .. }
-                    | WalkError::Ambiguous { .. }
-                    | WalkError::Clipped { .. })
-            )
-        {
-            let ops = [w.body.clone()];
-            let mut holds =
-                |i: usize| seeds::inside_old(body, changes, &w, &ops, table, &pieces[i]);
-            if let Some((fewer, r)) = seeds::walk_again(&arr, &tries, &shortcut, &mut holds, m) {
-                kept = r;
-                seeds = fewer;
-            }
-        }
-        // Whole pins (design 990, plan 24.B): a narrowed build's walk
-        // still `Ambiguous` at pins walks once more with every piece of
-        // those pins seeded; where it closes, no release is asked.
-        if narrowed && let Err(WalkError::Ambiguous { piece }) = kept {
+        // Slits and seeds (design 683, plan 21.C, question 983), then
+        // whole pins (design 990, plan 24.B): `seeds::retried`.
+        let ops = std::cell::OnceCell::new();
+        let mut holds = |i: usize| {
+            let ops = ops.get_or_init(|| [w.body.clone()]);
+            seeds::inside_old(body, changes, &w, ops, table, &pieces[i])
+        };
+        let whole_at = |piece: usize| -> Vec<usize> {
             let at = pins_at(
                 &w.pinned,
                 pieces[piece].face.face,
@@ -737,14 +719,13 @@ fn attempt_adjusted(
                     .iter()
                     .flat_map(|&(g, _)| table.edges[g].pcurves.keys().map(|r| r.face)),
             );
-            let whole: Vec<usize> = (0..pieces.len())
+            (0..pieces.len())
                 .filter(|&i| at.contains(&pieces[i].face.face))
-                .collect();
-            if let Some((s, r)) = seeds::walk_whole(&arr, &tries, &whole, m) {
-                kept = r;
-                seeds = s;
-            }
-        }
+                .collect()
+        };
+        (kept, seeds) = seeds::retried(
+            &arr, &tries, &shortcut, &mut holds, narrowed, &whole_at, kept, seeds, m,
+        );
         // Shells no outside face reaches take a seed each, once.
         if let Ok(k) = &kept {
             let seen: Vec<bool> = k.iter().map(Option::is_some).collect();

@@ -184,6 +184,45 @@ pub(crate) fn walk_whole(
     None
 }
 
+/// What a walk answers once every seed set has failed, from the first
+/// try's failure `kept` and its `seeds`. First the seed retry (design 683,
+/// plan 21.C): where `shortcut` isn't empty and the failure is `Open`,
+/// `Ambiguous` or `Clipped`, [`walk_again`]. Then whole pins (design 990,
+/// plan 24.B): in a `narrowed` build still `Ambiguous`, [`walk_whole`]
+/// with the pieces `whole_at` gives for the failing piece (the pins it
+/// lies at). Each answers only where it closes or halts.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub(crate) fn retried(
+    arr: &Arrangement,
+    tries: &[Vec<usize>],
+    shortcut: &BTreeSet<usize>,
+    holds_old: &mut dyn FnMut(usize) -> bool,
+    narrowed: bool,
+    whole_at: &dyn Fn(usize) -> Vec<usize>,
+    mut kept: Result<Vec<Option<bool>>, WalkError>,
+    mut seeds: Vec<usize>,
+    m: &Meter,
+) -> (Result<Vec<Option<bool>>, WalkError>, Vec<usize>) {
+    if !shortcut.is_empty()
+        && matches!(
+            kept,
+            Err(WalkError::Open { .. } | WalkError::Ambiguous { .. } | WalkError::Clipped { .. })
+        )
+        && let Some((fewer, r)) = walk_again(arr, tries, shortcut, holds_old, m)
+    {
+        kept = r;
+        seeds = fewer;
+    }
+    if narrowed
+        && let Err(WalkError::Ambiguous { piece }) = kept
+        && let Some((s, r)) = walk_whole(arr, tries, &whole_at(piece), m)
+    {
+        kept = r;
+        seeds = s;
+    }
+    (kept, seeds)
+}
+
 /// Every piece of an outside face. Never a pinned face's (plan 21.A):
 /// part of one may be cut away; rule 3 seeds it ([`face_seeds`]).
 pub(crate) fn outside_seeds(w: &WorkBody, pieces: &[Piece]) -> Vec<usize> {
@@ -600,6 +639,63 @@ mod tests {
     /// Every piece of the pin is seeded, not one: the pin's two pieces
     /// 1 and 4 (face 9) meet along edge 3, which working piece 5 also
     /// takes back. Seeded alone, piece 1 still closes two ways.
+    /// Plan 24.B: the seed retry comes before whole pins. Try 0 seeds
+    /// piece 3 and shortcut piece 4, which over-uses edge 1 with seed 0;
+    /// without piece 4 it closes through pieces 2 and 3. Try 1, the seed
+    /// alone, would close with pin piece 1 whole. The retry answers.
+    #[test]
+    fn the_seed_retry_answers_before_whole_pins() {
+        let mut a = two_ways_at_a_pin();
+        a.pieces.push((6, vec![(1, F)]));
+        let tries = vec![vec![0, 3, 4], vec![0]];
+        let first = walk(&a, &tries[0], &free());
+        assert!(matches!(first, Err(WalkError::Ambiguous { .. })));
+        let mut holds = |_: usize| false;
+        let (kept, seeds) = retried(
+            &a,
+            &tries,
+            &BTreeSet::from([4]),
+            &mut holds,
+            true,
+            &|_| vec![1],
+            first.clone(),
+            tries[0].clone(),
+            &free(),
+        );
+        assert_eq!(seeds, vec![0, 3]);
+        assert_eq!(
+            kept.unwrap(),
+            vec![Some(false), None, Some(false), Some(false), None]
+        );
+        // With no shortcut, whole pins answers, on try 1.
+        let (kept, seeds) = retried(
+            &a,
+            &tries,
+            &BTreeSet::new(),
+            &mut holds,
+            true,
+            &|_| vec![1],
+            first.clone(),
+            tries[0].clone(),
+            &free(),
+        );
+        assert_eq!(seeds, vec![0, 1]);
+        assert!(kept.is_ok());
+        // Not narrowed: nothing is held whole.
+        let (kept, _) = retried(
+            &a,
+            &tries,
+            &BTreeSet::new(),
+            &mut holds,
+            false,
+            &|_| vec![1],
+            first,
+            tries[0].clone(),
+            &free(),
+        );
+        assert!(matches!(kept, Err(WalkError::Ambiguous { .. })));
+    }
+
     #[test]
     fn every_piece_of_the_pin_is_seeded() {
         let a = Arrangement {
