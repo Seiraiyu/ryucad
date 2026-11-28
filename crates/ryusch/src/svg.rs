@@ -437,7 +437,7 @@ fn draw_in(
     };
     let _ = writeln!(
         out,
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"{} {} {} {}\" width=\"{}mm\" height=\"{}mm\" font-family=\"Inter\">",
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"{} {} {} {}\" width=\"{}mm\" height=\"{}mm\" font-family=\"Inter, sans-serif\">",
         mm(vx),
         mm(vy),
         mm(vw),
@@ -523,6 +523,17 @@ fn draw_in(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #1091: text names Inter, then a generic fallback, so a viewer without
+    /// Inter draws a sans-serif, not Times.
+    #[test]
+    fn text_names_inter_then_a_generic_fallback() {
+        let b = crate::testing::seeded(2, 4);
+        let out = crate::engine::lay_out(&b).unwrap();
+        let svg = draw(&b, &out.layout, &[]);
+        assert!(svg.contains("font-family=\"Inter, sans-serif\""), "{svg}");
+        assert!(!svg.contains("font-family=\"Inter\""));
+    }
 
     #[test]
     fn data_refs_group_items_by_owner_and_change_nothing_else() {
