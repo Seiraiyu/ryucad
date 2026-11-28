@@ -32,7 +32,7 @@ use std::time::{Duration, Instant};
 
 /// The bar, or ten times it on a machine not set aside for measuring.
 /// A bar the owner accepted as unmet (ryueda 7.E, option (a) of
-/// 2026-11-28): with `RYUEDA_BARS=1` a miss is printed with the issues
+/// 2026-11-28: the scale board's four and `Spec::bar()`'s track write): with `RYUEDA_BARS=1` a miss is printed with the issues
 /// that track it, not failed; loose, it is asserted ten times over as
 /// every bar is.
 fn accepted(got: Duration, want: Duration, issues: &str) {
@@ -871,8 +871,10 @@ fn a_generated_board_checks_and_answers_a_write_within_its_bars() {
         worst = worst.max(took);
     }
     println!("a track write with its delta through a warm daemon: worst {worst:?}");
-    // Design 924 (ryueda 7.E): 25 ms, edited in place (design 732's was 250).
-    assert!(worst < bar(Duration::from_millis(25)), "{worst:?}");
+    // Design 924 (ryueda 7.E): 25 ms, edited in place (design 732's was
+    // 250). Unmet and accepted in 7.E (38.8 ms on a quiet box): the same
+    // per-write floors as the scale board's.
+    accepted(worst, Duration::from_millis(25), "#1126 to #1130");
     ryueda(&["daemon", "stop"]);
 }
 
