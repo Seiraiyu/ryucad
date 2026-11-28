@@ -679,12 +679,19 @@ mod tests {
 
     /// A cut arrangement (plan 21.C): pieces, clipped, laminar and old
     /// edges, the seed sets tried in order, the shortcut's seeds, and
-    /// those of them whose inner point lies inside their old face.
+    /// those of them whose inner point lies inside their old face; where
+    /// a census read them, the pinned faces and the walk's closures (plan
+    /// 24.A).
     struct Cut {
         arr: Arrangement,
         tries: Vec<Vec<usize>>,
         shortcut: BTreeSet<usize>,
         holds: BTreeSet<usize>,
+        /// The arrangement's face indices that are pins (plan 24.A).
+        pins: BTreeSet<usize>,
+        /// The closures a census read (plan 24.A): each its kept pieces,
+        /// none reversed.
+        closures: Vec<BTreeSet<usize>>,
     }
 
     fn read_cut(text: &str) -> Cut {
@@ -693,6 +700,8 @@ mod tests {
             tries: Vec::new(),
             shortcut: BTreeSet::new(),
             holds: BTreeSet::new(),
+            pins: BTreeSet::new(),
+            closures: Vec::new(),
         };
         for line in text.lines() {
             let line = line.split('#').next().unwrap_or("").trim();
@@ -720,10 +729,75 @@ mod tests {
                 "try" => c.tries.push(nums(words)),
                 "shortcut" => c.shortcut.extend(nums(words)),
                 "holds" => c.holds.extend(nums(words)),
+                "pins" => c.pins.extend(nums(words)),
+                "closure" => c.closures.push(nums(words).into_iter().collect()),
                 other => panic!("unknown line {other}"),
             }
         }
         c
+    }
+
+    /// Whether keeping exactly `kept` (none reversed) is a closure of
+    /// `arr` from `seeds`, by the walk's own counting (plan 24.A): the
+    /// seeds are kept, no kept piece uses a clipped edge, and every edge a
+    /// kept piece uses is used exactly once that way and, unless laminar,
+    /// exactly once the other way.
+    fn is_closure(arr: &Arrangement, seeds: &[usize], kept: &BTreeSet<usize>) -> bool {
+        if !seeds.iter().all(|s| kept.contains(s)) {
+            return false;
+        }
+        let mut uses: BTreeMap<(usize, bool), usize> = BTreeMap::new();
+        for &i in kept {
+            for &(g, s) in &arr.pieces[i].1 {
+                if arr.clipped.contains(&g) {
+                    return false;
+                }
+                *uses.entry((g, s == F)).or_default() += 1;
+            }
+        }
+        uses.iter().all(|(&(g, forward), &n)| {
+            n == 1
+                && (arr.laminar.contains(&g) || uses.get(&(g, !forward)).copied().unwrap_or(0) == 1)
+        })
+    }
+
+    /// A cut's `pins` and `closure` lines (plan 24.A), and `is_closure`
+    /// on a pillow: two pieces sharing three edges close; one alone
+    /// doesn't, nor do both where a seed is left out or an edge is
+    /// clipped.
+    #[test]
+    fn a_cut_carries_its_pins_and_closures() {
+        let c = read_cut(
+            "p 7 0+ 1+ 2+ # 0\n\
+             p 9 0- 1- 2- # 1\n\
+             p 9 3+ 3- # 2 a slit elsewhere\n\
+             try 0\n\
+             pins 9\n\
+             closure 0 1\n\
+             closure 0 1 2\n",
+        );
+        assert_eq!(c.pins, BTreeSet::from([9]));
+        assert_eq!(
+            c.closures,
+            vec![BTreeSet::from([0, 1]), BTreeSet::from([0, 1, 2])]
+        );
+        for k in &c.closures {
+            assert!(is_closure(&c.arr, &c.tries[0], k));
+        }
+        assert!(!is_closure(&c.arr, &c.tries[0], &BTreeSet::from([0])));
+        assert!(!is_closure(&c.arr, &c.tries[0], &BTreeSet::from([1])));
+        assert!(!is_closure(&c.arr, &[2], &BTreeSet::from([0, 1])));
+        let mut clipped = c.arr.clone();
+        clipped.clipped.insert(1);
+        assert!(!is_closure(&clipped, &c.tries[0], &c.closures[0]));
+        // A laminar edge takes one use.
+        let mut laminar = c.arr.clone();
+        laminar.laminar.extend([0, 1, 2]);
+        assert!(is_closure(&laminar, &c.tries[0], &BTreeSet::from([0])));
+        // A third use of an edge is no closure.
+        let mut third = c.arr.clone();
+        third.pieces.push((8, vec![(0, F), (4, F), (4, R)]));
+        assert!(!is_closure(&third, &c.tries[0], &BTreeSet::from([0, 1, 3])));
     }
 
     /// FTC 10 rb's walk at rung 2's narrowed retry (#652, census VI, plan
@@ -794,5 +868,91 @@ mod tests {
             walk(&c.arr, &fewer, &free()),
             Err(WalkError::Ambiguous { piece: fewer[0] })
         );
+    }
+
+    /// NIST CTC 02 with PMI #295's walk at rung 3's narrowed retry, given
+    /// room twice (census IX, plan 24.A): `Ambiguous` at pinned cylinder
+    /// `e153cd0e`.
+    fn ctc_02_room2() -> Cut {
+        read_cut(include_str!(
+            "../../../tests/data/nist_ctc_02_closures_room2.arr"
+        ))
+    }
+
+    /// The same rung with `e153cd0e` released (plan 23.A): `Ambiguous` at
+    /// working plane `06252748`.
+    fn ctc_02_released() -> Cut {
+        read_cut(include_str!(
+            "../../../tests/data/nist_ctc_02_closures_released.arr"
+        ))
+    }
+
+    /// The piece each walk names (census VIII and IX).
+    const ROOM2_PIECE: usize = 454;
+    const RELEASED_PIECE: usize = 491;
+    /// The Room(2) walk's disputed pieces (census IX): the pinned
+    /// cylinder `e153cd0e`, planes `06252748` and `ad25abb3`, plane
+    /// `1294043e`.
+    const ROOM2_DISPUTED: [usize; 4] = [454, 490, 511, 517];
+    /// The released walk's disputed pieces: planes `06252748` and
+    /// `ad25abb3`, the released cylinder `e153cd0e`, plane `1294043e`.
+    const RELEASED_DISPUTED: [usize; 4] = [491, 513, 520, 528];
+
+    /// The pieces closures `a` and `b` disagree on.
+    fn disputed(a: &BTreeSet<usize>, b: &BTreeSet<usize>) -> Vec<usize> {
+        a.symmetric_difference(b).copied().collect()
+    }
+
+    /// CTC 02's Room(2) walk closes more than one way, and the ways
+    /// disagree on a piece of the pin (design 990): counting can't choose.
+    /// Census IX read two closures: the two planes `06252748` and
+    /// `ad25abb3`, or the pinned cylinder and plane `1294043e`.
+    #[test]
+    fn ctc_02s_room_walk_closes_two_ways_at_its_pin() {
+        let c = ctc_02_room2();
+        assert_eq!(
+            walk(&c.arr, &c.tries[0], &free()),
+            Err(WalkError::Ambiguous { piece: ROOM2_PIECE })
+        );
+        assert!(c.pins.contains(&c.arr.pieces[ROOM2_PIECE].0));
+        assert!(c.closures.len() >= 2);
+        for k in &c.closures {
+            assert!(is_closure(&c.arr, &c.tries[0], k));
+        }
+        let d = disputed(&c.closures[0], &c.closures[1]);
+        assert_eq!(d, ROOM2_DISPUTED);
+        assert!(d.contains(&ROOM2_PIECE));
+        assert!(d.iter().any(|&i| c.pins.contains(&c.arr.pieces[i].0)));
+    }
+
+    /// Released, the walk still closes two ways (plan 23.A's census
+    /// VIII): by the two planes, or by the cylinder and the third plane.
+    /// No disputed piece is a pin's, so nothing more is released.
+    #[test]
+    fn ctc_02s_released_walk_closes_by_two_planes_or_the_cylinder_and_a_third() {
+        let c = ctc_02_released();
+        assert_eq!(
+            walk(&c.arr, &c.tries[0], &free()),
+            Err(WalkError::Ambiguous {
+                piece: RELEASED_PIECE
+            })
+        );
+        assert!(c.closures.len() >= 2);
+        for k in &c.closures {
+            assert!(is_closure(&c.arr, &c.tries[0], k));
+        }
+        let d = disputed(&c.closures[0], &c.closures[1]);
+        assert_eq!(d, RELEASED_DISPUTED);
+        assert!(d.iter().all(|&i| !c.pins.contains(&c.arr.pieces[i].0)));
+        // Each closure keeps two of the four: one face pair or the other.
+        let faces = |k: &BTreeSet<usize>| -> BTreeSet<usize> {
+            d.iter()
+                .filter(|i| k.contains(i))
+                .map(|&i| c.arr.pieces[i].0)
+                .collect()
+        };
+        assert_eq!(faces(&c.closures[0]).len(), 2);
+        assert_eq!(faces(&c.closures[1]).len(), 2);
+        assert!(faces(&c.closures[0]).is_disjoint(&faces(&c.closures[1])));
     }
 }
