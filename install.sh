@@ -6,7 +6,10 @@
 # Environment:
 #   RYUCAD_VERSION          tag to install (default: the latest release)
 #   RYUCAD_HOME             install root (default: ~/.ryucad); the binary goes in bin/
-#   RYUCAD_NO_MODIFY_PATH   set to 1 to leave shell profiles alone
+#   RYUCAD_NO_MODIFY_PATH   set to 1 to leave shell profiles alone, and Git's
+#                           global config with them
+#   RYUCAD_NO_GIT_CONFIG    set to 1 to leave Git's global config alone (no
+#                           `ryucad git install --global`: try-outs, CI caches)
 #   RYUCAD_NO_APP           set to 1 to install the ryucad command only, not the
 #                           desktop app (servers, CI)
 #   GH_TOKEN, GITHUB_TOKEN  a token for a private repository (else `gh auth token`)
@@ -222,9 +225,16 @@ main() {
     esac
     # git diff reads ryucad's files through ryucad: its driver, in the
     # user's Git config.
-    if command -v git >/dev/null 2>&1; then
-        "$bin/ryucad" git install --global >/dev/null 2>&1 ||
+    # Not when told to leave user-wide files alone (#1137): an install into
+    # another RYUCAD_HOME would re-point every repository's drivers at it.
+    if [ "${RYUCAD_NO_GIT_CONFIG:-0}" = 1 ] || [ "${RYUCAD_NO_MODIFY_PATH:-0}" = 1 ]; then
+        say "Git's global config left alone; for git diff and merge of ryucad files run: $bin/ryucad git install --global"
+    elif command -v git >/dev/null 2>&1; then
+        if "$bin/ryucad" git install --global >/dev/null 2>&1; then
+            say "registered $bin/ryucad with Git (global diff.ryucad.textconv, merge.ryucad.driver)"
+        else
             say "warning: couldn't register ryucad with Git; run: ryucad git install --global"
+        fi
     fi
 
     # The desktop app, unless only the command is wanted.

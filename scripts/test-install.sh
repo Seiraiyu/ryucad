@@ -126,6 +126,7 @@ fi
 if command -v git >/dev/null 2>&1; then
     check "registers ryucad's diff driver with Git" 'git config -f "$work/home-fresh/.gitconfig" diff.ryucad.textconv | grep -q "/.ryucad/bin/ryucad'"'"' git textconv$"'
     check "registers ryucad's merge driver with Git" 'git config -f "$work/home-fresh/.gitconfig" merge.ryucad.driver | grep -q "/.ryucad/bin/ryucad'"'"' git merge-driver %O %A %B %P$"'
+    check "says it registered ryucad with Git" 'grep -q "registered .*/.ryucad/bin/ryucad with Git" "$work/out"'
 fi
 run fresh "$good"
 check "reinstall succeeds" '[ "$status" -eq 0 ]'
@@ -207,6 +208,10 @@ check "checksum mismatch installs nothing" '[ ! -e "$work/home-corrupt/.ryucad/b
 run custom "$good" RYUCAD_HOME="$work/elsewhere" RYUCAD_NO_MODIFY_PATH=1
 check "RYUCAD_HOME is honoured" '[ -x "$work/elsewhere/bin/ryucad" ]'
 check "RYUCAD_NO_MODIFY_PATH leaves profiles alone" '[ ! -e "$work/home-custom/.profile" ]'
+# Git's global config is a user-wide file too (#1137, as ryueda's #1096).
+check "RYUCAD_NO_MODIFY_PATH leaves Git's global config alone" '[ ! -e "$work/home-custom/.gitconfig" ] && grep -q "Git.s global config left alone" "$work/out"'
+run nogit "$good" RYUCAD_NO_GIT_CONFIG=1
+check "RYUCAD_NO_GIT_CONFIG leaves Git's config alone, profiles still edited" '[ "$status" -eq 0 ] && [ ! -e "$work/home-nogit/.gitconfig" ] && [ "$(markers "$work/home-nogit/.profile")" = 1 ]'
 run onpath "$good" PATH="$work/home-onpath/.ryucad/bin:/usr/bin:/bin"
 check "no PATH edit when already on PATH" '[ "$status" -eq 0 ] && [ ! -e "$work/home-onpath/.profile" ]'
 

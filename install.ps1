@@ -5,7 +5,10 @@
 # Environment:
 #   RYUCAD_VERSION          tag to install (default: the latest release)
 #   RYUCAD_HOME             install root (default: ~\.ryucad); the binary goes in bin\
-#   RYUCAD_NO_MODIFY_PATH   set to 1 to leave the user PATH alone
+#   RYUCAD_NO_MODIFY_PATH   set to 1 to leave the user PATH alone, and Git's
+#                           global config with it
+#   RYUCAD_NO_GIT_CONFIG    set to 1 to leave Git's global config alone (no
+#                           `ryucad git install --global`: try-outs, CI caches)
 #   RYUCAD_NO_APP           set to 1 to install the ryucad command only, not the
 #                           desktop app
 #   GH_TOKEN, GITHUB_TOKEN  a token for a private repository (else `gh auth token`)
@@ -154,9 +157,15 @@ function Install-Ryucad {
         Clear-OldCopy $exe
         # git diff reads ryucad's files through ryucad: its driver, in the
         # user's Git config.
-        if (Get-Command git -ErrorAction SilentlyContinue) {
+        # Not when told to leave user-wide settings alone (#1137): an install
+        # into another RYUCAD_HOME would re-point every repository's drivers.
+        if ($env:RYUCAD_NO_GIT_CONFIG -eq '1' -or $env:RYUCAD_NO_MODIFY_PATH -eq '1') {
+            Write-Host "ryucad-install: Git's global config left alone; for git diff and merge of ryucad files run: $exe git install --global"
+        } elseif (Get-Command git -ErrorAction SilentlyContinue) {
             & $exe git install --global *> $null
-            if ($LASTEXITCODE -ne 0) {
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "ryucad-install: registered $exe with Git (global diff.ryucad.textconv, merge.ryucad.driver)"
+            } else {
                 Write-Host 'ryucad-install: warning: couldn''t register ryucad with Git; run: ryucad git install --global'
             }
         }

@@ -92,6 +92,7 @@ try {
         Test-Case 'registers ryucad''s diff driver with Git' ($driver -match '/\.ryucad/bin/ryucad\.exe'' git textconv$') $r
         $merge = & git config -f (Join-Path $r.Home '.gitconfig') merge.ryucad.driver
         Test-Case 'registers ryucad''s merge driver with Git' ($merge -match '/\.ryucad/bin/ryucad\.exe'' git merge-driver %O %A %B %P$') $r
+        Test-Case 'says it registered ryucad with Git' ($r.Out -match 'registered .*ryucad\.exe with Git') $r
     }
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
     Test-Case 'user PATH gets the bin directory' (($userPath -split ';') -contains (Split-Path $exe)) $r
@@ -147,6 +148,8 @@ try {
     $r = Invoke-Installer 'custom' $good @{ RYUCAD_HOME = $elsewhere }
     Test-Case 'RYUCAD_HOME is honoured' (Test-Path (Join-Path $elsewhere 'bin\ryucad.exe')) $r
     Test-Case 'RYUCAD_NO_MODIFY_PATH leaves the user PATH alone' ([Environment]::GetEnvironmentVariable('Path', 'User') -eq $before) $r
+    # Git's global config is a user-wide file too (#1137, as ryueda's #1096).
+    Test-Case 'RYUCAD_NO_MODIFY_PATH leaves Git''s global config alone' ((-not (Test-Path (Join-Path $r.Home '.gitconfig'))) -and $r.Out -match 'Git''s global config left alone') $r
 
     $r = Invoke-Installer 'arm' $good @{ PROCESSOR_ARCHITECTURE = 'ARM64' }
     Test-Case 'unsupported platform fails' ((-not $r.Ok) -and $r.Out -match 'no ryucad build for Windows ARM64') $r
