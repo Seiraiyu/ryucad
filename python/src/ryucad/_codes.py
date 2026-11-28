@@ -409,6 +409,11 @@ class Code(str, Enum):
     BOARD_CONTOUR_INVALID = "board_contour_invalid"
     POUR_EMPTY = "pour_empty"
     POUR_THERMAL_STARVED = "pour_thermal_starved"
+    FOOTPRINT_PADS_OVERLAP = "footprint_pads_overlap"
+    FOOTPRINT_PAD_NUMBER_REPEATED = "footprint_pad_number_repeated"
+    FOOTPRINT_COURTYARD_OPEN = "footprint_courtyard_open"
+    FOOTPRINT_NO_REFERENCE = "footprint_no_reference"
+    FOOTPRINT_PAD_UNMAPPED = "footprint_pad_unmapped"
     DRC_FAILED = "drc_failed"
     ITEM_NOT_FOUND = "item_not_found"
     ITEM_CLASS_UNKNOWN = "item_class_unknown"
@@ -842,6 +847,11 @@ EXIT: dict[Code, int] = {
     Code.BOARD_CONTOUR_INVALID: 1,
     Code.POUR_EMPTY: 1,
     Code.POUR_THERMAL_STARVED: 1,
+    Code.FOOTPRINT_PADS_OVERLAP: 1,
+    Code.FOOTPRINT_PAD_NUMBER_REPEATED: 1,
+    Code.FOOTPRINT_COURTYARD_OPEN: 1,
+    Code.FOOTPRINT_NO_REFERENCE: 1,
+    Code.FOOTPRINT_PAD_UNMAPPED: 1,
     Code.DRC_FAILED: 1,
     Code.ITEM_NOT_FOUND: 1,
     Code.ITEM_CLASS_UNKNOWN: 1,

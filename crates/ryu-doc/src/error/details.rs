@@ -613,6 +613,23 @@ details! {
     PourThermalStarved => [
         key("spokes", Num, "The thermal spokes that reach the pad."),
     ],
+    FootprintPadsOverlap => [
+        key("pads", Arr, "The two pads, by ID."),
+        key("numbers", Arr, "Their numbers."),
+        key("uncertain", Bool, "Whether the verdict is uncertain."),
+    ],
+    FootprintPadNumberRepeated => [
+        key("number", Str, "The pad number."),
+        key("pads", Arr, "Its pads, by ID, one list per separate piece of copper."),
+    ],
+    FootprintCourtyardOpen => [
+        key("side", Str, "The courtyard's side: top or bottom."),
+    ],
+    FootprintNoReference => [],
+    FootprintPadUnmapped => [
+        key("pin", Str, "The symbol pin."),
+        key("pad", Str, "The pad number the footprint lacks."),
+    ],
     DocumentNotFound => [
         key("document", Str, "The document asked for, by ID or number."),
     ],

@@ -374,6 +374,24 @@ pour_empty exit 1 "Pour empty"
 pour_thermal_starved exit 1 "Pour thermal starved"
   spokes num The thermal spokes that reach the pad.
 
+footprint_pads_overlap exit 1 "Footprint pads overlap"
+  pads arr The two pads, by ID.
+  numbers arr Their numbers.
+  uncertain bool Whether the verdict is uncertain.
+
+footprint_pad_number_repeated exit 1 "Footprint pad number repeated"
+  number str The pad number.
+  pads arr Its pads, by ID, one list per separate piece of copper.
+
+footprint_courtyard_open exit 1 "Footprint courtyard open"
+  side str The courtyard's side: top or bottom.
+
+footprint_no_reference exit 1 "Footprint no reference"
+
+footprint_pad_unmapped exit 1 "Footprint pad unmapped"
+  pin str The symbol pin.
+  pad str The pad number the footprint lacks.
+
 drc_failed exit 1 "DRC failed"
   report obj The board's DRC report: `board`, `findings` and `drc`.
 
