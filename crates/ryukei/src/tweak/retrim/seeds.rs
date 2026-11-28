@@ -152,6 +152,78 @@ pub(crate) fn walk_again(
     None
 }
 
+/// After every try of `tries` failed `Ambiguous` at pins (design 990,
+/// plan 24.B): each try in order walked once more with every piece of
+/// those pins (`whole`) seeded too, so a pin is kept exactly as the
+/// input had it. Its seeds and answer where that walk closes or the
+/// meter halts it; `None` otherwise, where the first try's failure
+/// stands. A try already holding every piece of `whole` is skipped
+/// unwalked: its walk would be the one that failed.
+#[allow(clippy::type_complexity)]
+pub(crate) fn walk_whole(
+    arr: &Arrangement,
+    tries: &[Vec<usize>],
+    whole: &[usize],
+    m: &Meter,
+) -> Option<(Vec<usize>, Result<Vec<Option<bool>>, WalkError>)> {
+    for t in tries {
+        let mut seeds = t.clone();
+        for &p in whole {
+            if !seeds.contains(&p) {
+                seeds.push(p);
+            }
+        }
+        if seeds.len() == t.len() {
+            continue;
+        }
+        let r = super::walk::walk(arr, &seeds, m);
+        if r.is_ok() || matches!(r, Err(WalkError::Halted { .. })) {
+            return Some((seeds, r));
+        }
+    }
+    None
+}
+
+/// What a walk answers once every seed set has failed, from the first
+/// try's failure `kept` and its `seeds`. First the seed retry (design 683,
+/// plan 21.C): where `shortcut` isn't empty and the failure is `Open`,
+/// `Ambiguous` or `Clipped`, [`walk_again`]. Then whole pins (design 990,
+/// plan 24.B): where `hold_pins` (a narrowed build that releases
+/// nothing) and still `Ambiguous`, [`walk_whole`]
+/// with the pieces `whole_at` gives for the failing piece (the pins it
+/// lies at). Each answers only where it closes or halts.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub(crate) fn retried(
+    arr: &Arrangement,
+    tries: &[Vec<usize>],
+    shortcut: &BTreeSet<usize>,
+    holds_old: &mut dyn FnMut(usize) -> bool,
+    hold_pins: bool,
+    whole_at: &dyn Fn(usize) -> Vec<usize>,
+    mut kept: Result<Vec<Option<bool>>, WalkError>,
+    mut seeds: Vec<usize>,
+    m: &Meter,
+) -> (Result<Vec<Option<bool>>, WalkError>, Vec<usize>) {
+    if !shortcut.is_empty()
+        && matches!(
+            kept,
+            Err(WalkError::Open { .. } | WalkError::Ambiguous { .. } | WalkError::Clipped { .. })
+        )
+        && let Some((fewer, r)) = walk_again(arr, tries, shortcut, holds_old, m)
+    {
+        kept = r;
+        seeds = fewer;
+    }
+    if hold_pins
+        && let Err(WalkError::Ambiguous { piece }) = kept
+        && let Some((s, r)) = walk_whole(arr, tries, &whole_at(piece), m)
+    {
+        kept = r;
+        seeds = s;
+    }
+    (kept, seeds)
+}
+
 /// Every piece of an outside face. Never a pinned face's (plan 21.A):
 /// part of one may be cut away; rule 3 seeds it ([`face_seeds`]).
 pub(crate) fn outside_seeds(w: &WorkBody, pieces: &[Piece]) -> Vec<usize> {
@@ -535,6 +607,159 @@ mod tests {
         let mut holds = |_: usize| false;
         let (fewer, _) = walk_again(&a, &tries, &BTreeSet::from([2]), &mut holds, &free()).unwrap();
         assert_eq!(fewer, vec![0]);
+    }
+
+    /// A walk two ways closed at a pin (plan 24.B): seed piece 0 (face
+    /// 0) uses edges 0 and 1; pin piece 1 (face 9) closes both; or
+    /// working pieces 2 (face 2) and 3 (face 3) close them through edge 2.
+    fn two_ways_at_a_pin() -> Arrangement {
+        Arrangement {
+            pieces: vec![
+                (0, vec![(0, F), (1, F)]),
+                (9, vec![(0, R), (1, R)]),
+                (2, vec![(0, R), (2, F)]),
+                (3, vec![(2, R), (1, R)]),
+            ],
+            ..Arrangement::default()
+        }
+    }
+
+    #[test]
+    fn a_walk_ambiguous_at_a_pin_closes_with_the_pin_whole() {
+        let a = two_ways_at_a_pin();
+        let tries = vec![vec![0]];
+        assert_eq!(
+            walk(&a, &tries[0], &free()),
+            Err(WalkError::Ambiguous { piece: 1 })
+        );
+        let (seeds, r) = walk_whole(&a, &tries, &[1], &free()).unwrap();
+        assert_eq!(seeds, vec![0, 1]);
+        assert_eq!(r.unwrap(), vec![Some(false), Some(false), None, None]);
+    }
+
+    /// Plan 24.B: the seed retry comes before whole pins. Try 0 seeds
+    /// piece 3 and shortcut piece 4, which over-uses edge 1 with seed 0;
+    /// without piece 4 it closes through pieces 2 and 3. Try 1, the seed
+    /// alone, would close with pin piece 1 whole. The retry answers.
+    #[test]
+    fn the_seed_retry_answers_before_whole_pins() {
+        let mut a = two_ways_at_a_pin();
+        a.pieces.push((6, vec![(1, F)]));
+        let tries = vec![vec![0, 3, 4], vec![0]];
+        let first = walk(&a, &tries[0], &free());
+        assert!(matches!(first, Err(WalkError::Ambiguous { .. })));
+        let mut holds = |_: usize| false;
+        let (kept, seeds) = retried(
+            &a,
+            &tries,
+            &BTreeSet::from([4]),
+            &mut holds,
+            true,
+            &|_| vec![1],
+            first.clone(),
+            tries[0].clone(),
+            &free(),
+        );
+        assert_eq!(seeds, vec![0, 3]);
+        assert_eq!(
+            kept.unwrap(),
+            vec![Some(false), None, Some(false), Some(false), None]
+        );
+        // With no shortcut, whole pins answers, on try 1.
+        let (kept, seeds) = retried(
+            &a,
+            &tries,
+            &BTreeSet::new(),
+            &mut holds,
+            true,
+            &|_| vec![1],
+            first.clone(),
+            tries[0].clone(),
+            &free(),
+        );
+        assert_eq!(seeds, vec![0, 1]);
+        assert!(kept.is_ok());
+        // A build that may not hold pins (a first or a released one):
+        // nothing is held whole.
+        let (kept, _) = retried(
+            &a,
+            &tries,
+            &BTreeSet::new(),
+            &mut holds,
+            false,
+            &|_| vec![1],
+            first,
+            tries[0].clone(),
+            &free(),
+        );
+        assert!(matches!(kept, Err(WalkError::Ambiguous { .. })));
+    }
+
+    /// Every piece of the pin is seeded, not one: the pin's two pieces
+    /// 1 and 4 (face 9) meet along edge 3, which working piece 5 also
+    /// takes back. Seeded alone, piece 1 still closes two ways.
+    #[test]
+    fn every_piece_of_the_pin_is_seeded() {
+        let a = Arrangement {
+            pieces: vec![
+                (0, vec![(0, F), (1, F)]),
+                (9, vec![(0, R), (3, F)]),
+                (2, vec![(0, R), (2, F)]),
+                (3, vec![(2, R), (1, R)]),
+                (9, vec![(3, R), (1, R)]),
+                (5, vec![(3, R), (1, R)]),
+            ],
+            ..Arrangement::default()
+        };
+        let tries = vec![vec![0]];
+        assert!(matches!(
+            walk(&a, &[0, 1], &free()),
+            Err(WalkError::Ambiguous { .. })
+        ));
+        let (seeds, r) = walk_whole(&a, &tries, &[1, 4], &free()).unwrap();
+        assert_eq!(seeds, vec![0, 1, 4]);
+        assert_eq!(
+            r.unwrap(),
+            vec![Some(false), Some(false), None, None, Some(false), None]
+        );
+    }
+
+    #[test]
+    fn a_whole_pin_walk_that_fails_again_answers_nothing() {
+        // A third pin piece 4 using edge 0 the same way as piece 1: the
+        // pin whole over-uses it.
+        let mut a = two_ways_at_a_pin();
+        a.pieces.push((9, vec![(0, R)]));
+        assert!(walk_whole(&a, &[vec![0]], &[1, 4], &free()).is_none());
+    }
+
+    #[test]
+    fn no_pin_or_a_pin_already_seeded_is_never_walked_again() {
+        let a = two_ways_at_a_pin();
+        let w = crate::work::Work::unlimited();
+        let m = Meter::new(&w);
+        assert!(walk_whole(&a, &[vec![0]], &[], &m).is_none());
+        assert!(walk_whole(&a, &[vec![0, 1]], &[1], &m).is_none());
+        assert_eq!(m.spent(), 0);
+    }
+
+    #[test]
+    fn the_first_try_that_closes_with_the_pin_whole_answers() {
+        // Try 0 seeds working piece 2 too: with the pin it over-uses edge
+        // 0. Try 1 is the seed alone.
+        let a = two_ways_at_a_pin();
+        let (seeds, r) = walk_whole(&a, &[vec![0, 2], vec![0]], &[1], &free()).unwrap();
+        assert_eq!(seeds, vec![0, 1]);
+        assert!(r.is_ok());
+    }
+
+    #[test]
+    fn a_halt_in_the_whole_pin_walk_answers() {
+        let a = two_ways_at_a_pin();
+        let w = crate::work::Work::unlimited().with_budget(0);
+        let m = Meter::new(&w);
+        let (_, r) = walk_whole(&a, &[vec![0]], &[1], &m).unwrap();
+        assert!(matches!(r, Err(WalkError::Halted { .. })));
     }
 
     /// FTC 10's slit, alone (plan 22.C): the ball's piece B (face 0) is
@@ -954,5 +1179,43 @@ mod tests {
         assert_eq!(faces(&c.closures[0]).len(), 2);
         assert_eq!(faces(&c.closures[1]).len(), 2);
         assert!(faces(&c.closures[0]).is_disjoint(&faces(&c.closures[1])));
+    }
+
+    /// Every piece of the cut's pinned faces among `faces`.
+    fn pieces_of(c: &Cut, faces: &BTreeSet<usize>) -> Vec<usize> {
+        (0..c.arr.pieces.len())
+            .filter(|&i| faces.contains(&c.arr.pieces[i].0) && c.pins.contains(&c.arr.pieces[i].0))
+            .collect()
+    }
+
+    /// Plan 24.B: CTC 02's Room(2) walk, ambiguous at pin `e153cd0e`'s
+    /// piece, closes with that pin whole on the closure census IX names:
+    /// the one keeping the cylinder as it was (pieces 454 and 517).
+    #[test]
+    fn ctc_02s_room_walk_closes_with_its_pin_whole() {
+        let c = ctc_02_room2();
+        let pin = BTreeSet::from([c.arr.pieces[ROOM2_PIECE].0]);
+        let whole = pieces_of(&c, &pin);
+        assert!(whole.contains(&ROOM2_PIECE));
+        let (_, r) = walk_whole(&c.arr, &c.tries, &whole, &free()).unwrap();
+        let kept: BTreeSet<usize> = r
+            .unwrap()
+            .iter()
+            .enumerate()
+            .filter_map(|(i, k)| k.map(|_| i))
+            .collect();
+        assert_eq!(kept, c.closures[1]);
+        assert!(kept.contains(&454) && kept.contains(&517));
+        assert!(!kept.contains(&490) && !kept.contains(&511));
+    }
+
+    /// The released walk fails at no pin: nothing is held whole, so it
+    /// is never walked again.
+    #[test]
+    fn ctc_02s_released_walk_has_no_pin_to_hold() {
+        let c = ctc_02_released();
+        let face = BTreeSet::from([c.arr.pieces[RELEASED_PIECE].0]);
+        assert!(pieces_of(&c, &face).is_empty());
+        assert!(walk_whole(&c.arr, &c.tries, &[], &free()).is_none());
     }
 }

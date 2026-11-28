@@ -925,6 +925,22 @@ fn releases() -> Option<super::near::Adjusts> {
     Some(a)
 }
 
+/// Design 990, plan 24.B: only a narrowed build that releases nothing
+/// holds pins whole. A first build has no pins, and a released build
+/// still `Ambiguous` refuses as before (Decision 8): it is never walked
+/// again whole, whatever room it was also given.
+#[test]
+fn a_released_build_is_never_walked_again_whole() {
+    use super::{Build, holds_pins_whole};
+    let none = super::near::Adjusts::new();
+    assert!(!holds_pins_whole(Build::First, &none));
+    assert!(holds_pins_whole(Build::Retry, &none));
+    assert!(holds_pins_whole(Build::Only, &none));
+    assert!(holds_pins_whole(Build::Retry, &asks().unwrap()));
+    assert!(!holds_pins_whole(Build::Retry, &releases().unwrap()));
+    assert!(!holds_pins_whole(Build::Only, &releases().unwrap()));
+}
+
 /// Design 919, plan 23.A: released builds have their own budget, apart
 /// from `ADJUSTS`. An ask releasing a face is built; one that builds
 /// answers; at most `RELEASES` are made, after any number of room builds
