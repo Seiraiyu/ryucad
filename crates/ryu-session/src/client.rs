@@ -610,11 +610,49 @@ pub fn spawn_detached(cmd: &mut Command) -> std::io::Result<std::process::Child>
     }
 }
 
-/// Out of the terminal's process group, so Ctrl-C on the CLI spares it.
+/// Out of the terminal's process group, so Ctrl-C on the CLI spares it,
+/// and with none of this process's descriptors but the three it is given
+/// (#1133, as Windows' handles below): every one from 3 up is made
+/// close-on-exec in the child. macOS has no `pipe2`, so a pipe another
+/// thread is making can reach a child before it is marked close-on-exec;
+/// a daemon that kept it would leave whoever reads its starter's output
+/// waiting until the daemon exits. Marked rather than closed, so the pipe
+/// that reports a failed exec still does.
 #[cfg(unix)]
 pub fn detach(cmd: &mut Command) {
     use std::os::unix::process::CommandExt;
     cmd.process_group(0);
+    // SAFETY: sysconf is a plain query, made before the fork.
+    let limit = match unsafe { libc::sysconf(libc::_SC_OPEN_MAX) } {
+        n if n > 3 => n.min(65_536) as libc::c_int,
+        _ => 1024,
+    };
+    // SAFETY: between fork and exec only close_range(2) and fcntl(2) run,
+    // both async-signal-safe, and nothing is allocated.
+    unsafe {
+        cmd.pre_exec(move || {
+            #[cfg(target_os = "linux")]
+            {
+                const CLOSE_RANGE_CLOEXEC: libc::c_uint = 4;
+                if libc::syscall(
+                    libc::SYS_close_range,
+                    3,
+                    libc::c_uint::MAX,
+                    CLOSE_RANGE_CLOEXEC,
+                ) == 0
+                {
+                    return Ok(());
+                }
+            }
+            for fd in 3..limit {
+                let flags = libc::fcntl(fd, libc::F_GETFD);
+                if flags >= 0 && flags & libc::FD_CLOEXEC == 0 {
+                    libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+                }
+            }
+            Ok(())
+        });
+    }
 }
 
 /// [`detach`]: there is no job to break away from.
