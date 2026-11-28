@@ -361,4 +361,10 @@ name = "plm"
 path = "fuzz_targets/plm.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "footprint"
+path = "fuzz_targets/footprint.rs"
+test = false
+doc = false
 bench = false

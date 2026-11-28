@@ -230,3 +230,4 @@ tolerant/a723a28153c9ad31a6a726115086d3f823526193
 tolerant/3040b5c2af01485ecd6a5d96c4008cfa58c42744
 tolerant/78d2ac85e405b906612814ad69bedb021fe76521
 copper/spoke-across-a-sloped-edge
+footprint/seed
