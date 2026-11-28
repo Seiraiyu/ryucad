@@ -1082,4 +1082,42 @@ mod tests {
         assert_eq!(faces(&c.closures[1]).len(), 2);
         assert!(faces(&c.closures[0]).is_disjoint(&faces(&c.closures[1])));
     }
+
+    /// Every piece of the cut's pinned faces among `faces`.
+    fn pieces_of(c: &Cut, faces: &BTreeSet<usize>) -> Vec<usize> {
+        (0..c.arr.pieces.len())
+            .filter(|&i| faces.contains(&c.arr.pieces[i].0) && c.pins.contains(&c.arr.pieces[i].0))
+            .collect()
+    }
+
+    /// Plan 24.B: CTC 02's Room(2) walk, ambiguous at pin `e153cd0e`'s
+    /// piece, closes with that pin whole on the closure census IX names:
+    /// the one keeping the cylinder as it was (pieces 454 and 517).
+    #[test]
+    fn ctc_02s_room_walk_closes_with_its_pin_whole() {
+        let c = ctc_02_room2();
+        let pin = BTreeSet::from([c.arr.pieces[ROOM2_PIECE].0]);
+        let whole = pieces_of(&c, &pin);
+        assert!(whole.contains(&ROOM2_PIECE));
+        let (_, r) = walk_whole(&c.arr, &c.tries, &whole, &free()).unwrap();
+        let kept: BTreeSet<usize> = r
+            .unwrap()
+            .iter()
+            .enumerate()
+            .filter_map(|(i, k)| k.map(|_| i))
+            .collect();
+        assert_eq!(kept, c.closures[1]);
+        assert!(kept.contains(&454) && kept.contains(&517));
+        assert!(!kept.contains(&490) && !kept.contains(&511));
+    }
+
+    /// The released walk fails at no pin: nothing is held whole, so it
+    /// is never walked again.
+    #[test]
+    fn ctc_02s_released_walk_has_no_pin_to_hold() {
+        let c = ctc_02_released();
+        let face = BTreeSet::from([c.arr.pieces[RELEASED_PIECE].0]);
+        assert!(pieces_of(&c, &face).is_empty());
+        assert!(walk_whole(&c.arr, &c.tries, &[], &free()).is_none());
+    }
 }
