@@ -136,6 +136,7 @@ check ".bash_profile is not created" '[ ! -e "$work/home-fresh/.bash_profile" ]'
 if command -v git >/dev/null 2>&1; then
     check "registers ryueda's textconv with Git" 'git config -f "$work/home-fresh/.gitconfig" diff.ryueda.textconv | grep -q "/.ryueda/bin/ryueda'"'"' git textconv$"'
     check "registers ryueda's merge driver with Git" 'git config -f "$work/home-fresh/.gitconfig" merge.ryueda.driver | grep -q "/.ryueda/bin/ryueda'"'"' git merge-driver %O %A %B %P$"'
+    check "says it registered ryueda with Git" 'grep -q "registered .*/.ryueda/bin/ryueda with Git" "$work/out"'
 fi
 if command -v zsh >/dev/null 2>&1; then
     check ".zshenv gets the PATH line" '[ "$(markers "$work/home-fresh/.zshenv")" = 1 ]'
@@ -201,6 +202,9 @@ check "checksum mismatch installs nothing" '[ ! -e "$work/home-corrupt/.ryueda/b
 run custom "$good" RYUEDA_HOME="$work/elsewhere" RYUEDA_NO_MODIFY_PATH=1
 check "RYUEDA_HOME is honoured" '[ -x "$work/elsewhere/bin/ryueda" ]'
 check "RYUEDA_NO_MODIFY_PATH leaves profiles alone" '[ ! -e "$work/home-custom/.profile" ]'
+check "RYUEDA_NO_MODIFY_PATH leaves Git's global config alone" '[ ! -e "$work/home-custom/.gitconfig" ] && grep -q "Git.s global config left alone" "$work/out"'
+run nogit "$good" RYUEDA_NO_GIT_CONFIG=1
+check "RYUEDA_NO_GIT_CONFIG leaves Git's config alone, profiles still edited" '[ "$status" -eq 0 ] && [ ! -e "$work/home-nogit/.gitconfig" ] && [ "$(markers "$work/home-nogit/.profile")" = 1 ]'
 run onpath "$good" PATH="$work/home-onpath/.ryueda/bin:/usr/bin:/bin"
 check "no PATH edit when already on PATH" '[ "$status" -eq 0 ] && [ ! -e "$work/home-onpath/.profile" ]'
 

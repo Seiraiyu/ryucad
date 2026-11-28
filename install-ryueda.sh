@@ -11,7 +11,10 @@
 #   RYUEDA_VERSION          version or tag to install: 0.1.0, v0.1.0 or
 #                           ryueda-v0.1.0 (default: the newest release)
 #   RYUEDA_HOME             install root (default: ~/.ryueda); the binary goes in bin/
-#   RYUEDA_NO_MODIFY_PATH   set to 1 to leave shell profiles alone
+#   RYUEDA_NO_MODIFY_PATH   set to 1 to leave shell profiles alone, and Git's
+#                           global config with them
+#   RYUEDA_NO_GIT_CONFIG    set to 1 to leave Git's global config alone (no
+#                           `ryueda git install --global`: try-outs, CI caches)
 #   RYUEDA_NO_APP           set to 1 to install the ryueda command only, not
 #                           the desktop app (servers, CI)
 #   GH_TOKEN, GITHUB_TOKEN  a token for a private repository (else `gh auth token`)
@@ -238,9 +241,14 @@ main() {
     "$bin/ryueda" daemon stop --all >/dev/null 2>&1 || true
     # git diff and git merge read ryueda's files through ryueda: its
     # textconv and merge driver, in the user's Git config.
-    if command -v git >/dev/null 2>&1; then
-        "$bin/ryueda" git install --global >/dev/null 2>&1 ||
+    if [ "${RYUEDA_NO_GIT_CONFIG:-0}" = 1 ] || [ "${RYUEDA_NO_MODIFY_PATH:-0}" = 1 ]; then
+        say "Git's global config left alone; for git diff and merge of ryueda files run: $bin/ryueda git install --global"
+    elif command -v git >/dev/null 2>&1; then
+        if "$bin/ryueda" git install --global >/dev/null 2>&1; then
+            say "registered $bin/ryueda with Git (global diff.ryueda.textconv, merge.ryueda.driver)"
+        else
             say "warning: couldn't register ryueda with Git; run: ryueda git install --global"
+        fi
     fi
 
     # The desktop app, unless only the command is wanted.
