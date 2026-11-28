@@ -680,12 +680,20 @@ fn watchers_hear_of_library_changes() {
             .as_array()
             .is_some_and(|l| l.iter().any(|x| x["name"] == "watcher"))
     };
+    let t0 = std::time::Instant::now();
+    let mut tries = 0;
     for _ in 0..200 {
+        tries += 1;
         if attached() {
             break;
         }
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
+    let attach = format!(
+        "{tries} tries in {:?}; last: {}",
+        t0.elapsed(),
+        p.run_in(&p.daemon, "board", &["participants"]).1
+    );
     // Nothing says when the watcher has subscribed (it is attached
     // first), so the library is named, and unnamed by undo, until the
     // watcher has heard one change: each moves the same revisions. (A
@@ -711,7 +719,19 @@ fn watchers_hear_of_library_changes() {
     let (_, status) = p.run_in(&p.daemon, "board", &["daemon", "status"]);
     assert!(
         !notes.is_empty(),
-        "the watcher heard nothing in 20 s of {writes} writes: {v}; daemon: {status}"
+        "the watcher heard nothing in 20 s of {writes} writes: {v}; daemon: {status}; attach: {attach}; logs: {}",
+        std::fs::read_dir(&p.run)
+            .map(|d| d
+                .flatten()
+                .filter(|e| e.path().extension().is_some_and(|x| x == "log"))
+                .map(|e| format!(
+                    "{}: {}",
+                    e.path().display(),
+                    std::fs::read_to_string(e.path()).unwrap_or_default()
+                ))
+                .collect::<Vec<_>>()
+                .join(" | "))
+            .unwrap_or_default()
     );
     assert_eq!(notes[0]["method"], "project.changed", "{v}");
     let changed = &notes[0]["params"]["changed"];

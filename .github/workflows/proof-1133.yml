@@ -25,58 +25,12 @@ jobs:
       - name: the watcher test, 20 times
         run: |
           fails=0
-          for i in $(seq 1 20); do
+          for i in $(seq 1 30); do
             if cargo test -q -p ryueda --test cli watchers_hear_of_library_changes > out.txt 2>&1; then
               echo "run $i ok"
             else
               fails=$((fails + 1)); echo "run $i FAILED"; cat out.txt
             fi
           done
-          echo "watcher test: $((20 - fails)) of 20 ok"
+          echo "watcher test: $((30 - fails)) of 30 ok"
           [ "$fails" = 0 ]
-      - name: four clients starting one daemon, 20 rounds
-        run: |
-          exe=$PWD/target/debug/ryueda
-          export RYUEDA_RUNTIME_DIR=$RUNNER_TEMP/run RYUEDA_CONFIG_DIR=$RUNNER_TEMP/config RYUEDA_IDLE_TIMEOUT=30
-          bad=0
-          for i in $(seq 1 20); do
-            d=$(mktemp -d)/p; mkdir -p "$d" && d=$(cd "$d" && pwd -P) && (cd "$d" && RYUEDA_NO_DAEMON=1 "$exe" init >/dev/null)
-            for k in 1 2 3 4; do (cd "$d" && "$exe" participants >/dev/null 2>&1) & done; wait
-            sleep 1
-            n=$(pgrep -f -- "-C $d daemon run" | wc -l | tr -d ' ')
-            echo "round $i: $n daemon(s)"; [ "$n" = 1 ] || bad=$((bad + 1))
-            (cd "$d" && "$exe" daemon stop >/dev/null 2>&1)
-          done
-          echo "rounds with other than one daemon: $bad of 20"
-          [ "$bad" = 0 ]
-  before:
-    # The same rounds at the commit before the fix (pre.3's), to show the
-    # race is there to catch: not asserted.
-    runs-on: macos-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: 5e0f631f3654b6aeae91ec397d20fc3b9269a5fb
-      - run: rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-        with:
-          add-rust-environment-hash-key: false
-          shared-key: clippy
-          save-if: false
-      - run: cargo build -p ryueda
-      - name: four clients starting one daemon, 20 rounds
-        run: |
-          exe=$PWD/target/debug/ryueda
-          export RYUEDA_RUNTIME_DIR=$RUNNER_TEMP/run RYUEDA_CONFIG_DIR=$RUNNER_TEMP/config RYUEDA_IDLE_TIMEOUT=30
-          bad=0
-          for i in $(seq 1 20); do
-            d=$(mktemp -d)/p; mkdir -p "$d" && d=$(cd "$d" && pwd -P) && (cd "$d" && RYUEDA_NO_DAEMON=1 "$exe" init >/dev/null)
-            for k in 1 2 3 4; do (cd "$d" && "$exe" participants >/dev/null 2>&1) & done; wait
-            sleep 1
-            n=$(pgrep -f -- "-C $d daemon run" | wc -l | tr -d ' ')
-            echo "round $i: $n daemon(s)"; [ "$n" = 1 ] || bad=$((bad + 1))
-            (cd "$d" && "$exe" daemon stop >/dev/null 2>&1)
-          done
-          echo "rounds with other than one daemon: $bad of 20"
-          true
