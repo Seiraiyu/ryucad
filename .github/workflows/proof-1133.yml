@@ -22,15 +22,28 @@ jobs:
       - run: cargo build -p ryueda && cargo test -p ryueda --test cli --no-run
       - name: ryu-session
         run: cargo test -p ryu-session
-      - name: the watcher test, 20 times
+      - name: the watcher test, sampled when a call stalls
         run: |
           fails=0
           for i in $(seq 1 30); do
-            if cargo test -q -p ryueda --test cli watchers_hear_of_library_changes > out.txt 2>&1; then
-              echo "run $i ok"
-            else
-              fails=$((fails + 1)); echo "run $i FAILED"; cat out.txt
-            fi
+            cargo test -q -p ryueda --test cli watchers_hear_of_library_changes > out.txt 2>&1 &
+            t=$!
+            sampled=0
+            while kill -0 $t 2>/dev/null; do
+              sleep 1
+              if [ $sampled = 0 ]; then
+                ps -axo pid=,etime=,command= | grep "[r]yueda participants" | while read pid et rest; do
+                  case $et in *:0[5-9]|*:[1-5][0-9]|*-*|*:*:*) ;; *) continue ;; esac
+                  echo "== run $i: participants $pid stalled ($et)"
+                  sample $pid 2 -mayDie -file cli-$i.txt >/dev/null 2>&1; cat cli-$i.txt | grep -E "Thread_|ryu|std::|interprocess|read|write|connect|lock|wait" | head -60
+                  for d in $(pgrep -f "daemon run"); do
+                    echo "== daemon $d"; sample $d 2 -mayDie -file d-$i-$d.txt >/dev/null 2>&1; grep -E "Thread_|ryu|std::|interprocess|read|write|connect|lock|wait|accept" d-$i-$d.txt | head -150
+                  done
+                  touch stalled-$i
+                done
+                [ -e stalled-$i ] && sampled=1
+              fi
+            done
+            if wait $t; then echo "run $i ok"; else fails=$((fails + 1)); echo "run $i FAILED"; grep -o "the watcher heard nothing.*" out.txt | cut -c1-600; fi
           done
           echo "watcher test: $((30 - fails)) of 30 ok"
-          [ "$fails" = 0 ]
