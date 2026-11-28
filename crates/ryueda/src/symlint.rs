@@ -1005,10 +1005,18 @@ pub fn library_check(
     p: &Project,
     library: Option<&str>,
     symbol: Option<&str>,
+    footprint: Option<&str>,
     listing: &Listing,
 ) -> Result<Answer> {
+    if symbol.is_some() && footprint.is_some() {
+        return Err(Error::new(
+            Code::InvalidParam,
+            "--symbol and --footprint each judge one object; give one",
+        )
+        .with("param", "footprint"));
+    }
     for c in &listing.codes {
-        if rule(c).is_none() {
+        if rule(c).is_none() && crate::fplint::code(c).is_none() {
             return Err(
                 Error::new(Code::InvalidParam, format!("{c} isn't a symbol lint code"))
                     .with("param", "code"),
@@ -1029,7 +1037,30 @@ pub fn library_check(
         }
         None => (library.unwrap_or(SELF).to_owned(), None),
     };
+    // One footprint (ryueda 7.F), as one symbol is named.
+    let (alias, only_fp) = match footprint {
+        Some(t) => {
+            let (a, id) = crate::libcmd::target(t, ObjKind::Footprint)?;
+            if library.is_some_and(|l| l != a) {
+                return Err(Error::new(
+                    Code::InvalidParam,
+                    format!("{t} isn't in library {}", library.unwrap_or_default()),
+                )
+                .with("param", "footprint"));
+            }
+            (a, Some(id))
+        }
+        None => (alias, None),
+    };
     let lib = p.library(&alias)?;
+    if let Some(id) = &only_fp
+        && !lib.footprints.contains_key(id)
+    {
+        let at = ref_text(&alias, ObjKind::Footprint, id);
+        return Err(
+            Error::new(Code::NotFound, format!("{at} isn't in the library")).with("reference", at),
+        );
+    }
     if let Some(id) = &only
         && !lib.symbols.contains_key(id)
     {
@@ -1050,6 +1081,7 @@ pub fn library_check(
         .symbols
         .iter()
         .filter(|(id, _)| only.as_ref().is_none_or(|o| o == *id))
+        .filter(|_| only_fp.is_none())
         .collect();
     let (mut errors, mut warnings) = (0u64, 0u64);
     let mut by_code: BTreeMap<&'static str, u64> = BTreeMap::new();
@@ -1127,6 +1159,84 @@ pub fn library_check(
         }
     }
     text.push(']');
+    let fps: Vec<_> = lib
+        .footprints
+        .iter()
+        .filter(|(id, _)| only_fp.as_ref().is_none_or(|o| o == *id))
+        .filter(|_| only.is_none())
+        .collect();
+    text.push_str(r#","footprints":["#);
+    let mut first = true;
+    for chunk in fps.chunks(CHUNK) {
+        let judged: Vec<(Option<String>, u64, u64, Vec<&'static str>)> = chunk
+            .par_iter()
+            .map(|(id, l)| {
+                let reference = ref_text(&alias, ObjKind::Footprint, id);
+                let f = match &l.item {
+                    Ok(f) => f,
+                    Err(e) => {
+                        return (
+                            Some(json!({"reference": reference, "error": e}).to_string()),
+                            0,
+                            0,
+                            Vec::new(),
+                        );
+                    }
+                };
+                let found = crate::fplint::lint(f);
+                let name = |x: &Fault| {
+                    crate::fplint::CODES
+                        .iter()
+                        .find(|(c, _)| *c == x.error.code)
+                        .map_or("", |(_, n)| *n)
+                };
+                let errors = found.iter().filter(|x| x.is_error()).count() as u64;
+                let codes: Vec<&'static str> = found.iter().map(name).collect();
+                let wanted: Vec<&Fault> = found
+                    .iter()
+                    .filter(|x| {
+                        listing.codes.is_empty() || listing.codes.iter().any(|c| c == name(x))
+                    })
+                    .collect();
+                if !listing.codes.is_empty() && wanted.is_empty() {
+                    return (None, errors, found.len() as u64 - errors, codes);
+                }
+                let mut v =
+                    json!({"reference": reference, "path": lib.path(ObjKind::Footprint, id)});
+                if listing.summary {
+                    let mut counts: BTreeMap<&str, u64> = BTreeMap::new();
+                    for x in &wanted {
+                        *counts.entry(name(x)).or_default() += 1;
+                    }
+                    v["counts"] = json!(counts);
+                } else {
+                    let list: Vec<Fault> = wanted.into_iter().cloned().collect();
+                    v["findings"] = crate::fault::list(&list);
+                }
+                (
+                    Some(v.to_string()),
+                    errors,
+                    found.len() as u64 - errors,
+                    codes,
+                )
+            })
+            .collect();
+        for (entry, e, w, codes) in judged {
+            errors += e;
+            warnings += w;
+            for c in codes {
+                *by_code.entry(c).or_default() += 1;
+            }
+            if let Some(entry) = entry {
+                if !first {
+                    text.push(',');
+                }
+                first = false;
+                text.push_str(&entry);
+            }
+        }
+    }
+    text.push(']');
     if listing.summary {
         text.push_str(&format!(r#","by_code":{}"#, json!(by_code)));
     }
@@ -1139,7 +1249,7 @@ pub fn library_check(
     if errors > 0 {
         return Ok(Answer::raw(Text::Error {
             code: Code::CheckFailed,
-            message: format!("the symbol lint found {errors} error(s) and {warnings} warning(s)"),
+            message: format!("the library lint found {errors} error(s) and {warnings} warning(s)"),
             details: {
                 // In place: no second copy of the report.
                 text.insert_str(0, r#"{"report":"#);

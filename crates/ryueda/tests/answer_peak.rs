@@ -100,7 +100,8 @@ fn a_library_checks_report_is_held_as_text() {
     library(dir.path(), 2_000);
     let p = ryueda::project::Project::load(dir.path()).unwrap();
     let listing = ryueda::symlint::Listing::default();
-    let (answer, peak) = held(|| ryueda::symlint::library_check(&p, None, None, &listing).unwrap());
+    let (answer, peak) =
+        held(|| ryueda::symlint::library_check(&p, None, None, None, &listing).unwrap());
     let text = match answer.raw {
         Some(Raw::Result(t)) => t,
         Some(Raw::Error { details, .. }) => details,

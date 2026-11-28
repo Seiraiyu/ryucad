@@ -7,7 +7,8 @@
 # daemon, the activity log, a board placed, routed, checked, rendered and
 # exported, made four layers with a track on in1 and exported again, a
 # part turned over to the bottom and back, a ground plane poured and
-# deleted, a track deleted and undone through the ratsnest, the daemon's
+# deleted, a track deleted and undone through the ratsnest, a footprint
+# drawn by ops, rendered, linted and deleted, the daemon's
 # status and stop, and a run in process.
 #
 #   scripts/smoke-ryueda.sh path/to/ryueda [path/to/kicad] [path/to/ryueda-app]
@@ -215,6 +216,15 @@ has '"net":"out"' "the removed track's connection"
 run undo
 run board ratsnest main
 has '"connections":[]' "undo routes it again"
+# Footprints by command (ryueda 7.F): one drawn by ops, rendered, judged
+# by the lint and deleted.
+run footprint create Test_Pad --mount smd --ops '[{"op":"add","pad":null,"number":"1","kind":"smd","shape":"rect","at":[0,0],"size":["1","1"],"layers":["copper.top","mask.top"]},{"op":"add","graphic":null,"type":"rect","layer":"courtyard.top","start":["-1","1"],"end":["1","-1"],"width":"0.05"},{"op":"add","field":"reference","layer":"silk.top","at":[0,"1.5"],"size":["1","1"],"thickness":"0.15"}]'
+has '"reference":"lib/self/footprint/test_pad"' "a footprint drawn by ops"
+run footprint render test_pad --out fp.svg
+[ -s fp.svg ] || { echo "FAIL footprint render wrote nothing" && exit 1; }
+run lib check --footprint test_pad
+has '"findings":[]' "the footprint is clean"
+run footprint delete test_pad
 if [ -n "$app" ]; then
     out=$("$app" --smoke "$work/project") || true
     case "$out" in

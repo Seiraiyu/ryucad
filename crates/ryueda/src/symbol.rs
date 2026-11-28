@@ -240,11 +240,30 @@ pub fn pin_number_ok(n: &str) -> bool {
             .all(|c| !(c.is_whitespace() || c.is_control() || c == '/'))
 }
 
-/// Twice the signed area of the triangle `a b c`: zero when collinear.
+/// The sign of twice the signed area of the triangle `a b c`: -1, 0 or 1,
+/// zero when collinear; exact for every i64 point.
 pub(crate) fn cross(a: Point, b: Point, c: Point) -> i128 {
-    let d = |p: Point, q: Point| [i128::from(q[0] - p[0]), i128::from(q[1] - p[1])];
+    // Exact for every i64 point (7.F's review): each difference's
+    // magnitude is under 2^64, so each product's is under 2^128 and fits
+    // a u128; the two products are compared with their signs. Callers
+    // only ever read the sign.
+    let d = |p: Point, q: Point| {
+        [
+            i128::from(q[0]) - i128::from(p[0]),
+            i128::from(q[1]) - i128::from(p[1]),
+        ]
+    };
     let (u, v) = (d(a, b), d(a, c));
-    u[0] * v[1] - u[1] * v[0]
+    let term = |x: i128, y: i128| (x.signum() * y.signum(), x.unsigned_abs() * y.unsigned_abs());
+    let ((sa, ma), (sb, mb)) = (term(u[0], v[1]), term(u[1], v[0]));
+    if sa != sb {
+        return (sa - sb).signum();
+    }
+    match ma.cmp(&mb) {
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => sa,
+        std::cmp::Ordering::Less => -sa,
+    }
 }
 
 impl Symbol {
@@ -360,14 +379,9 @@ impl Symbol {
     }
 
     /// The next graphic ID: one past the largest `g<n>`.
-    pub fn next_graphic(&self) -> Id {
-        let n = self
-            .graphics
-            .keys()
-            .filter_map(|id| id.as_str().strip_prefix('g')?.parse::<u64>().ok())
-            .max()
-            .unwrap_or(0);
-        Id::parse(&format!("g{}", n + 1), "graphic").expect("g<n> is an ID")
+    /// The next free `g<n>`, or `None` past `g18446744073709551615`.
+    pub fn next_graphic(&self) -> Option<Id> {
+        crate::edit::next_id(&self.graphics, "g")
     }
 }
 
@@ -561,7 +575,7 @@ pub(crate) mod tests {
                 (Code::LibraryOutOfRange, "/graphics/g7".to_owned()),
             ]
         );
-        assert_eq!(s.next_graphic().as_str(), "g8");
+        assert_eq!(s.next_graphic().unwrap().as_str(), "g8");
     }
 
     #[test]
@@ -591,5 +605,16 @@ pub(crate) mod tests {
             codes(&s),
             vec![(Code::LibraryUnitInvalid, "/units".to_owned())]
         );
+    }
+
+    /// `cross` is exact at the ends of the range (7.F's review: its i128
+    /// product overflowed).
+    #[test]
+    fn cross_is_exact_at_the_ends_of_the_range() {
+        let (max, min) = (i64::MAX, i64::MIN);
+        assert_eq!(cross([min, min], [max, 0], [0, max]), 1);
+        assert_eq!(cross([min, min], [0, max], [max, 0]), -1);
+        assert_eq!(cross([min, min], [0, 0], [max, max]), 0);
+        assert_eq!(cross([0, 0], [2, 0], [1, 1]), 1);
     }
 }

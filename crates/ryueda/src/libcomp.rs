@@ -216,7 +216,7 @@ impl LibComp {
                     if u.pins.contains_key(n) {
                         out.push(
                             Fault::error(
-                                Code::NotFound,
+                                Code::FootprintPadUnmapped,
                                 format!("the footprint has no pad {pad} for pin {n}"),
                             )
                             .with("pointer", at(""))
@@ -408,11 +408,18 @@ pub(crate) mod tests {
         assert_eq!(
             codes(&c, &s, &f),
             vec![
-                (Code::NotFound, "/footprints/0/pins/2".to_owned()),
+                (
+                    Code::FootprintPadUnmapped,
+                    "/footprints/0/pins/2".to_owned()
+                ),
                 (Code::PinWithoutPad, "/footprints/0/pins/2".to_owned()),
                 (Code::PadWithoutPin, "/footprints/0/pins".to_owned()),
             ]
         );
+        // Its details are the ones its code declares (Q1352).
+        let unmapped = c.check(Ok(&s), &[Ok(&f)]);
+        assert_eq!(unmapped[0].error.details["pad"], "9");
+        assert_eq!(unmapped[0].error.details["pin"], "2");
         let warn = c.check(Ok(&s), &[Ok(&f)]);
         assert!(!warn.last().unwrap().is_error());
         // A pin that connects to nothing by design needs no pad.

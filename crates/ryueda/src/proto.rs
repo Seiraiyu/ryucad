@@ -208,6 +208,9 @@ pub enum Request {
         library: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         symbol: Option<String>,
+        /// One footprint (ryueda 7.F): only it is judged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        footprint: Option<String>,
         /// Counts by code, no findings (#711).
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         summary: bool,
@@ -286,6 +289,66 @@ pub enum Request {
     FootprintList {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         library: Option<String>,
+    },
+    /// A footprint called `name` in this project's library, its ID from
+    /// the name unless given, with a batch of ops applied (ryueda 7.F).
+    #[serde(rename = "footprint.create")]
+    FootprintCreate {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        /// `smd`, `through` or `unspecified` (the default).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mount: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        ops: Vec<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// A footprint's fields and a batch of `add`, `remove`, `set` and
+    /// `move` ops on its pads, graphics, keepouts, fields and models.
+    #[serde(rename = "footprint.edit")]
+    FootprintEdit {
+        footprint: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        /// The whole list.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tags: Option<Vec<String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mount: Option<String>,
+        /// The whole list (`board_only`, `exclude_from_pos`, …).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        flags: Option<Vec<String>>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        ops: Vec<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    #[serde(rename = "footprint.delete")]
+    FootprintDelete {
+        footprint: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_revision: Option<String>,
+    },
+    /// A footprint alone as PNG or SVG, drawn as a board draws it.
+    #[serde(rename = "footprint.render")]
+    FootprintRender {
+        footprint: String,
+        /// Layers bottom first; the side's copper, mask, silk, then drill
+        /// and outline by default.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        layers: Vec<String>,
+        /// `top` (the default) or `bottom`, seen from below.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        side: Option<String>,
+        /// The long side in pixels.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        size: Option<u32>,
+        /// `png` or `svg`.
+        format: String,
     },
     /// A library component, its ID made from `name` unless given.
     #[serde(rename = "libcomp.create")]
@@ -1933,6 +1996,9 @@ impl Request {
                 | Request::SymbolCreate { .. }
                 | Request::SymbolEdit { .. }
                 | Request::SymbolDelete { .. }
+                | Request::FootprintCreate { .. }
+                | Request::FootprintEdit { .. }
+                | Request::FootprintDelete { .. }
                 | Request::LibcompCreate { .. }
                 | Request::LibcompEdit { .. }
                 | Request::LibcompDelete { .. }

@@ -843,6 +843,10 @@ fn every_protocol_method_has_a_command() {
         ("symbol.delete", &["symbol", "delete"]),
         ("footprint.show", &["footprint", "show"]),
         ("footprint.list", &["footprint", "list"]),
+        ("footprint.create", &["footprint", "create"]),
+        ("footprint.edit", &["footprint", "edit"]),
+        ("footprint.delete", &["footprint", "delete"]),
+        ("footprint.render", &["footprint", "render"]),
         ("libcomp.create", &["libcomp", "create"]),
         ("libcomp.edit", &["libcomp", "edit"]),
         ("libcomp.show", &["libcomp", "show"]),
@@ -6698,5 +6702,289 @@ fn ratsnest_from_the_cli() {
         &["board", "ratsnest", id, "--net", "nope"],
         "board_net_not_found",
         1,
+    );
+}
+
+/// A footprint by ops (ryueda 7.F): one pad, a courtyard, a reference.
+const PAD_FP: &str = r#"[
+    {"op": "add", "pad": null, "number": "1", "kind": "smd", "shape": "rect", "at": [0, 0], "size": ["1", "1"], "layers": ["copper.top", "mask.top"]},
+    {"op": "add", "graphic": null, "type": "rect", "layer": "courtyard.top", "start": ["-1", "1"], "end": ["1", "-1"], "width": "0.05"},
+    {"op": "add", "field": "reference", "layer": "silk.top", "at": [0, "1.5"], "size": ["1", "1"], "thickness": "0.15"}
+]"#;
+
+#[test]
+fn a_footprint_is_created_from_the_cli() {
+    let p = Pair::projects();
+    let made = p.ok(&[
+        "footprint",
+        "create",
+        "Test_Pad",
+        "--mount",
+        "smd",
+        "--ops",
+        PAD_FP,
+    ]);
+    assert_eq!(made["reference"], "lib/self/footprint/test_pad", "{made}");
+    assert_eq!(made["path"], "library/footprints/test_pad.json");
+    assert_eq!(made["added"], json!(["p1", "g1"]));
+    assert_eq!(
+        made["footprint"]["pads"]["p1"]["size"],
+        json!([1_000_000, 1_000_000])
+    );
+    assert_eq!(made["footprint"]["mount"], "smd");
+    assert_eq!(made["faults"], json!([]));
+    let again = p.ok(&["footprint", "create", "Test_Pad"]);
+    assert_eq!(again["reference"], "lib/self/footprint/test_pad-2");
+    p.fails(
+        &["footprint", "create", "X", "--id", "test_pad"],
+        "duplicate_id",
+        1,
+    );
+    p.fails(
+        &["footprint", "create", "X", "--mount", "glued"],
+        "invalid_param",
+        1,
+    );
+    // A write that would leave a fault is refused, with every fault.
+    let e = p.fails(
+        &["footprint", "create", "Bad", "--ops", r#"[{"op": "add", "pad": null, "kind": "smd", "shape": "rect", "at": [0, 0], "size": [0, 1], "layers": ["copper.top"]}]"#],
+        "library_pad_invalid",
+        1,
+    );
+    assert_eq!(e["details"]["faults"][0]["details"]["pointer"], "/pads/p1");
+    let gone = p.ok(&["footprint", "delete", "test_pad-2"]);
+    assert_eq!(gone["deleted"], "lib/self/footprint/test_pad-2");
+    p.fails(&["footprint", "delete", "test_pad-2"], "not_found", 1);
+    let r = p.ok(&["footprint", "render", "test_pad", "--out", "fp.svg"]);
+    assert_eq!(r["footprint"], "lib/self/footprint/test_pad", "{r}");
+    assert!(r.get("board").is_none(), "{r}");
+    let svg = fs::read_to_string(p.daemon.join("board/fp.svg")).unwrap();
+    assert!(svg.contains("<path"), "the footprint is drawn");
+    let r = p.ok(&[
+        "footprint",
+        "render",
+        "test_pad",
+        "--out",
+        "fp.png",
+        "--layer",
+        "copper.top",
+        "--size",
+        "200",
+    ]);
+    assert_eq!(
+        (r["width"].as_u64(), r["layers"].clone()),
+        (Some(200), json!(["copper.top"]))
+    );
+    p.fails(
+        &[
+            "footprint",
+            "render",
+            "test_pad",
+            "--out",
+            "x.svg",
+            "--layer",
+            "copper.in9",
+        ],
+        "invalid_param",
+        1,
+    );
+    // A footprint failing its own checks (written by hand: no command
+    // makes one) isn't drawn; its faults say why.
+    p.write(
+        "board/library/footprints/far.json",
+        r#"{"format":1,"kind":"ryueda.footprint","name":"Far","graphics":{"g1":{"layer":"courtyard.top","type":"arc","start":[0,0],"mid":[80000,1099511627776],"end":[0,360000],"width_nm":640000}}}"#,
+    );
+    p.fails(
+        &["footprint", "render", "far", "--out", "far.svg"],
+        "library_out_of_range",
+        1,
+    );
+    let bad = p.ok(&["footprint", "create", "Short", "--ops", r#"[
+        {"op": "add", "pad": null, "number": "1", "kind": "smd", "shape": "rect", "at": ["-0.4", 0], "size": ["1", "1"], "layers": ["copper.top"]},
+        {"op": "add", "pad": null, "number": "2", "kind": "smd", "shape": "rect", "at": ["0.4", 0], "size": ["1", "1"], "layers": ["copper.top"]}
+    ]"#]);
+    let codes = |v: &Value| -> Vec<String> {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["code"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(
+        codes(&bad["findings"]),
+        ["footprint_pads_overlap", "footprint_no_reference"],
+        "{bad}"
+    );
+    // Overlapping pads are a warning (KiCad stacks lands on purpose).
+    let e = p.ok(&["lib", "check", "--footprint", "short"]);
+    let fps = e["footprints"].as_array().unwrap();
+    assert_eq!(fps.len(), 1, "{e}");
+    assert_eq!(fps[0]["reference"], "lib/self/footprint/short");
+    assert_eq!(
+        (e["errors"].as_u64(), e["warnings"].as_u64()),
+        (Some(0), Some(2)),
+        "{e}"
+    );
+    let clean = p.ok(&["lib", "check", "--footprint", "test_pad"]);
+    assert_eq!(clean["footprints"][0]["findings"], json!([]), "{clean}");
+    assert!(
+        clean.get("symbols").is_none() || clean["symbols"] == json!([]),
+        "{clean}"
+    );
+    let only = p.ok(&["lib", "check", "--code", "footprint_pads_overlap"]);
+    assert_eq!(only["footprints"].as_array().unwrap().len(), 1, "{only}");
+    p.fails(
+        &["lib", "check", "--footprint", "short", "--symbol", "x"],
+        "invalid_param",
+        1,
+    );
+}
+
+#[test]
+fn a_footprint_is_edited_and_its_boards_are_checked_again() {
+    let p = Pair::breakout();
+    for args in breakout_board::script() {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        p.ok(&args);
+    }
+    let shown = p.ok(&["footprint", "show", "r_0402"]);
+    let rev = shown["revision"].as_str().unwrap().to_owned();
+    // Pads grown into each other: the boards placing R_0402 hear of it.
+    let e = p.ok(&[
+        "footprint", "edit", "r_0402", "--expect", &rev, "--description", "grown",
+        "--tag", "resistor", "--tag", "0402", "--flag", "exclude_from_bom",
+        "--ops", r#"[{"op": "set", "pad": "p1", "size": ["1.2", "0.62"]}, {"op": "set", "pad": "p2", "size": ["1.2", "0.62"]}]"#,
+    ]);
+    assert_eq!(e["footprint"]["description"], "grown", "{e}");
+    assert_eq!(e["footprint"]["tags"], json!(["resistor", "0402"]));
+    assert_eq!(e["footprint"]["flags"], json!(["exclude_from_bom"]));
+    let boards = e["boards"].as_array().unwrap();
+    assert_eq!(boards.len(), 1, "{e}");
+    assert_eq!(
+        boards[0]["board"],
+        format!("board/{}", breakout_board::BOARD)
+    );
+    assert!(boards[0]["drc"]["errors"].as_u64().unwrap() > 0, "{e}");
+    // Taking pad 2 away while R_0402's component maps it is refused.
+    let e = p.fails(
+        &[
+            "footprint",
+            "edit",
+            "r_0402",
+            "--ops",
+            r#"[{"op": "remove", "pad": "p2"}]"#,
+        ],
+        "has_dependents",
+        1,
+    );
+    assert_eq!(e["details"]["pads"], json!(["2"]), "{e}");
+    p.fails(
+        &["footprint", "edit", "r_0402", "--expect", &rev],
+        "conflict",
+        1,
+    );
+    p.fails(&["footprint", "edit", "nope"], "not_found", 1);
+    let e = p.ok(&["footprint", "edit", "r_0402", "--no-flags", "--no-tags"]);
+    assert_eq!(
+        (e["footprint"].get("flags"), e["footprint"].get("tags")),
+        (None, None),
+        "{e}"
+    );
+    let e = p.fails(&["footprint", "delete", "r_0402"], "has_dependents", 1);
+    assert!(
+        !e["details"]["dependents"].as_array().unwrap().is_empty(),
+        "{e}"
+    );
+}
+
+/// Footprints by command through the daemon: each write is in the
+/// activity log, undone and redone, and a watcher of `project` hears of
+/// it (ryueda 7.F).
+#[test]
+fn footprint_writes_undo_and_redo_through_the_daemon() {
+    let p = Pair::projects();
+    p.ok(&["footprint", "create", "Test_Pad", "--ops", PAD_FP]);
+    let path = p.daemon.join("board/library/footprints/test_pad.json");
+    assert!(path.exists());
+    let (code, v) = p.run_in(
+        &p.daemon,
+        "board",
+        &["footprint", "edit", "test_pad", "--description", "d"],
+    );
+    assert_eq!(code, 0, "{v}");
+    let log = p.run_in(&p.daemon, "board", &["history"]).1;
+    let methods: Vec<&str> = log["result"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["method"].as_str().unwrap())
+        .collect();
+    assert!(
+        methods.contains(&"footprint.create") && methods.contains(&"footprint.edit"),
+        "{log}"
+    );
+    assert_eq!(p.run_in(&p.daemon, "board", &["undo"]).0, 0);
+    let shown = p
+        .run_in(&p.daemon, "board", &["footprint", "show", "test_pad"])
+        .1;
+    assert_eq!(
+        shown["result"]["footprint"].get("description"),
+        None,
+        "{shown}"
+    );
+    assert_eq!(p.run_in(&p.daemon, "board", &["undo"]).0, 0);
+    assert!(!path.exists(), "undo takes the create back");
+    assert_eq!(p.run_in(&p.daemon, "board", &["redo"]).0, 0);
+    assert!(path.exists());
+}
+
+/// A USB-C receptacle's stacked lands, as KiCad's own footprints draw them
+/// (A1 on B12 for GND, A4 on B9 for VBUS), in a KiCad 9 file we wrote.
+const USB_C_STACKED: &str = r#"(footprint "USB_C_Stacked"
+	(version 20241229)
+	(generator "ryueda_tests")
+	(layer "F.Cu")
+	(property "Reference" "REF**" (at 0 -3 0) (layer "F.SilkS") (effects (font (size 1 1) (thickness 0.15))))
+	(attr smd)
+	(fp_rect (start -4.5 -2) (end 4.5 2) (stroke (width 0.05) (type solid)) (fill no) (layer "F.CrtYd"))
+	(pad "A1" smd rect (at -3.2 0) (size 0.6 1.2) (layers "F.Cu" "F.Mask" "F.Paste"))
+	(pad "B12" smd rect (at -3.2 0) (size 0.6 1.2) (layers "F.Cu" "F.Mask" "F.Paste"))
+	(pad "A4" smd rect (at -2.4 0) (size 0.6 1.2) (layers "F.Cu" "F.Mask" "F.Paste"))
+	(pad "B9" smd rect (at -2.4 0) (size 0.6 1.2) (layers "F.Cu" "F.Mask" "F.Paste"))
+)
+"#;
+
+/// Importing a USB-C receptacle doesn't fail lib check (ryueda 7.F): its
+/// stacked lands of different numbers are warnings, not errors, since KiCad
+/// draws them on purpose and a board's DRC judges real shorts.
+#[test]
+fn a_usb_c_receptacles_stacked_lands_dont_fail_lib_check() {
+    let p = Pair::projects();
+    for top in [&p.direct, &p.daemon] {
+        let dir = top.join("usb/Ryu_USB.pretty");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("USB_C_Stacked.kicad_mod"), USB_C_STACKED).unwrap();
+    }
+    p.ok(&["import", "kicad", "../usb/Ryu_USB.pretty"]);
+    let c = p.ok(&["lib", "check", "--footprint", "ryu_usb_usb_c_stacked"]);
+    assert_eq!(c["errors"], 0, "{c}");
+    let found: Vec<&str> = c["footprints"][0]["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["code"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        found,
+        ["footprint_pads_overlap", "footprint_pads_overlap"],
+        "{c}"
+    );
+    assert!(
+        c["footprints"][0]["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|f| f["severity"] == "warning"),
+        "{c}"
     );
 }

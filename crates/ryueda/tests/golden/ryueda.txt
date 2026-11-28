@@ -89,6 +89,9 @@ breakout.netlist 16daf5eca5b841dca1e0b3b6ee23a6b0
 diff.breakout 30033c5a49db0662530e52bd059a4aa8
 diff.breakout.layout f0e5ff9b95e64ff77cc10d8cdd4b133a
 diff.breakout.netlist d3417f340a6c613970f6810cff47c5b9
+footprint.authored f1edc0506a949fd7364c6b62e676d970
+footprint.authored.lint 446e3b6f00ce554fa35726df0575181f
+footprint.authored.svg 48f29687e0c495373c0597dc2d1bf2c9
 generated.erc 78239ee711bef7fca90a828cc74caab3
 generated.netlist 5320f73be71d1afe60130384cd00fcea
 kicad.library 9acdf4c928678cfba0ea7435e1848d06
@@ -218,5 +221,5 @@ schematic.rp2040.mitayi.s3.scene.dark ca0d6f6d2e885dc3c55c73aac6a08e4c
 schematic.rp2040.mitayi.s3.scene.light 98e5c359256c24398b08214bba586d59
 schematic.rp2040.mitayi.svg 2d342a31ce2338fa38cdaae35c9c5870
 schematic.rp2040.pdf 9a58fd91ecb4015fe6a5869c7d6e3c6c
-symbols.lint 674b164854a974b7bb718d051e7a1109
+symbols.lint f2fdbfa10806ee988b0f59140927aebf
 symbols.templates 1f056384595d56c1eaa9e9691f2eab7d

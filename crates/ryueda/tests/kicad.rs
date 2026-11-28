@@ -3,6 +3,9 @@
 //! becomes, that importing again changes nothing, that a dry run writes
 //! nothing, and that a changed file is written again in place.
 
+#[path = "support/footprints.rs"]
+mod footprints;
+
 use ryueda::error::Code;
 use ryueda::footprint::{Drill, Footprint, Model, PadKind, PadShape, Shape};
 use ryueda::id::Id;
@@ -354,4 +357,39 @@ fn what_isnt_a_kicad_library_is_refused_before_anything_is_written() {
         (Some(2), Some(3))
     );
     assert!(!dir.path().join("library").exists());
+}
+
+/// A footprint drawn by ops equals, as the shapes a board draws, the same
+/// footprint imported from a KiCad file we wrote (design 924).
+#[test]
+fn an_authored_footprint_is_the_imported_one_as_shapes() {
+    let text = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/data/kicad/footprints/Ryu_Test.pretty/R_0402.kicad_mod"),
+    )
+    .unwrap();
+    let mut notes = ryueda::kicad::Notes::default();
+    let imported = ryueda::kicad::footprint::read(&text, &mut notes)
+        .unwrap()
+        .footprint;
+    let mut authored: ryueda::footprint::Footprint =
+        serde_json::from_value(serde_json::json!({"name": "R_0402", "mount": "smd"})).unwrap();
+    let ops: serde_json::Value = serde_json::from_str(footprints::R_0402).unwrap();
+    let none = |_: &str| -> ryueda::error::Result<String> { unreachable!("no models") };
+    ryueda::fpedit::apply(
+        &mut authored,
+        ops.as_array().unwrap(),
+        ryueda::units::Unit::Mm,
+        &none,
+    )
+    .unwrap();
+    let (a, b) = (
+        ryueda::board::shapes::footprint_alone(&authored),
+        ryueda::board::shapes::footprint_alone(&imported),
+    );
+    assert_eq!(a.layers, b.layers);
+    assert_eq!(format!("{:?}", a.pads), format!("{:?}", b.pads));
+    assert_eq!(format!("{:?}", a.courtyards), format!("{:?}", b.courtyards));
+    assert_eq!(format!("{:?}", a.holes), format!("{:?}", b.holes));
+    assert!(ryueda::fplint::lint(&authored).is_empty());
 }

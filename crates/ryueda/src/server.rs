@@ -352,6 +352,20 @@ fn working(
     job: &ryu_session::job::Job,
 ) -> Result<Answer> {
     match req {
+        Request::FootprintRender {
+            footprint,
+            layers,
+            side,
+            size,
+            format,
+        } => libcmd::footprint_render(
+            session.project(),
+            &footprint,
+            &layers,
+            side.as_deref(),
+            size,
+            &format,
+        ),
         Request::BoardRender {
             board,
             layers,
@@ -473,6 +487,7 @@ fn working(
         Request::LibCheck {
             library,
             symbol,
+            footprint,
             summary,
             codes,
             ..
@@ -480,6 +495,7 @@ fn working(
             session.project(),
             library.as_deref(),
             symbol.as_deref(),
+            footprint.as_deref(),
             &crate::symlint::Listing { summary, codes },
         ),
         Request::Output {
@@ -635,6 +651,7 @@ fn read_at(session: &mut Session, p: &Project, commit: &str, req: Request) -> Re
         Request::LibCheck {
             library,
             symbol,
+            footprint,
             summary,
             codes,
             ..
@@ -642,6 +659,7 @@ fn read_at(session: &mut Session, p: &Project, commit: &str, req: Request) -> Re
             p,
             library.as_deref(),
             symbol.as_deref(),
+            footprint.as_deref(),
             &crate::symlint::Listing { summary, codes },
         ),
         Request::Scene {
@@ -958,6 +976,46 @@ fn dispatch(
         Request::FootprintList { library } => {
             libcmd::footprint_list(session.project(), library.as_deref())
         }
+        Request::FootprintCreate {
+            name,
+            id,
+            mount,
+            ops,
+            expected_revision,
+        } => libcmd::footprint_create(
+            session,
+            &name,
+            id.as_deref(),
+            mount.as_deref(),
+            &ops,
+            expected_revision.as_deref(),
+        ),
+        Request::FootprintEdit {
+            footprint,
+            name,
+            description,
+            tags,
+            mount,
+            flags,
+            ops,
+            expected_revision,
+        } => libcmd::footprint_edit(
+            session,
+            &footprint,
+            &libcmd::FootprintFields {
+                name,
+                description,
+                tags,
+                mount,
+                flags,
+            },
+            &ops,
+            expected_revision.as_deref(),
+        ),
+        Request::FootprintDelete {
+            footprint,
+            expected_revision,
+        } => libcmd::footprint_delete(session, &footprint, expected_revision.as_deref()),
         Request::LibcompCreate {
             name,
             id,
@@ -2057,6 +2115,7 @@ fn dispatch(
         ),
         Request::Render { .. }
         | Request::BoardRender { .. }
+        | Request::FootprintRender { .. }
         | Request::Output { .. }
         | Request::Scene { .. }
         | Request::LibCheck { .. }

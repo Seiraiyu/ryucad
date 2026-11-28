@@ -1195,6 +1195,18 @@ pub enum Code {
     /// ryueda DRC finding (a warning): a pad a pour reaches by fewer than
     /// two thermal spokes (`details.spokes`).
     PourThermalStarved,
+    /// Footprint lint (ryueda 7.F, a warning): two pads of different
+    /// numbers whose copper touches on a layer both are on.
+    FootprintPadsOverlap,
+    /// Footprint lint (a warning): pads of one number whose copper isn't
+    /// one piece; a board joins them only through its own copper.
+    FootprintPadNumberRepeated,
+    /// Footprint lint (a warning): a courtyard that doesn't close.
+    FootprintCourtyardOpen,
+    /// Footprint lint (a warning): no reference designator field.
+    FootprintNoReference,
+    /// A library component maps a pin to a pad its footprint lacks.
+    FootprintPadUnmapped,
     /// `board export` refused: the board has DRC errors (its report in
     /// `details.report`); fix them, or export with `--allow-errors`,
     /// which the manifest records.
@@ -1708,6 +1720,11 @@ impl Code {
         Code::BoardContourInvalid,
         Code::PourEmpty,
         Code::PourThermalStarved,
+        Code::FootprintPadsOverlap,
+        Code::FootprintPadNumberRepeated,
+        Code::FootprintCourtyardOpen,
+        Code::FootprintNoReference,
+        Code::FootprintPadUnmapped,
         Code::DrcFailed,
         Code::ItemNotFound,
         Code::ItemClassUnknown,
@@ -1971,6 +1988,25 @@ mod tests {
             assert_eq!(json!(c), json!(s));
             assert_eq!(c.exit_code(), 1);
             assert!(Code::ALL.contains(&c), "{c:?} in ALL");
+        }
+    }
+
+    #[test]
+    fn footprint_lint_codes() {
+        for (c, s) in [
+            (Code::FootprintPadsOverlap, "footprint_pads_overlap"),
+            (
+                Code::FootprintPadNumberRepeated,
+                "footprint_pad_number_repeated",
+            ),
+            (Code::FootprintCourtyardOpen, "footprint_courtyard_open"),
+            (Code::FootprintNoReference, "footprint_no_reference"),
+            (Code::FootprintPadUnmapped, "footprint_pad_unmapped"),
+        ] {
+            assert_eq!(json!(c), json!(s));
+            assert_eq!(c.exit_code(), 1);
+            assert!(Code::ALL.contains(&c), "{c:?} in ALL");
+            assert!(c.keys().is_some(), "{c:?} declares its details");
         }
     }
 

@@ -16,6 +16,8 @@ mod buck;
 mod draw;
 #[path = "support/ethernet.rs"]
 mod ethernet;
+#[path = "support/footprints.rs"]
+mod footprints;
 #[path = "support/frontend.rs"]
 mod frontend;
 #[path = "support/generated.rs"]
@@ -1150,6 +1152,7 @@ fn netlists_and_erc_are_bit_exact() {
     rules(&mut golden, &dir.path().join("rules"));
     placed(&mut golden, &dir.path().join("place"));
     pours(&mut golden, &dir.path().join("pours"));
+    footprint_section(&mut golden, &dir.path().join("footprints"));
     golden.finish();
 }
 
@@ -1827,4 +1830,45 @@ fn merged(golden: &mut Golden, repo: &Path) {
         "merge.breakout.layout".to_owned(),
         blake3::hash(&one.1).to_hex()[..32].to_owned(),
     );
+}
+
+/// Footprints by command (ryueda 7.F): R_0402 drawn by ops, its file, its
+/// SVG and its lint, on one thread and eight.
+fn footprint_section(golden: &mut Golden, at: &Path) {
+    let mut first: Option<(Value, String, Value)> = None;
+    for threads in [1, 8] {
+        let dir = at.join(format!("t{threads}")).join("p");
+        std::fs::create_dir_all(&dir).unwrap();
+        ryueda(&dir, 1, &["init"]);
+        let made = ryueda(
+            &dir,
+            threads,
+            &[
+                "footprint",
+                "create",
+                "R_0402",
+                "--mount",
+                "smd",
+                "--ops",
+                footprints::R_0402,
+            ],
+        );
+        ryueda(
+            &dir,
+            threads,
+            &["footprint", "render", "r_0402", "--out", "fp.svg"],
+        );
+        let svg =
+            blake3::hash(&std::fs::read(dir.join("fp.svg")).unwrap()).to_hex()[..32].to_owned();
+        let check = ryueda(&dir, threads, &["lib", "check", "--footprint", "r_0402"]);
+        let got = (made["footprint"].clone(), svg, check["footprints"].clone());
+        match &first {
+            None => first = Some(got),
+            Some(one) => assert_eq!(&got, one, "one thread and eight"),
+        }
+    }
+    let (file, svg, lint) = first.unwrap();
+    golden.json("footprint.authored", &file);
+    golden.got.insert("footprint.authored.svg".into(), svg);
+    golden.json("footprint.authored.lint", &lint);
 }

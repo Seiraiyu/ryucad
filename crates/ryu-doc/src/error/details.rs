@@ -155,6 +155,7 @@ details! {
         key("wanted", Any, "What would have been accepted."),
         alias("expected", "wanted"),
         key("known", Arr, "The names accepted."),
+        alias("accepts", "known"),
         key("feature", Str, "The feature at fault."),
         key("part", Str, "The part at fault."),
         key("solid", Str, "The solid at fault."),
@@ -251,6 +252,7 @@ details! {
     ],
     NotFound => [
         key("part", Str, "The part asked for."),
+        key("pad", Str, "The footprint pad asked for, by ID."),
         key("feature", Str, "The feature asked for."),
         key("solid", Str, "The solid asked for."),
         key("solids", Any, "The solids there are."),
@@ -612,6 +614,23 @@ details! {
     ],
     PourThermalStarved => [
         key("spokes", Num, "The thermal spokes that reach the pad."),
+    ],
+    FootprintPadsOverlap => [
+        key("pads", Arr, "The two pads, by ID."),
+        key("numbers", Arr, "Their numbers."),
+        key("uncertain", Bool, "Whether the verdict is uncertain."),
+    ],
+    FootprintPadNumberRepeated => [
+        key("number", Str, "The pad number."),
+        key("pads", Arr, "Its pads, by ID, one list per separate piece of copper."),
+    ],
+    FootprintCourtyardOpen => [
+        key("side", Str, "The courtyard's side: top or bottom."),
+    ],
+    FootprintNoReference => [],
+    FootprintPadUnmapped => [
+        key("pin", Str, "The symbol pin."),
+        key("pad", Str, "The pad number the footprint lacks."),
     ],
     DocumentNotFound => [
         key("document", Str, "The document asked for, by ID or number."),

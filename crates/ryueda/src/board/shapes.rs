@@ -550,6 +550,51 @@ pub(crate) fn part(
     (one.pads, one.courtyards.into_iter().next())
 }
 
+/// A footprint alone (ryueda 7.F), as a two-layer board draws it placed
+/// at the origin on top: its layers, pads, holes, courtyard and keepouts,
+/// for `footprint render` and the lint. Its reference reads `REF**` and
+/// its value its name, as KiCad shows a footprint on its own.
+pub fn footprint_alone(f: &Footprint) -> BoardShapes {
+    let o = Occ {
+        reference: "fp".into(),
+        refdes: Some("REF**".into()),
+        value: Some(f.name.clone()),
+        footprint_ref: None,
+        footprint: Some(f),
+        footprint_error: None,
+        nets: BTreeMap::new(),
+        dnp: false,
+    };
+    let place = Place {
+        at: Point::ORIGIN,
+        rot: Mdeg::new(0),
+        mirror: false,
+        scale: None,
+    };
+    let one = one(
+        "footprint",
+        &o,
+        f,
+        place,
+        preset::DEFAULT,
+        2,
+        &super::file::PartFields::default(),
+    );
+    let mut out = BoardShapes {
+        copper_layers: 2,
+        ..BoardShapes::default()
+    };
+    for (layer, owner, s) in one.layers {
+        out.layers.entry(layer).or_default().push((owner, s));
+    }
+    out.holes = one.holes;
+    out.pads = one.pads;
+    out.courtyards = one.courtyards;
+    out.keepouts = one.keepouts;
+    out.notices = one.notices;
+    out
+}
+
 fn note_missing(notices: &mut Vec<Fault>, o: &Occ, s: &Shape) {
     if !s.missing.is_empty() {
         notices.push(
@@ -1506,5 +1551,16 @@ pub(crate) mod tests {
                 .iter()
                 .all(|(_, it)| it.net.as_deref() == Some(net.as_str()))
         );
+    }
+    #[test]
+    fn a_footprint_alone_is_drawn_as_a_board_draws_it() {
+        let f = crate::footprint::tests::r0402();
+        let s = footprint_alone(&f);
+        assert_eq!(s.n(), 2);
+        assert_eq!(s.pads.len(), 2);
+        assert_eq!(s.pads[0].reference, "footprint:REF**/1");
+        assert!(s.layers["copper.top"].len() == 2 && s.layers.contains_key("courtyard.top"));
+        assert_eq!(s.courtyards.len(), 1);
+        assert!(s.notices.is_empty(), "{:?}", s.notices);
     }
 }
