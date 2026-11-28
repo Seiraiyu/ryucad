@@ -620,6 +620,15 @@ pub fn extent(block: &Block, layout: &crate::layout::Layout, sid: &str) -> i64 {
     (clipped.area() * 1000 / area.area().max(1)) as i64
 }
 
+/// A port as messages name it: its name (its net's), else its key (#1105).
+fn port_name(block: &Block, p: usize) -> String {
+    let part = &block.parts[p];
+    part.pins
+        .first()
+        .and_then(|x| x.net)
+        .map_or_else(|| part.key.clone(), |n| block.nets[n].name.clone())
+}
+
 /// The lint of a laid out block, sheet by sheet: findings in a fixed
 /// order (code, then what they name) and each sheet's score, under the
 /// default preferences.
@@ -896,7 +905,7 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
             {
                 found.push(f(
                     "sch_label_vertical",
-                    format!("port {} is drawn up the page", part.key),
+                    format!("port {} is drawn up the page", port_name(block, *p)),
                     vec![part.key.clone()],
                     json!({"side": s.pins[0].side.as_str()}),
                 ));
@@ -1351,7 +1360,11 @@ pub fn lint_with(block: &Block, out: &Outcome, prefs: &Prefs) -> (Vec<Finding>, 
             if turns > 0 {
                 found.push(f(
                     "sch_port_bent",
-                    format!("port {}'s wire turns {turns} times", part.key),
+                    format!(
+                        "port {}'s wire turns {}",
+                        port_name(block, *p),
+                        times(turns)
+                    ),
                     vec![part.key.clone()],
                     json!({"turns": turns}),
                 ));
@@ -2297,6 +2310,69 @@ pub fn try_fix(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #1105: a bent port is named by its name and its turns counted in
+    /// words; its reference stays the key.
+    #[test]
+    fn a_bent_port_is_named_by_its_name_and_counted_in_words() {
+        use crate::input::{Flow, NetKind};
+        use crate::testing::{net, port, resistor};
+        let key = "port:yoloofxts3";
+        let block = Block {
+            nets: vec![
+                net("rail:gnd", "GND", NetKind::Ground),
+                net(key, "OUT", NetKind::Signal),
+            ],
+            parts: vec![
+                resistor("r1", "R1", "10k", [Some(1), Some(0)]),
+                port(key, "OUT", Flow::Out, Some(1)),
+            ],
+            sheet: [400_000_000, 277_000_000],
+            ..Block::default()
+        };
+        let mut out = crate::engine::lay_out(&block).unwrap();
+        let p = block.part(key).unwrap();
+        let x = out.layout.placed[key].clone();
+        let end = crate::shape::Shape::of(
+            &block.parts[p],
+            crate::geom::Place::new(x.at, x.rotation, x.mirror),
+        )
+        .pins[0]
+            .end;
+        let g = crate::geom::GRID;
+        for (run, said) in [
+            (
+                vec![end, [end[0] + g, end[1]], [end[0] + g, end[1] + g]],
+                "port OUT's wire turns once",
+            ),
+            (
+                vec![
+                    end,
+                    [end[0] + g, end[1]],
+                    [end[0] + g, end[1] + g],
+                    [end[0] + 2 * g, end[1] + g],
+                ],
+                "port OUT's wire turns twice",
+            ),
+        ] {
+            let runs = out
+                .layout
+                .routes
+                .entry(key.into())
+                .or_default()
+                .entry(x.sheet.clone())
+                .or_default();
+            runs.retain(|r| r.first() != Some(&end) && r.last() != Some(&end));
+            runs.push(run);
+            let (found, _) = lint(&block, &out);
+            let f = found
+                .iter()
+                .find(|f| f.code == "sch_port_bent")
+                .expect("bent");
+            assert_eq!(f.message, said);
+            assert_eq!(f.refs, [key.to_owned()], "the reference stays the key");
+        }
+    }
 
     /// A fix that holds is kept; an `align` that moves nothing, or a fix
     /// that leaves the finding, is dropped.

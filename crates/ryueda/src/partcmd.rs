@@ -409,14 +409,37 @@ pub fn net_json(p: &Project, b: &BlockFiles, id: &Id) -> Result<Value> {
         .item
         .as_ref()
         .map_err(|e| e.clone().with("reference", &at))?;
+    let pins = write::users(p, &Node::Net(id.clone()), Some(&b.id));
+    let pin_names: Vec<String> = pins.iter().map(|r| port_named(p, b, r)).collect();
     Ok(json!({
         "reference": at,
         "path": part_path(&b.id, Part::Net, id),
         "net": n,
-        "pins": write::users(p, &Node::Net(id.clone()), Some(&b.id)),
+        "pins": pins,
+        "pin_names": pin_names,
         "faults": fault::list(&l.faults),
         "revision": b.revision,
     }))
+}
+
+/// A connection as people read it (#1105): an instance's port
+/// (`<block>/<instance>/<port>`) by the port's name, anything else (a
+/// component's pin, a port that doesn't read) as its reference.
+fn port_named(p: &Project, b: &BlockFiles, reference: &str) -> String {
+    let mut it = reference.splitn(3, '/');
+    let (Some(_), Some(iid), Some(port)) = (it.next(), it.next(), it.next()) else {
+        return reference.to_owned();
+    };
+    b.instances
+        .get(iid)
+        .and_then(|i| i.item.as_ref().ok())
+        .and_then(|i| p.conn.block(&i.of).ok())
+        .and_then(|c| c.block.item.as_ref().ok())
+        .and_then(|blk| blk.ports.get(port))
+        .map_or_else(
+            || reference.to_owned(),
+            |pt| format!("{}/{iid}/{}", b.id, pt.name),
+        )
 }
 
 /// The net a request names (`<block>/<net>`, the net by ID or name), as
@@ -1133,6 +1156,22 @@ pub fn tag(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #1105: a net's connections name an instance's port by its name, as
+    /// pin_names, beside the references.
+    #[test]
+    fn a_nets_pins_name_instance_ports_by_name() {
+        let (_dir, p) = crate::netlist::tests::project(&[]);
+        let v = net_show(&p, "top/sda").unwrap();
+        assert_eq!(
+            v["pins"],
+            serde_json::json!(["top/r1/1", "top/ch_a/sda", "top/ch_b/sda"])
+        );
+        assert_eq!(
+            v["pin_names"],
+            serde_json::json!(["top/r1/1", "top/ch_a/SDA", "top/ch_b/SDA"])
+        );
+    }
 
     /// `net.join`'s writes, worked out against a project alone: the test
     /// design's net `sda` joined into rail GND moves R1's pin 1 and both
