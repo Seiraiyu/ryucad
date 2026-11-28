@@ -24,7 +24,7 @@ pub struct Applied {
     pub pins_gone: Vec<String>,
 }
 
-fn op_error(i: usize, field: &str, msg: impl Into<String>) -> Error {
+pub(crate) fn op_error(i: usize, field: &str, msg: impl Into<String>) -> Error {
     let ptr = if field.is_empty() {
         format!("/ops/{i}")
     } else {
@@ -34,7 +34,7 @@ fn op_error(i: usize, field: &str, msg: impl Into<String>) -> Error {
 }
 
 /// Refuses fields an op doesn't take.
-fn only(o: &Map<String, Value>, i: usize, fields: &[&str]) -> Result<()> {
+pub(crate) fn only(o: &Map<String, Value>, i: usize, fields: &[&str]) -> Result<()> {
     match o.keys().find(|k| !fields.contains(&k.as_str())) {
         None => Ok(()),
         Some(k) => {
@@ -106,7 +106,7 @@ fn file_fields(
 }
 
 /// `into` read as a `T`, or the op's fault.
-fn typed<T: serde::de::DeserializeOwned>(
+pub(crate) fn typed<T: serde::de::DeserializeOwned>(
     into: Map<String, Value>,
     i: usize,
     what: &str,
@@ -151,7 +151,7 @@ fn existing_pin(o: &Map<String, Value>, i: usize, s: &Symbol) -> Result<String> 
     Ok(n)
 }
 
-fn offset(o: &Map<String, Value>, i: usize, unit: Unit) -> Result<[i64; 2]> {
+pub(crate) fn offset(o: &Map<String, Value>, i: usize, unit: Unit) -> Result<[i64; 2]> {
     let by = o
         .get("by")
         .ok_or_else(|| op_error(i, "by", "move by [dx, dy]"))?;

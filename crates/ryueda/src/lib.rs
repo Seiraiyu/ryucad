@@ -38,6 +38,7 @@ pub mod edit;
 pub mod erc;
 pub mod fault;
 pub mod footprint;
+pub mod fpedit;
 pub mod git;
 pub mod kicad;
 pub mod libcmd;

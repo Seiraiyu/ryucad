@@ -285,6 +285,20 @@ impl Shape {
         }
     }
 
+    /// Every point it is drawn through, to move (ryueda 7.F).
+    pub fn points_mut(&mut self) -> Vec<&mut Point> {
+        match self {
+            Shape::Line { start, end, .. } | Shape::Rect { start, end, .. } => vec![start, end],
+            Shape::Arc {
+                start, mid, end, ..
+            } => vec![start, mid, end],
+            Shape::Circle { center, .. } => vec![center],
+            Shape::Polygon { points, .. } => points.iter_mut().collect(),
+            Shape::Bezier { points, .. } => points.iter_mut().collect(),
+            Shape::Text { at, .. } => vec![at],
+        }
+    }
+
     /// Its sizes: widths, radii, text sizes.
     fn sizes(&self) -> Vec<i64> {
         match self {
