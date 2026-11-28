@@ -1,6 +1,6 @@
-# Scratch (#1133): never merged. On macOS: ryueda's watcher test 20 times,
-# ryu-session's tests, and 20 rounds of four clients starting one project's
-# daemon at once, counting the daemons left serving it.
+# Scratch (#1133): never merged. On macOS, ryueda's watcher test 60 times
+# as a plain loop (the shape that failed 3 in 30 before the fix): with the
+# fix (asserted), and at pre.3's commit (counted only).
 name: proof-1133
 on:
   push:
@@ -8,7 +8,7 @@ on:
 permissions:
   contents: read
 jobs:
-  macos:
+  fixed:
     runs-on: macos-latest
     timeout-minutes: 120
     steps:
@@ -19,30 +19,43 @@ jobs:
           add-rust-environment-hash-key: false
           shared-key: clippy
           save-if: false
-      - run: cargo build -p ryueda && cargo test -p ryueda --test cli --no-run
-      - name: ryu-session
+      - run: cargo test -p ryueda --test cli --no-run
+      - name: ryu-session (descriptors on macOS)
         run: cargo test -p ryu-session
-      - name: the watcher test, sampled when a call stalls
+      - name: the watcher tests, 60 times
         run: |
           fails=0
           for i in $(seq 1 60); do
-            cargo test -q -p ryueda --test cli watchers_hear_of_library_changes > out.txt 2>&1 &
-            t=$!
-            sampled=0; secs=0
-            while kill -0 $t 2>/dev/null; do
-              sleep 1; secs=$((secs + 1))
-              if [ $sampled = 0 ] && [ $secs -ge 8 ]; then
-                ps -axo pid=,etime=,command= | grep -E "[r]yueda (participants|--as watcher)" | while read pid et rest; do
-                  echo "== run $i: participants $pid stalled ($et)"
-                  sample $pid 2 -mayDie -file cli-$i.txt >/dev/null 2>&1; cat cli-$i.txt | grep -E "Thread_|ryu|std::|interprocess|read|write|connect|lock|wait" | head -60
-                  for d in $(pgrep -f "daemon run"); do
-                    echo "== daemon $d"; sample $d 2 -mayDie -file d-$i-$d.txt >/dev/null 2>&1; grep -E "Thread_|ryu|std::|interprocess|read|write|connect|lock|wait|accept" d-$i-$d.txt | head -150
-                  done
-                  touch stalled-$i
-                done
-                sampled=1
-              fi
-            done
-            if wait $t; then echo "run $i ok"; else fails=$((fails + 1)); echo "run $i FAILED"; grep -o "the watcher heard nothing.*" out.txt | cut -c1-600; fi
+            if cargo test -q -p ryueda --test cli watchers_hear > out.txt 2>&1; then
+              echo "run $i ok"
+            else
+              fails=$((fails + 1)); echo "run $i FAILED"; grep -E "panicked|heard nothing" out.txt | cut -c1-400
+            fi
           done
-          echo "watcher test: $((60 - fails)) of 60 ok"
+          echo "fixed: $((60 - fails)) of 60 ok"
+          [ "$fails" = 0 ]
+  unfixed:
+    runs-on: macos-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 5e0f631f3654b6aeae91ec397d20fc3b9269a5fb
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          add-rust-environment-hash-key: false
+          shared-key: clippy
+          save-if: false
+      - run: cargo test -p ryueda --test cli --no-run
+      - name: the watcher tests, 60 times (counted only)
+        run: |
+          fails=0
+          for i in $(seq 1 60); do
+            if cargo test -q -p ryueda --test cli watchers_hear > out.txt 2>&1; then
+              echo "run $i ok"
+            else
+              fails=$((fails + 1)); echo "run $i FAILED"
+            fi
+          done
+          echo "unfixed: $((60 - fails)) of 60 ok"
