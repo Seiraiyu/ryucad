@@ -52,9 +52,15 @@ fn window(root: &Path) -> Harness<'static, App> {
 
 /// Steps frames until `done` holds, 30 s at most.
 fn frames(h: &mut Harness<'static, App>, done: impl Fn(&App) -> bool) {
+    until(h, "", done);
+}
+
+/// [`frames`], saying which wait never settled (as #1138 did for
+/// ryucad-app's).
+fn until(h: &mut Harness<'static, App>, what: &str, done: impl Fn(&App) -> bool) {
     let end = Instant::now() + Duration::from_secs(30);
     while !done(h.state()) {
-        assert!(Instant::now() < end, "the window never got there");
+        assert!(Instant::now() < end, "the window never got there: {what}");
         h.step();
         std::thread::sleep(Duration::from_millis(20));
     }
@@ -463,15 +469,23 @@ fn a_conflicted_part_is_drawn_and_show_frames_it() {
         &[&["component", "edit", "breakout/r1", "--value", "6k8"]],
     );
     let mut h = window(&board);
-    frames(&mut h, |a| {
+    until(&mut h, "the value conflict, quiet", |a| {
         kinds(a).iter().any(|k| k == "value") && quiet(a)
     });
-    frames(&mut h, |a| {
+    until(&mut h, "the navigator's tree under breakout", |a| {
         a.opened().is_some_and(|w| {
             w.nav.design_ids().any(|d| {
                 let t = w.nav.tree(d);
                 t.block == "breakout" && !t.children.is_empty()
             })
+        })
+    });
+    until(&mut h, "the sheet drawn, with R1", |a| {
+        a.opened().is_some_and(|w| {
+            w.camera.is_some()
+                && w.scene
+                    .as_ref()
+                    .is_some_and(|s| s.owner("breakout/r1").is_some())
         })
     });
     let row = row_of(h.state(), "value");
@@ -480,11 +494,28 @@ fn a_conflicted_part_is_drawn_and_show_frames_it() {
         "{:?}",
         row.refs
     );
-    h.state_mut().opened_mut().unwrap().frame = None;
+    let whole = h.state().opened().unwrap().camera.unwrap().zoom;
+    let r1 = {
+        let sc = h.state().opened().unwrap().scene.as_ref().unwrap();
+        let b = sc.owners[sc.owner("breakout/r1").unwrap()]
+            .boxed
+            .expect("R1's box");
+        [(b[0][0] + b[1][0]) / 2.0, (b[0][1] + b[1][1]) / 2.0]
+    };
     h.state_mut().opened_mut().unwrap().show_conflict(&row);
-    frames(&mut h, |a| {
-        a.opened()
-            .is_some_and(|w| w.selection == row.refs && w.frame.is_some())
+    // The canvas takes the frame Show asks for on the next frame drawn,
+    // so what is seen is the camera it leaves: on R1, closer than the
+    // whole sheet.
+    until(&mut h, "Show framing R1", |a| {
+        a.opened().is_some_and(|w| {
+            w.selection == row.refs
+                && w.frame.is_none()
+                && w.camera.as_ref().is_some_and(|c| {
+                    c.zoom > whole * 1.5
+                        && (c.centre[0] - r1[0]).abs() < 1.0
+                        && (c.centre[1] - r1[1]).abs() < 1.0
+                })
+        })
     });
     let sc = h.state().opened().unwrap().scene.as_ref().unwrap();
     let r1 = sc.owner("breakout/r1").expect("R1 drawn while unsettled");
