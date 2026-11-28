@@ -724,7 +724,15 @@ fn attempt_adjusted(
                 .collect()
         };
         (kept, seeds) = seeds::retried(
-            &arr, &tries, &shortcut, &mut holds, narrowed, &whole_at, kept, seeds, m,
+            &arr,
+            &tries,
+            &shortcut,
+            &mut holds,
+            holds_pins_whole(which, adjusts),
+            &whole_at,
+            kept,
+            seeds,
+            m,
         );
         // Shells no outside face reaches take a seed each, once.
         if let Ok(k) = &kept {
@@ -1071,6 +1079,14 @@ fn ask_room(
         return None;
     }
     room(&clipped)
+}
+
+/// Whether a build's walk may hold pins whole (design 990, plan 24.B):
+/// a narrowed build that releases nothing. A first build has no pins,
+/// and a released build still `Ambiguous` refuses as before (Decision
+/// 8, "Released faces").
+fn holds_pins_whole(which: Build, adjusts: &near::Adjusts) -> bool {
+    which.narrowed() && near::released(adjusts).is_empty()
 }
 
 /// The pins a walk's failure lies at (design 919, plan 23.A), as

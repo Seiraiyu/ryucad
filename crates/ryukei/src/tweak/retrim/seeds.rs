@@ -188,7 +188,8 @@ pub(crate) fn walk_whole(
 /// try's failure `kept` and its `seeds`. First the seed retry (design 683,
 /// plan 21.C): where `shortcut` isn't empty and the failure is `Open`,
 /// `Ambiguous` or `Clipped`, [`walk_again`]. Then whole pins (design 990,
-/// plan 24.B): in a `narrowed` build still `Ambiguous`, [`walk_whole`]
+/// plan 24.B): where `hold_pins` (a narrowed build that releases
+/// nothing) and still `Ambiguous`, [`walk_whole`]
 /// with the pieces `whole_at` gives for the failing piece (the pins it
 /// lies at). Each answers only where it closes or halts.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
@@ -197,7 +198,7 @@ pub(crate) fn retried(
     tries: &[Vec<usize>],
     shortcut: &BTreeSet<usize>,
     holds_old: &mut dyn FnMut(usize) -> bool,
-    narrowed: bool,
+    hold_pins: bool,
     whole_at: &dyn Fn(usize) -> Vec<usize>,
     mut kept: Result<Vec<Option<bool>>, WalkError>,
     mut seeds: Vec<usize>,
@@ -213,7 +214,7 @@ pub(crate) fn retried(
         kept = r;
         seeds = fewer;
     }
-    if narrowed
+    if hold_pins
         && let Err(WalkError::Ambiguous { piece }) = kept
         && let Some((s, r)) = walk_whole(arr, tries, &whole_at(piece), m)
     {
@@ -636,9 +637,6 @@ mod tests {
         assert_eq!(r.unwrap(), vec![Some(false), Some(false), None, None]);
     }
 
-    /// Every piece of the pin is seeded, not one: the pin's two pieces
-    /// 1 and 4 (face 9) meet along edge 3, which working piece 5 also
-    /// takes back. Seeded alone, piece 1 still closes two ways.
     /// Plan 24.B: the seed retry comes before whole pins. Try 0 seeds
     /// piece 3 and shortcut piece 4, which over-uses edge 1 with seed 0;
     /// without piece 4 it closes through pieces 2 and 3. Try 1, the seed
@@ -681,7 +679,8 @@ mod tests {
         );
         assert_eq!(seeds, vec![0, 1]);
         assert!(kept.is_ok());
-        // Not narrowed: nothing is held whole.
+        // A build that may not hold pins (a first or a released one):
+        // nothing is held whole.
         let (kept, _) = retried(
             &a,
             &tries,
@@ -696,6 +695,9 @@ mod tests {
         assert!(matches!(kept, Err(WalkError::Ambiguous { .. })));
     }
 
+    /// Every piece of the pin is seeded, not one: the pin's two pieces
+    /// 1 and 4 (face 9) meet along edge 3, which working piece 5 also
+    /// takes back. Seeded alone, piece 1 still closes two ways.
     #[test]
     fn every_piece_of_the_pin_is_seeded() {
         let a = Arrangement {
