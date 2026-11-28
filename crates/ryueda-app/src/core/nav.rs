@@ -61,6 +61,9 @@ pub struct Navigator {
     /// of each block; a plain scene of a block clears them.
     counts: BTreeMap<String, BTreeMap<String, crate::core::scene::Counts>>,
     removed: BTreeMap<String, Vec<(String, String)>>,
+    /// Why a design's netlist was refused (a file mid-merge, #1103), until
+    /// one is answered.
+    refused: BTreeMap<String, String>,
 }
 
 fn s(v: &Value) -> String {
@@ -68,7 +71,8 @@ fn s(v: &Value) -> String {
 }
 
 impl Navigator {
-    /// `design.list`.
+    /// `design.list`, with each readable design's `root`: a design whose
+    /// netlist is refused keeps its tree (#1103). A netlist's root wins.
     pub fn designs(&mut self, v: &Value) {
         self.designs = v["designs"]
             .as_array()
@@ -83,6 +87,23 @@ impl Navigator {
                 )
             })
             .collect();
+        for d in v["designs"].as_array().into_iter().flatten() {
+            if let Some(r) = d["root"].as_str() {
+                self.roots
+                    .entry(s(&d["id"]))
+                    .or_insert_with(|| r.to_owned());
+            }
+        }
+    }
+
+    /// `netlist` of `design` refused: why, for Components to say.
+    pub fn netlist_refused(&mut self, design: &str, why: &str) {
+        self.refused.insert(design.to_owned(), why.to_owned());
+    }
+
+    /// Why `design`'s netlist was last refused, if it was.
+    pub fn refused(&self, design: &str) -> Option<&str> {
+        self.refused.get(design).map(String::as_str)
     }
 
     pub fn design_ids(&self) -> impl Iterator<Item = &str> {
@@ -91,6 +112,7 @@ impl Navigator {
 
     /// `netlist` of `design`: its root and every occurrence.
     pub fn netlist(&mut self, design: &str, v: &Value) {
+        self.refused.remove(design);
         self.roots.insert(design.to_owned(), s(&v["root"]));
         let mut rows = Vec::new();
         for o in v["occurrences"].as_array().into_iter().flatten() {
@@ -321,6 +343,19 @@ mod tests {
     use super::*;
     use crate::core::scene::{Scene, tests::small};
     use serde_json::json;
+
+    /// #1103: a design whose netlist is refused (a file mid-merge) keeps
+    /// its tree: its root comes from design.list.
+    #[test]
+    fn a_design_whose_netlist_is_refused_keeps_its_tree() {
+        let mut n = Navigator::default();
+        n.designs(&json!({"designs": [{"id": "d", "name": "Board", "root": "top", "faults": 0}]}));
+        assert_eq!(n.wanted_blocks(), ["top"]);
+        n.block(&json!({"reference": "top", "instances": [{"id": "a", "of": "div"}], "nets": []}));
+        let t = n.tree("d");
+        assert_eq!(t.label, "Board (top)");
+        assert_eq!(t.children[0].label, "a (div)");
+    }
 
     fn nav() -> Navigator {
         let mut n = Navigator::default();

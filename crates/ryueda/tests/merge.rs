@@ -350,6 +350,46 @@ fn a_value_conflict_is_recorded_listed_refused_and_settled() {
     }
 }
 
+/// #1103: during a value conflict the conflicted component is drawn, at
+/// the value its file holds (ours), marked unsettled; check, the netlist
+/// and ERC still refuse the file.
+#[test]
+fn a_conflicted_component_is_drawn_unsettled_and_still_refused() {
+    for daemon in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let run = dir.path().join("run");
+        let top = dir.path().join("repo");
+        std::fs::create_dir_all(&top).unwrap();
+        let board = value_branches(&top, &run);
+        let (merged, _) = git_try(&top, &[], &["merge", "-q", "theirs"]);
+        assert!(!merged);
+        let sc = ok(&board, &run, daemon, &["scene", "--block", "breakout"]);
+        let owners = sc["owners"].as_array().unwrap();
+        let r1: Vec<&Value> = owners
+            .iter()
+            .filter(|o| o["ref"] == "breakout/r1")
+            .collect();
+        assert_eq!(r1.len(), 1, "R1 drawn: {owners:?}");
+        assert_eq!(r1[0]["unsettled"], true, "{:?}", r1[0]);
+        assert!(
+            owners
+                .iter()
+                .filter(|o| o["ref"] != "breakout/r1")
+                .all(|o| o.get("unsettled").is_none()),
+            "only R1 is unsettled"
+        );
+        assert!(sc.to_string().contains("10k"), "ours' value drawn");
+        let (code, c) = ryueda(&board, &run, daemon, &["check"]);
+        assert_eq!(code, 1, "{c}");
+        assert!(c.to_string().contains("merge_conflict"), "{c}");
+        let (code, n) = ryueda(&board, &run, daemon, &["netlist"]);
+        assert_ne!(code, 0, "the netlist is refused: {n}");
+        if daemon {
+            ok(&board, &run, true, &["daemon", "stop"]);
+        }
+    }
+}
+
 #[test]
 fn rebase_and_cherry_pick_stop_on_a_record_and_go_on_once_settled() {
     let dir = tempfile::tempdir().unwrap();
