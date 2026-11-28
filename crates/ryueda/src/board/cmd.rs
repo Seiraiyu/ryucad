@@ -399,16 +399,18 @@ pub fn ratsnest(
         None => None,
     };
     let (_, occs) = occ::occurrences(p, &file.design)?;
+    // A part by its label (`R1`) or its occurrence path (`c0/r1`): its
+    // pads' references are by label either way.
     let prefix = match reference {
         Some(r) => {
-            if !occs.iter().any(|o| o.label() == r || o.reference == r) {
+            let Some(o) = occs.iter().find(|o| o.label() == r || o.reference == r) else {
                 return Err(crate::error::Error::new(
                     crate::error::Code::NotFound,
                     format!("board {id} has no part {r}"),
                 )
                 .with("reference", r));
-            }
-            Some(format!("{id}:{r}/"))
+            };
+            Some(format!("{id}:{}/", o.label()))
         }
         None => None,
     };

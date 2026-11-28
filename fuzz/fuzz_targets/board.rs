@@ -382,10 +382,11 @@ fn read(files: &BTreeMap<String, Vec<u8>>, path: &str) -> Option<Value> {
 
 /// One edit to the board's files: a track added, moved or removed; a
 /// placement moved or turned; a via added or removed; a pour's
-/// `min_width_nm` changed.
+/// `min_width_nm` changed; or the design alone edited, a component on N1
+/// added unplaced or removed.
 fn edit(files: &mut BTreeMap<String, Vec<u8>>, b: &mut Bytes, nets: &[String]) {
     const LAYERS: [&str; 3] = ["top", "bottom", "in1"];
-    match b.next() % 4 {
+    match b.next() % 5 {
         0 => {
             let path = format!("boards/f/tracks/t{}.json", b.next() % 9);
             match (read(files, &path), b.next() % 3) {
@@ -432,11 +433,18 @@ fn edit(files: &mut BTreeMap<String, Vec<u8>>, b: &mut Bytes, nets: &[String]) {
                     "drill_nm": b.length(), "diameter_nm": b.length()}));
             }
         }
-        _ => {
+        3 => {
             let path = format!("boards/f/pours/p{}.json", b.next() % 3);
             if let Some(mut pour) = read(files, &path) {
                 pour["min_width_nm"] = json!(b.length());
                 put(files, &path, "ryueda.pour", pour);
+            }
+        }
+        _ => {
+            let path = "blocks/top/components/x0.json";
+            if files.remove(path).is_none() {
+                put(files, path, "ryueda.component",
+                    json!({"of": {"id": "r"}, "refdes": "R9", "pins": {"1": "n1", "2": "n1"}}));
             }
         }
     }

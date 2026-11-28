@@ -13,7 +13,8 @@ use std::sync::Arc;
 /// How an update went.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Update {
-    /// Nothing the board derives from changed.
+    /// Nothing the board derives from changed: its shapes, copper and
+    /// findings held (the whole-board rules ran again to say so).
     Same,
     /// Edited in place.
     Edited,
@@ -76,9 +77,26 @@ impl Live {
                 .all(|(k, (h, _))| self.pieces.by.get(k).is_some_and(|(g, _)| g == h))
             && s.pours == self.check().shapes.pours;
         if same {
+            // The copper and the shapes held, but the whole-board rules
+            // read the design too (unplaced parts, constraints): they run
+            // again, and the scoped rules keep every finding, judging an
+            // empty dirty set (a review of 7.E found a component added
+            // to the schematic left `board_unplaced` stale).
+            let _stage = crate::profile::stage("live.recheck");
+            let old = self.check().clone();
+            let dirty = drc::Dirty::default();
+            let c = drc::check_with(
+                p,
+                b,
+                old.shapes.clone(),
+                old.conn.clone(),
+                Some((old.raw.as_slice(), &dirty)),
+            )?;
+            let moved = c.findings != old.findings;
+            self.check = Some(Arc::new(c));
             self.pieces = pieces;
-            self.dirty = Some(drc::Dirty::default());
-            return Ok(Update::Same);
+            self.dirty = Some(dirty);
+            return Ok(if moved { Update::Edited } else { Update::Same });
         }
         let board = b.id.to_string();
         let old_shapes = self.check().shapes.clone();
@@ -242,14 +260,36 @@ fn rules_key(p: &Project, b: &BoardFiles) -> [u8; 32] {
     *h.finalize().as_bytes()
 }
 
-/// What a check says, as one string to compare: its findings, islands
-/// and uncertain contacts.
+/// What a check says, as one string to compare: its findings, islands,
+/// uncertain contacts and fills (each pour's polygons, regions' places,
+/// islands removed, uncertain regions and thermals; not the tiles and
+/// grown obstacles it keeps for the next fill).
 pub fn said(c: &BoardCheck) -> String {
+    let fills: Vec<String> = c
+        .shapes
+        .pours
+        .iter()
+        .map(|f| {
+            format!(
+                "{} {} {} {:?} {:?} {:?} {} {:?} {:?}",
+                f.id,
+                f.net,
+                f.layer,
+                f.rules,
+                f.polygons,
+                f.places,
+                f.islands_removed,
+                f.uncertain,
+                f.thermals
+            )
+        })
+        .collect();
     format!(
-        "{}\n{:?}\n{:?}",
+        "{}\n{:?}\n{:?}\n{}",
         serde_json::to_string(&c.findings).unwrap_or_default(),
         c.conn.copper.islands(),
-        c.conn.copper.uncertain()
+        c.conn.copper.uncertain(),
+        fills.join("\n")
     )
 }
 

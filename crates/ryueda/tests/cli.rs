@@ -6642,6 +6642,10 @@ fn ratsnest_from_the_cli() {
     assert_eq!(scl["connections"].as_array().unwrap().len(), 0, "{scl}");
     let u1 = p.ok(&["board", "ratsnest", id, "--ref", "U1"]);
     assert!(!u1["connections"].as_array().unwrap().is_empty(), "{u1}");
+    // By its occurrence path too: the same connections (a review of 7.E
+    // found the path validated and then matched nothing).
+    let path = p.ok(&["board", "ratsnest", id, "--ref", "s1/u1"]);
+    assert_eq!(path["connections"], u1["connections"], "{path}");
     // Drawn over the layers, with the open net's findings marked.
     let r = p.ok(&[
         "board",

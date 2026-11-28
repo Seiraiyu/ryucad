@@ -557,7 +557,9 @@ fn under(files: &BTreeMap<String, Vec<u8>>, folder: &str) -> Vec<String> {
 /// One seeded edit of a generated board's files (ryueda 7.E): `kind`
 /// picks a track added (0), moved (1) or removed (2), a part moved (3) or
 /// turned (4), a via added or removed (5), or a pour added or its least
-/// width changed (6). Nothing to edit leaves the files as they are.
+/// width changed (6), or the design edited without the board (7): an
+/// extra component on `n1`, added unplaced or removed again. Nothing to
+/// edit leaves the files as they are.
 pub fn edit(files: &mut BTreeMap<String, Vec<u8>>, s: &Spec, kind: u64, r: &mut u64) {
     let pick = |v: &[String], r: &mut u64| -> Option<String> {
         (!v.is_empty()).then(|| v[(next(r) % v.len() as u64) as usize].clone())
@@ -632,6 +634,27 @@ pub fn edit(files: &mut BTreeMap<String, Vec<u8>>, s: &Spec, kind: u64, r: &mut 
                 &format!("boards/main/vias/{id}.json"),
                 "ryueda.via",
                 json!({"net": tv["net"], "at": [at[0], at[1]], "drill_nm": s.via.0, "diameter_nm": s.via.1}),
+            );
+        }
+        7 => {
+            let extra: Vec<String> = files
+                .keys()
+                .filter(|k| k.starts_with("blocks/ch/components/x"))
+                .cloned()
+                .collect();
+            if let Some(x) = pick(&extra, r) {
+                files.remove(&x);
+                return;
+            }
+            if !files.contains_key("blocks/ch/nets/n1.json") {
+                return;
+            }
+            let n = next(r) % 50;
+            put_in(
+                files,
+                &format!("blocks/ch/components/x{n}.json"),
+                "ryueda.component",
+                json!({"of": {"id": "r"}, "refdes": format!("R{}", 900 + n), "pins": {"1": "n1", "2": "n1"}}),
             );
         }
         _ => {
