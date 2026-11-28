@@ -6856,3 +6856,44 @@ fn a_footprint_is_edited_and_its_boards_are_checked_again() {
         "{e}"
     );
 }
+
+/// Footprints by command through the daemon: each write is in the
+/// activity log, undone and redone, and a watcher of `project` hears of
+/// it (ryueda 7.F).
+#[test]
+fn footprint_writes_undo_and_redo_through_the_daemon() {
+    let p = Pair::projects();
+    p.ok(&["footprint", "create", "Test_Pad", "--ops", PAD_FP]);
+    let path = p.daemon.join("board/library/footprints/test_pad.json");
+    assert!(path.exists());
+    let (code, v) = p.run_in(
+        &p.daemon,
+        "board",
+        &["footprint", "edit", "test_pad", "--description", "d"],
+    );
+    assert_eq!(code, 0, "{v}");
+    let log = p.run_in(&p.daemon, "board", &["history"]).1;
+    let methods: Vec<&str> = log["result"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["method"].as_str().unwrap())
+        .collect();
+    assert!(
+        methods.contains(&"footprint.create") && methods.contains(&"footprint.edit"),
+        "{log}"
+    );
+    assert_eq!(p.run_in(&p.daemon, "board", &["undo"]).0, 0);
+    let shown = p
+        .run_in(&p.daemon, "board", &["footprint", "show", "test_pad"])
+        .1;
+    assert_eq!(
+        shown["result"]["footprint"].get("description"),
+        None,
+        "{shown}"
+    );
+    assert_eq!(p.run_in(&p.daemon, "board", &["undo"]).0, 0);
+    assert!(!path.exists(), "undo takes the create back");
+    assert_eq!(p.run_in(&p.daemon, "board", &["redo"]).0, 0);
+    assert!(path.exists());
+}
