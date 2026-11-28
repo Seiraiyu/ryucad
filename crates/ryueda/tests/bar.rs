@@ -31,6 +31,18 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 /// The bar, or ten times it on a machine not set aside for measuring.
+/// A bar the owner accepted as unmet (ryueda 7.E, option (a) of
+/// 2026-11-28): with `RYUEDA_BARS=1` a miss is printed with the issues
+/// that track it, not failed; loose, it is asserted ten times over as
+/// every bar is.
+fn accepted(got: Duration, want: Duration, issues: &str) {
+    if std::env::var("RYUEDA_BARS").is_ok_and(|v| v == "1") && got >= want {
+        println!("  unmet, accepted in ryueda 7.E: {got:?} against {want:?} ({issues})");
+    } else {
+        assert!(got < bar(want), "{got:?}");
+    }
+}
+
 fn bar(d: Duration) -> Duration {
     if std::env::var("RYUEDA_BARS").is_ok_and(|v| v == "1") {
         d
@@ -869,7 +881,9 @@ fn a_generated_board_checks_and_answers_a_write_within_its_bars() {
 /// nothing, loaded and checked (fills included) in 3 s; through a warm
 /// daemon, a track on the top pour (refilled) with its delta in 150 ms,
 /// and a part on the `in1` plane's net moved in 250 ms; the `in1` plane
-/// filled alone in 500 ms.
+/// filled alone in 500 ms. The owner accepted all four as unmet in 7.E
+/// ([`accepted`]): the booleans are #1112, the per-write floors #1126 to
+/// #1130.
 #[test]
 #[cfg_attr(
     debug_assertions,
@@ -894,7 +908,7 @@ fn a_scale_board_is_checked_and_edited_within_its_bars() {
         c.shapes.tracks.len(),
         c.shapes.pours.len()
     );
-    assert!(cold < bar(Duration::from_secs(3)), "{cold:?}");
+    accepted(cold, Duration::from_secs(3), "#1112");
     // The in1 plane alone, on shapes already built.
     let rules = ryueda::board::rules::of(&p, &p.boards[&id]).unwrap();
     let file = p.boards[&id].board.item.as_ref().unwrap();
@@ -912,7 +926,7 @@ fn a_scale_board_is_checked_and_edited_within_its_bars() {
         "scale board: the in1 plane, {} regions, filled in {plane:?}",
         f[0].regions.len()
     );
-    assert!(plane < bar(Duration::from_millis(500)), "{plane:?}");
+    accepted(plane, Duration::from_millis(500), "#1112");
     // Through a warm daemon.
     let run = dir.path().join("run");
     let ryueda = warm(&board, &run, dir.path());
@@ -953,7 +967,7 @@ fn a_scale_board_is_checked_and_edited_within_its_bars() {
         worst = worst.max(t.elapsed());
     }
     println!("scale board: a top track write, its pour refilled, with its delta: worst {worst:?}");
-    assert!(worst < bar(Duration::from_millis(150)), "{worst:?}");
+    accepted(worst, Duration::from_millis(150), "#1126 to #1130, #1112");
     // Part 4, on the in1 plane's net, moved a little.
     let occ4 = spec.occurrence(4);
     let refdes = ryueda(&["board", "show", "main"])["occurrences"]
@@ -979,7 +993,7 @@ fn a_scale_board_is_checked_and_edited_within_its_bars() {
         worst = worst.max(t.elapsed());
     }
     println!("scale board: a part on the in1 plane's net moved: worst {worst:?}");
-    assert!(worst < bar(Duration::from_millis(250)), "{worst:?}");
+    accepted(worst, Duration::from_millis(250), "#1126 to #1130, #1112");
     ryueda(&["daemon", "stop"]);
 }
 
