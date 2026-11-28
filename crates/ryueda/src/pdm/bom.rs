@@ -518,11 +518,12 @@ pub fn diff(
     let (from, to) = (from.unwrap_or("HEAD"), to.unwrap_or("working"));
     let (a, _, ca) = side(session, &design, Some(from))?;
     let (b, config, cb) = side(session, &design, Some(to))?;
-    let mut v = ryupdm::lines::diff(
+    let mut v = ryupdm::lines::diff_pairing(
         a.as_deref().unwrap_or_default(),
         b.as_deref().unwrap_or_default(),
         &config,
         &COMPARED,
+        &["refdes", "dnp"],
     );
     v["schema"] = serde_json::json!(ryupdm::lines::SCHEMA);
     v["design"] = serde_json::json!(design);
